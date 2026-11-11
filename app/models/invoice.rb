@@ -124,7 +124,9 @@ class Invoice < ApplicationRecord
   end
 
   def update_timesheet_entry_status!
-    TimesheetEntry.kept.where(id: invoice_timesheet_entry_ids).update!(bill_status: :billed)
+    Timekeeping::Gateway.call(
+      Timekeeping::Gateway::MarkBilled.new(entries: TimesheetEntry.kept.where(id: invoice_timesheet_entry_ids))
+    )
   end
 
   def create_checkout_session!(success_url:, cancel_url:)
@@ -198,11 +200,16 @@ class Invoice < ApplicationRecord
     end
 
     def lock_timesheet_entries
-      TimesheetEntry.in_workspace(company).where(id: invoice_timesheet_entry_ids).update!(locked: true)
+      change_timesheet_entry_locks(true)
     end
 
     def unlock_timesheet_entries
-      TimesheetEntry.in_workspace(company).where(id: invoice_timesheet_entry_ids).update!(locked: false)
+      change_timesheet_entry_locks(false)
+    end
+
+    def change_timesheet_entry_locks(locked)
+      entries = TimesheetEntry.in_workspace(company).where(id: invoice_timesheet_entry_ids)
+      Timekeeping::Gateway.call(Timekeeping::Gateway::SetLocked.new(entries:, locked:))
     end
 
     def invoice_timesheet_entry_ids

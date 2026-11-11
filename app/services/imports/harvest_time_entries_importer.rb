@@ -459,20 +459,23 @@ module Imports
       end
 
       def create_entry(row)
-        project = row[:project_plan][:record]
-        entry = TimesheetEntry.create!(
-          project:,
-          user: row[:user],
-          duration: row[:duration],
-          work_date: row[:work_date],
-          note: row[:note],
-          bill_status: row[:bill_status] == "billed" ? "unbilled" : row[:bill_status],
-          source: "import",
-          source_metadata: { tool: "harvest" }
-        ) do |timesheet_entry|
-          timesheet_entry.association(:company).target = company
-        end
-        entry.update!(bill_status: :billed) if row[:bill_status] == "billed"
+        billed = row[:bill_status] == "billed"
+        Timekeeping::Gateway.call(
+          Timekeeping::Gateway::ImportEntry.new(
+            company:,
+            billed:,
+            attributes: {
+              project: row[:project_plan][:record],
+              user: row[:user],
+              duration: row[:duration],
+              work_date: row[:work_date],
+              note: row[:note],
+              bill_status: billed ? "unbilled" : row[:bill_status],
+              source: "import",
+              source_metadata: { tool: "harvest" }
+            }
+          )
+        )
         @imported_rows += 1
       end
 

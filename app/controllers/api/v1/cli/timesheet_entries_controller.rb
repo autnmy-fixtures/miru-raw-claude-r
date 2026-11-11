@@ -4,16 +4,9 @@ class Api::V1::Cli::TimesheetEntriesController < Api::V1::Cli::BaseController
   def create
     authorize TimesheetEntry
 
-    timesheet_entry = project.timesheet_entries.new(
-      duration: cli_timesheet_entry_params[:duration_minutes],
-      work_date: cli_timesheet_entry_params[:work_date],
-      note: cli_timesheet_entry_params[:note],
-      bill_status: cli_timesheet_entry_params[:bill_status],
-      source: "cli",
-      source_metadata: cli_timesheet_entry_params[:source_metadata]
+    timesheet_entry = Timekeeping::Gateway.call(
+      Timekeeping::Gateway::CreateEntry.new(project:, user: current_user, attributes: create_attributes)
     )
-    timesheet_entry.user = current_user
-    timesheet_entry.save!
 
     render json: {
       notice: I18n.t("timesheet_entry.create.message"),
@@ -24,8 +17,9 @@ class Api::V1::Cli::TimesheetEntriesController < Api::V1::Cli::BaseController
   def update
     authorize current_timesheet_entry
 
-    current_timesheet_entry.project = project
-    current_timesheet_entry.update!(update_attributes)
+    Timekeeping::Gateway.call(
+      Timekeeping::Gateway::UpdateEntry.new(entry: current_timesheet_entry, project:, attributes: update_attributes)
+    )
 
     render json: {
       notice: I18n.t("timesheet_entry.update.message"),
@@ -36,7 +30,7 @@ class Api::V1::Cli::TimesheetEntriesController < Api::V1::Cli::BaseController
   def destroy
     authorize current_timesheet_entry
 
-    current_timesheet_entry.discard!
+    Timekeeping::Gateway.call(Timekeeping::Gateway::DiscardEntry.new(entry: current_timesheet_entry))
 
     render json: { notice: I18n.t("timesheet_entry.destroy.message") }, status: 200
   end
@@ -60,6 +54,17 @@ class Api::V1::Cli::TimesheetEntriesController < Api::V1::Cli::BaseController
         :bill_status,
         source_metadata: {}
       )
+    end
+
+    def create_attributes
+      {
+        duration: cli_timesheet_entry_params[:duration_minutes],
+        work_date: cli_timesheet_entry_params[:work_date],
+        note: cli_timesheet_entry_params[:note],
+        bill_status: cli_timesheet_entry_params[:bill_status],
+        source: "cli",
+        source_metadata: cli_timesheet_entry_params[:source_metadata]
+      }
     end
 
     def update_attributes

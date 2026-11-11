@@ -28,25 +28,28 @@ class Api::V1::TimesheetEntryController < Api::V1::ApplicationController
 
   def create
     authorize TimesheetEntry
-    timesheet_entry = current_project.timesheet_entries.new(timesheet_entry_params)
-    timesheet_entry.user = timesheet_entry_user
+    timesheet_entry = Timekeeping::Gateway.call(
+      Timekeeping::Gateway::CreateEntry.new(project: current_project, attributes: timesheet_entry_params, user: timesheet_entry_user)
+    )
     render json: {
       notice: I18n.t("timesheet_entry.create.message"),
       entry: timesheet_entry.snippet
-    } if timesheet_entry.save!
+    }
   end
 
   def update
     authorize current_timesheet_entry
-    current_timesheet_entry.project = current_project
-    current_timesheet_entry.update!(timesheet_entry_params)
+    Timekeeping::Gateway.call(
+      Timekeeping::Gateway::UpdateEntry.new(entry: current_timesheet_entry, project: current_project, attributes: timesheet_entry_params)
+    )
     render json: { notice: I18n.t("timesheet_entry.update.message"), entry: current_timesheet_entry.snippet },
       status: 200
   end
 
   def destroy
     authorize current_timesheet_entry
-    render json: { notice: I18n.t("timesheet_entry.destroy.message") } if current_timesheet_entry.discard!
+    Timekeeping::Gateway.call(Timekeeping::Gateway::DiscardEntry.new(entry: current_timesheet_entry))
+    render json: { notice: I18n.t("timesheet_entry.destroy.message") }
   end
 
   private

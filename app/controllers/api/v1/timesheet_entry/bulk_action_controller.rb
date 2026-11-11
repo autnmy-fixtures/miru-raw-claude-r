@@ -24,7 +24,7 @@ class Api::V1::TimesheetEntry::BulkActionController < Api::V1::ApplicationContro
       }, status: 403
     end
 
-    updated_entries.update(project_id: target_project.id)
+    Timekeeping::Gateway.call(Timekeeping::Gateway::BulkMove.new(entries: updated_entries, project: target_project))
     entries = TimesheetEntriesPresenter.new(updated_entries).group_snippets_by_work_date
     render json: { notice: I18n.t("timesheet_entry.update.message"), entries: }, status: 200
   end
@@ -43,7 +43,7 @@ class Api::V1::TimesheetEntry::BulkActionController < Api::V1::ApplicationContro
         )
       }, status: 403
     end
-    discarded_entries = entries_to_discard.discard_all
+    discarded_entries = Timekeeping::Gateway.call(Timekeeping::Gateway::BulkDiscard.new(entries: entries_to_discard))
     if discarded_entries.any?
       render json: { notice: I18n.t("timesheet_entry.destroy.message") }
     else
