@@ -42,8 +42,9 @@ RSpec.describe "Timekeeping contract schemas" do
   describe "the entry the contracts carry" do
     let(:fields) { contracts.document(:common).dig("$defs", "entry_fields") }
 
-    it "has every column of timesheet_entries but id, all required" do
-      expect(fields["properties"].keys).to match_array(TimesheetEntry.column_names - ["id"])
+    # id and version travel beside the entry's fields, as entry_id and version.
+    it "has every column of timesheet_entries but id and version, all required" do
+      expect(fields["properties"].keys).to match_array(TimesheetEntry.column_names - %w[id version])
       expect(fields["required"]).to match_array(fields["properties"].keys)
     end
 
@@ -59,7 +60,7 @@ RSpec.describe "Timekeeping contract schemas" do
       entry = create(:timesheet_entry, duration: 90.7, source_metadata: { "tool" => "cli" })
       snapshot = JSON.parse({
         "type" => "timekeeping.entry_snapshot.v1", "entry_id" => entry.id, "version" => 1, "company_id" => entry.company.id,
-        "data" => entry.attributes.except("id")
+        "data" => entry.attributes.except("id", "version")
       }.to_json)
 
       expect(contracts.validate!(:entry_snapshot, "#/$defs/entry_snapshot", snapshot).dig("data", "duration")).to eq(90.7)

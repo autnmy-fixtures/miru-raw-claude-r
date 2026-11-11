@@ -47,6 +47,11 @@ gives the same reservations.
 JSON Schema 2020-12. All three files reference the shared definitions in `common.json`. Changes within
 v1 are additive (§5.1).
 
+The existing application reads them at run time through `Timekeeping::Contracts`
+(`app/services/timekeeping/contracts.rb`), and so do the consumer-side fakes. The projection endpoint
+(`Timekeeping::EntrySnapshotsController`) validates every delivery against `entry_snapshot.json` before
+`Timekeeping::ProjectionConsumer` applies it.
+
 | File | Contract | Provider | Consumer | Consumer-side fake |
 |---|---|---|---|---|
 | `contracts/v1/entry_api.json` | Entry API (§5.2) and the user token (§6.1) | Timekeeping | Write gateway | `TimekeepingContracts::FakeTimekeeping` |

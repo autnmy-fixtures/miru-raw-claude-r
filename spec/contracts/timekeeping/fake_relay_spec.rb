@@ -3,9 +3,10 @@
 require "rails_helper"
 
 # The consumer-side fake of the relay holds to the entry snapshot contract
-# (docs/architecture/timekeeping-soa.md §5.4, §12.3). The projection consumer
-# does not exist yet, so a minimal consumer here applies by (entry_id, version)
-# as the contract states, which shows what a batch the fake sends looks like.
+# (docs/architecture/timekeeping-soa.md §5.4, §12.3). A minimal consumer here
+# applies by (entry_id, version) as the contract states, so the fake is checked
+# on its own; spec/requests/timekeeping/entry_snapshots_spec.rb delivers it to
+# the real projection consumer.
 RSpec.describe TimekeepingContracts::FakeRelay do
   subject(:relay) { described_class.new }
 
@@ -37,7 +38,7 @@ RSpec.describe TimekeepingContracts::FakeRelay do
   it "builds a snapshot with every column, and refuses one that misses a column without a default" do
     snapshot = relay.snapshot(entry_id: 101, version: 1, **columns)
 
-    expect(snapshot["data"].keys).to match_array(TimesheetEntry.column_names - ["id"])
+    expect(snapshot["data"].keys).to match_array(TimesheetEntry.column_names - %w[id version])
     expect { relay.snapshot(entry_id: 101, version: 1, **columns.except(:work_date)) }.to raise_error(TimekeepingContracts::Violation, /work_date/)
   end
 
