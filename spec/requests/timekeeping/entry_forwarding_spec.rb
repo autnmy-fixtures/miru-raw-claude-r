@@ -4,8 +4,8 @@ require "rails_helper"
 
 # Entry writes forwarded to Timekeeping (docs/architecture/timekeeping-soa.md
 # §3.1, §5.2, §6.1), through the real entry points of W1 web and mobile, W2
-# bulk, W3 CLI, W3a MCP, W4 agent and W6 agent destroy, against the
-# consumer-side fake of Timekeeping.
+# bulk, W3 CLI, W3a MCP, W4 agent, W5 Harvest import and W6 agent destroy,
+# against the consumer-side fake of Timekeeping.
 # Under `timekeeping` each write reaches the owner with its writer's claims,
 # answers today's public JSON from the owner's entry, and writes nothing to
 # timesheet_entries, which is the projection with one writer (§3.2, §12.2).
@@ -279,6 +279,76 @@ RSpec.describe "Timekeeping entry forwarding", type: :request do
         expect(response).to have_http_status(:unprocessable_entity)
         expect(fake.calls).to be_empty
         expect(fake.entry(foreign.id)["discarded_at"]).to be_nil
+      end
+    end
+
+    describe "W5 Harvest import" do
+      let(:data_import) { create(:data_import, company: tenant_a.company, user: tenant_a.admin, options: {}) }
+
+      before do
+        %w[Paul\ Connors Jane\ Doe].each do |name|
+          first_name, last_name = name.split
+          user = create(:user, first_name:, last_name:, current_workspace_id: tenant_a.company.id)
+          create(:employment, company: tenant_a.company, user:)
+        end
+      end
+
+      def attach(contents) = data_import.file.attach(io: StringIO.new(contents), filename: "harvest.csv", content_type: "text/csv")
+
+      def import! = without_projection_writes { Imports::HarvestTimeEntriesImporter.new(data_import).process }
+
+      def harvest_rows(count, hours: 1)
+        "Date,Client,Project,Hours,First Name,Last Name,Notes\n" +
+          Array.new(count) { |index| "2026-01-01,Acme LLC,Website,#{hours},Paul,Connors,Row #{index}\n" }.join
+      end
+
+      it "writes every row in Timekeeping as the system import writer, billed rows billed (§3.4)" do
+        attach(Rails.root.join("spec/fixtures/files/harvest_detailed_time.csv").read)
+
+        import!
+
+        expect(data_import.reload).to have_attributes(status: "completed", imported_rows: 11, failed_rows: 0)
+        expect(fake.calls.map(&:operation)).to eq([:import_batch])
+        expect(fake.calls.sole.claims).to include("sub" => "system", "writer" => "import", "company_id" => tenant_a.company.id)
+        rows = fake.calls.sole.input.fetch("rows")
+        expect(rows.size).to eq(11)
+        expect(rows.pluck("bill_status")).to include("billed", "unbilled", "non_billable")
+        expect((1..11).map { |id| fake.entry(id)&.fetch("company_id") }).to all(eq(tenant_a.company.id))
+      end
+
+      it "sends at most 500 rows a batch, numbered from 1 under one import id" do
+        attach(harvest_rows(501))
+
+        import!
+
+        expect(data_import.reload).to have_attributes(status: "completed", imported_rows: 501)
+        expect(fake.calls.map { |call| call.input.fetch("rows").size }).to eq([500, 1])
+        expect(fake.calls.map { |call| call.params.fetch("n") }).to eq(%w[1 2])
+        expect(fake.calls.map { |call| call.params.fetch("import_id") }.uniq).to contain_exactly(start_with("#{data_import.id}-"))
+      end
+
+      it "records a row the owner rejects as today's row error, and keeps the rest of its batch" do
+        attach(harvest_rows(3))
+        WebMock::API.stub_request(:post, %r{/internal/v1/imports/[^/]+/batches/1\z}).to_return(
+          status: 200, headers: { "Content-Type" => "application/json" },
+          body: JSON.generate(
+            "created_ids" => [1, 3],
+            "failed_rows" => [{ "index" => 1, "errors" => { "duration" => ["must be less than or equal to 6000000"] } }]
+          )
+        )
+
+        import!
+
+        expect(data_import.reload).to have_attributes(status: "completed", imported_rows: 2, failed_rows: 1)
+        expect(data_import.row_errors).to eq([{ "row" => 3, "message" => "Duration must be less than or equal to 6000000" }])
+      end
+
+      it "fails the import with today's retry message when the generation moved (§9.3)" do
+        attach(harvest_rows(1))
+        fake.fail_next(:import_batch, status: 409, slug: "stale-generation", retryable: false)
+
+        expect { import! }.to raise_error(Timekeeping::Ownership::Moving)
+        expect(data_import.reload).to have_attributes(status: "failed", error_message: I18n.t("imports.errors.ownership_moving"))
       end
     end
 

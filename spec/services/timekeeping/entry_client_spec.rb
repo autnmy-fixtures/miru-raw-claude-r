@@ -161,6 +161,14 @@ RSpec.describe Timekeeping::EntryClient do
       expect([other_agent, foreign].map { |entry| fake.entry(entry["id"])["agent_id"] }).to eq([10, 9])
     end
 
+    it "writes an import batch named by import id and batch number, and answers what it created (W5)" do
+      answer = client.import_batch("41-run", 2, [new_entry, new_entry.merge("bill_status" => "billed")], write:)
+
+      expect(answer).to eq("created_ids" => [1, 2], "failed_rows" => [])
+      expect(fake.calls.sole).to have_attributes(operation: :import_batch, params: { "import_id" => "41-run", "n" => "2" })
+      expect(fake.entry(2)).to include("company_id" => company.id, "bill_status" => "billed")
+    end
+
     it "never sends a request the contract cannot carry" do
       expect { client.create_entry(new_entry.merge("duration" => nil), write:) }
         .to raise_error(described_class::Invalid, %r{create_entry: .*/entry/duration})

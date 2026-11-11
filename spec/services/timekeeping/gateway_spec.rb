@@ -23,7 +23,7 @@ RSpec.describe Timekeeping::Gateway, type: :model do
 
   # A command the timekeeping owner does not forward yet.
   def unforwarded_command
-    described_class::ImportEntry.new(company: tenant.company, attributes: {}, billed: false)
+    described_class::MarkBilled.new(entries: TimesheetEntry.where(id: entry.id))
   end
 
   it "has exactly one legacy handler for every command it defines" do
@@ -33,10 +33,10 @@ RSpec.describe Timekeeping::Gateway, type: :model do
     expect(described_class::Legacy::HANDLERS.keys).to match_array(commands)
   end
 
-  it "forwards only the single-entry and bulk commands and agent detach under the timekeeping owner" do
+  it "forwards only the entry, bulk and import commands and agent detach under the timekeeping owner" do
     expect(described_class::Remote::REQUESTS.keys).to contain_exactly(
       described_class::CreateEntry, described_class::UpdateEntry, described_class::DiscardEntry,
-      described_class::BulkMove, described_class::BulkDiscard, described_class::DetachAgent
+      described_class::BulkMove, described_class::BulkDiscard, described_class::ImportBatch, described_class::DetachAgent
     )
   end
 
@@ -74,7 +74,7 @@ RSpec.describe Timekeeping::Gateway, type: :model do
     refusal, pattern = if attributes[:state] != "open"
       [Timekeeping::Ownership::Moving, /being moved between services/]
     elsif attributes[:owner] != "legacy"
-      [described_class::OwnerUnavailable, /owner #{attributes[:owner]} .* ImportEntry refused/]
+      [described_class::OwnerUnavailable, /owner #{attributes[:owner]} .* MarkBilled refused/]
     end
 
     if refusal

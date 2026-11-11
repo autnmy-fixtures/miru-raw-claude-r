@@ -24,10 +24,15 @@ module Timekeeping::Gateway::Legacy
     gateway::DiscardEntry => ->(command) { command.entry.discard! },
     gateway::BulkMove => ->(command) { command.entries.update(project_id: command.project.id) },
     gateway::BulkDiscard => ->(command) { command.entries.discard_all },
-    gateway::ImportEntry => ->(command) {
-      TimesheetEntry.create!(command.attributes) { |entry| entry.association(:company).target = command.company }.tap do |entry|
-        entry.update!(bill_status: :billed) if command.billed
+    gateway::ImportBatch => ->(command) {
+      created_ids = []
+      row_errors = {}
+      command.rows.each_with_index do |attributes, index|
+        created_ids << ActiveRecord::Base.transaction(requires_new: true) { import_row(command.company, attributes) }.id
+      rescue ActiveRecord::RecordInvalid => error
+        row_errors[index] = error.record.errors.full_messages.to_sentence
       end
+      gateway::ImportBatch::Result.new(created_ids:, row_errors:)
     },
     gateway::DetachAgent => ->(command) { TimesheetEntry.where(agent_id: command.agent.id).update_all(agent_id: nil) },
     gateway::SetLocked => ->(command) { command.entries.update!(locked: command.locked) },
@@ -40,4 +45,15 @@ module Timekeeping::Gateway::Legacy
   def self.call(command, _ownership)
     HANDLERS.fetch(command.class).call(command)
   end
+
+  # One Harvest row, in its own savepoint: the model refuses to create an
+  # entry billed, so a billed row is created unbilled and then marked billed.
+  def self.import_row(company, attributes)
+    billed = attributes.fetch(:bill_status).to_s == "billed"
+    created = TimesheetEntry.create!(attributes.merge(bill_status: billed ? "unbilled" : attributes.fetch(:bill_status))) do |entry|
+      entry.association(:company).target = company
+    end
+    created.tap { |entry| entry.update!(bill_status: :billed) if billed }
+  end
+  private_class_method :import_row
 end

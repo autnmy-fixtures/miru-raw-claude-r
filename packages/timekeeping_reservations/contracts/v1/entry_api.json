@@ -184,7 +184,7 @@
       "additionalProperties": false
     },
     "import_batch_request": {
-      "description": "One Harvest batch: at most 500 rows, one transaction, idempotent by import_id:batch_no (§3.4).",
+      "description": "One Harvest batch: at most 500 rows, one transaction, idempotent by import_id:batch_no (§3.4). A row with bill_status billed is created unbilled and then marked billed, as the import does today (§1.3). A row the provider's rules reject fails alone, in failed_rows; the rest of the batch is kept.",
       "type": "object",
       "properties": {
         "rows": { "type": "array", "items": { "$ref": "#/$defs/new_entry" }, "minItems": 1, "maxItems": 500 }

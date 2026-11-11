@@ -151,7 +151,7 @@ RSpec.describe "Timekeeping single-writer guard: every writer goes through the g
   end
 
   describe "W5 Harvest import" do
-    it "creates every row through ImportEntry, billed rows included" do
+    it "creates every row through ImportBatch, billed rows included" do
       %w[Paul\ Connors Jane\ Doe].each do |name|
         first_name, last_name = name.split
         user = create(:user, first_name:, last_name:, current_workspace_id: tenant_a.company.id)
@@ -161,7 +161,7 @@ RSpec.describe "Timekeeping single-writer guard: every writer goes through the g
       path = Rails.root.join("spec/fixtures/files/harvest_detailed_time.csv")
       File.open(path) { |file| data_import.file.attach(io: file, filename: File.basename(path), content_type: "text/csv") }
 
-      expect_only_gateway_writes(gateway::ImportEntry) { Imports::HarvestTimeEntriesImporter.new(data_import).process }
+      expect_only_gateway_writes(gateway::ImportBatch) { Imports::HarvestTimeEntriesImporter.new(data_import).process }
       expect(data_import.reload).to have_attributes(status: "completed", imported_rows: 11)
       expect(tenant_a.company.timesheet_entries.where(bill_status: :billed)).to exist
     end

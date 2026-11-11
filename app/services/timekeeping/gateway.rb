@@ -16,10 +16,11 @@
 # fence through Timekeeping::BillingWriteFence.
 #
 # The legacy owner (§10.2 step 2) runs today's model code unchanged. The
-# timekeeping owner (Remote) forwards the single-entry and bulk commands and
-# agent detach to Timekeeping's entry API; the commands it does not forward
-# yet, and every command under the monolith owner, are refused, never written
-# locally, because a local write there would be a second writer.
+# timekeeping owner (Remote) forwards the single-entry and bulk commands, the
+# import batches and agent detach to Timekeeping's entry API; the commands it
+# does not forward yet, and every command under the monolith owner, are
+# refused, never written locally, because a local write there would be a
+# second writer.
 module Timekeeping::Gateway
   class OwnerUnavailable < StandardError; end
 
@@ -54,9 +55,17 @@ module Timekeeping::Gateway
   BulkMove = Data.define(:entries, :project)
   BulkDiscard = Data.define(:entries, :company)
 
-  # W5 Harvest import, one row. `billed` rows are created unbilled and then
-  # marked billed, as today (§1.3).
-  ImportEntry = Data.define(:company, :attributes, :billed)
+  # W5 Harvest import, one batch of at most 500 rows (§3.4): this application
+  # parses, the owner writes the batch in one transaction, idempotent by
+  # import_id:batch_no. Each row is one entry's attributes, its project and
+  # user included. A row with bill_status "billed" is created unbilled and
+  # then marked billed, as today (§1.3). A row the model rejects fails alone
+  # and the rest of its batch is kept, as the savepoint per row does today.
+  ImportBatch = Data.define(:company, :import_id, :batch_no, :rows)
+
+  # What one batch wrote: the ids it created, and today's message for each
+  # row it rejected, by the row's index in the batch, in row order.
+  ImportBatch::Result = Data.define(:created_ids, :row_errors)
 
   # W6 agent destroy: replaces `dependent: :nullify` on Agent. It runs
   # before the agent row is deleted, so the destroy completes only once the
