@@ -33,10 +33,10 @@ RSpec.describe Timekeeping::Gateway, type: :model do
     expect(described_class::Legacy::HANDLERS.keys).to match_array(commands)
   end
 
-  it "forwards only the single-entry and bulk commands under the timekeeping owner" do
+  it "forwards only the single-entry and bulk commands and agent detach under the timekeeping owner" do
     expect(described_class::Remote::REQUESTS.keys).to contain_exactly(
       described_class::CreateEntry, described_class::UpdateEntry, described_class::DiscardEntry,
-      described_class::BulkMove, described_class::BulkDiscard
+      described_class::BulkMove, described_class::BulkDiscard, described_class::DetachAgent
     )
   end
 

@@ -150,6 +150,17 @@ RSpec.describe Timekeeping::EntryClient do
       expect(fake.calls.size).to eq(1)
     end
 
+    it "detaches an agent from the token company's entries, and answers the ids it changed (W6)" do
+      named = seed(agent_id: 9)
+      other_agent = seed(agent_id: 10)
+      foreign = seed(company_id: other_company.id, agent_id: 9)
+
+      expect(client.detach_agent(9, write:)).to eq([named["id"]])
+      expect(fake.calls.sole).to have_attributes(operation: :detach_agent, params: include("agent_id" => "9"), input: {})
+      expect(fake.entry(named["id"])).to include("agent_id" => nil, "version" => 2)
+      expect([other_agent, foreign].map { |entry| fake.entry(entry["id"])["agent_id"] }).to eq([10, 9])
+    end
+
     it "never sends a request the contract cannot carry" do
       expect { client.create_entry(new_entry.merge("duration" => nil), write:) }
         .to raise_error(described_class::Invalid, %r{create_entry: .*/entry/duration})
