@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_11_10_120000) do
+ActiveRecord::Schema[8.1].define(version: 2026_11_11_120000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
   enable_extension "pg_stat_statements"
@@ -1083,6 +1083,18 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_10_120000) do
     t.index ["company_id", "name"], name: "index_tax_configurations_on_company_id_and_name"
     t.index ["company_id"], name: "index_tax_configurations_on_company_id"
     t.index ["discarded_at"], name: "index_tax_configurations_on_discarded_at"
+  end
+
+  create_table "timekeeping_ownerships", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.bigint "generation", default: 0, null: false
+    t.string "owner", default: "legacy", null: false
+    t.string "state", default: "open", null: false
+    t.datetime "updated_at", null: false
+    t.check_constraint "generation >= 0", name: "timekeeping_ownerships_generation_non_negative"
+    t.check_constraint "id = 1", name: "timekeeping_ownerships_singleton"
+    t.check_constraint "owner::text = ANY (ARRAY['legacy'::character varying, 'timekeeping'::character varying, 'monolith'::character varying]::text[])", name: "timekeeping_ownerships_owner"
+    t.check_constraint "state::text = ANY (ARRAY['open'::character varying, 'closed'::character varying, 'frozen'::character varying]::text[])", name: "timekeeping_ownerships_state"
   end
 
   create_table "timeoff_entries", force: :cascade do |t|

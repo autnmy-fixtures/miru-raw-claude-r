@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 abort "Refusing to seed timesheet demo data in production." if Rails.env.production?
+Timekeeping::Ownership.ensure_initial!("db/seeds/timesheet_data.rb")
 
 # Seed file for comprehensive timesheet test data
 # Run with: rails db:seed:timesheet_data

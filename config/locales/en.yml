@@ -892,6 +892,7 @@ en:
     super_admin_delete:
       sole_owner: "Cannot permanently delete this user because they are the only owner of: %{companies}. Transfer ownership or delete the company before deleting this user."
       success: User %{email} has been permanently deleted.
+      timekeeping_handoff: Cannot permanently delete users while time entries are moving to or owned by the Timekeeping service. Deactivate the user instead.
   workspaces:
     update:
       failure: Failed to switch workspace

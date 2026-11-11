@@ -14,6 +14,7 @@ module Analytics
 
     def process
       raise "No company available for analytics demo seeding" if company.blank?
+      Timekeeping::Ownership.ensure_initial!(self.class.name)
 
       setup_users
       setup_clients_and_projects

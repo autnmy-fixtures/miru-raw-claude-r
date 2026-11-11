@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 abort "Demo seeds are disabled in production." if Rails.env.production?
+Timekeeping::Ownership.ensure_initial!("db/seeds.rb")
 
 require "faker"
 
