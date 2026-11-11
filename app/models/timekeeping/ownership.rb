@@ -16,6 +16,11 @@ class Timekeeping::Ownership < ApplicationRecord
   # has begun (§10.1).
   class HandoffBegun < StandardError; end
 
+  # Raised by .admit! while a handoff has admission closed: entries are moving
+  # between owners. Nothing was written, and the caller may retry once the
+  # handoff finishes (§10.1, 503 ownership-moving).
+  class Moving < StandardError; end
+
   self.table_name = "timekeeping_ownerships"
 
   attribute :id, default: SINGLETON_ID
@@ -43,6 +48,16 @@ class Timekeeping::Ownership < ApplicationRecord
   def self.lock_shared!
     insert({ id: SINGLETON_ID }) unless exists?(id: SINGLETON_ID)
     lock("FOR SHARE").find(SINGLETON_ID)
+  end
+
+  # The fence every write passes (§10.1): entry writes through the gateway and
+  # billing writes through Timekeeping::BillingWriteFence. Returns the record
+  # locked FOR SHARE when admission is open, and refuses with Moving
+  # otherwise. Must run inside the write's own transaction.
+  def self.admit!
+    lock_shared!.tap do |ownership|
+      raise Moving, I18n.t("timesheet_entry.ownership_moving") unless ownership.state_open?
+    end
   end
 
   # For the seed and demo-data builders: they write only in the initial legacy

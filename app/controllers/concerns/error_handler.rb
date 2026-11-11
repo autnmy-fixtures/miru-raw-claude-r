@@ -9,7 +9,7 @@ module ErrorHandler
     rescue_from Discard::RecordNotDiscarded, with: :record_not_discarded
     rescue_from ActiveRecord::RecordInvalid, with: :record_invalid
     rescue_from Pagy::VariableError, with: :invalid_param_value
-    rescue_from Timekeeping::Gateway::OwnershipMoving, with: :ownership_moving
+    rescue_from Timekeeping::Ownership::Moving, with: :ownership_moving
   end
 
   private

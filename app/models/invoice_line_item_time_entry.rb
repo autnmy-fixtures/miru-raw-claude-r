@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
 class InvoiceLineItemTimeEntry < ApplicationRecord
+  include Timekeeping::BillingWriteFence
+
   belongs_to :invoice_line_item
   belongs_to :timesheet_entry
 

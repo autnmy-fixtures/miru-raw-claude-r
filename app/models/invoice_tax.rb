@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
 class InvoiceTax < ApplicationRecord
+  include Timekeeping::BillingWriteFence
+
   enum :calculation_method, [:percentage, :flat]
 
   belongs_to :invoice

@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
 class Payment < ApplicationRecord
+  include Timekeeping::BillingWriteFence
+
   # Audit all payment and currency conversion details
   audited associated_with: :company,
     only: [:amount, :base_currency_amount, :exchange_rate, :exchange_rate_date, :payment_currency, :transaction_date, :status]

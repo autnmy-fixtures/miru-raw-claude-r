@@ -146,7 +146,7 @@ RSpec.describe "Timekeeping generation fence: writers are refused while admissio
 
       expect_refused_without_writes do
         expect { Imports::HarvestTimeEntriesImporter.new(data_import).process }
-          .to raise_error(Timekeeping::Gateway::OwnershipMoving)
+          .to raise_error(Timekeeping::Ownership::Moving)
       end
       expect(data_import.reload).to have_attributes(status: "failed", error_message: I18n.t("imports.errors.ownership_moving"))
     end
@@ -158,7 +158,7 @@ RSpec.describe "Timekeeping generation fence: writers are refused while admissio
       close_admission!
 
       expect_refused_without_writes do
-        expect { agent.destroy! }.to raise_error(Timekeeping::Gateway::OwnershipMoving)
+        expect { agent.destroy! }.to raise_error(Timekeeping::Ownership::Moving)
       end
       expect(Agent.exists?(agent.id)).to be(true)
       expect(agent_entry.reload.agent_id).to eq(agent.id)

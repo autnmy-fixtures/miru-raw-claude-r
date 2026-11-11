@@ -79,7 +79,7 @@ module Imports
       def failure_message(error)
         case error
         when InvalidFileError then error.message
-        when Timekeeping::Gateway::OwnershipMoving then I18n.t("imports.errors.ownership_moving")
+        when Timekeeping::Ownership::Moving then I18n.t("imports.errors.ownership_moving")
         else
           Rails.logger.error("Data import ##{data_import.id} failed: #{error.message}")
           I18n.t("imports.errors.unexpected")
