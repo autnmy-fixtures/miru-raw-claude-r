@@ -25,6 +25,11 @@ prepare and at commit. `RELATIONS` derives `added`, `kept` and `removed` (or `al
 destroy) from the desired set and the entries the invoice holds. `REFUSALS` holds the two "any" rows
 of §7.2 that refuse, in order: `not_found`, `wrong_company` (L8), `on_other_invoice` (F1).
 
+The prepared application's provider is `Timekeeping::LocalReservations`
+(`app/services/timekeeping/local_reservations.rb`, §10.2 step 4). It persists what the table decides in
+`timekeeping_reservations` and keeps the protocol in `timekeeping_reservation_operations`. The existing
+application loads this file from `config/initializers/timekeeping.rb`.
+
 Receipts, generations and the one-unresolved-operation rule belong to the protocol (§5.3), so they are
 not in the table. Prepare, commit and abort are idempotent on their own anyway: applying one twice
 gives the same reservations.

@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_11_11_130000) do
+ActiveRecord::Schema[8.1].define(version: 2026_11_11_140000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
   enable_extension "pg_stat_statements"
@@ -1095,6 +1095,43 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_11_130000) do
     t.check_constraint "id = 1", name: "timekeeping_ownerships_singleton"
     t.check_constraint "owner::text = ANY (ARRAY['legacy'::character varying, 'timekeeping'::character varying, 'monolith'::character varying]::text[])", name: "timekeeping_ownerships_owner"
     t.check_constraint "state::text = ANY (ARRAY['open'::character varying, 'closed'::character varying, 'frozen'::character varying]::text[])", name: "timekeeping_ownerships_state"
+  end
+
+  create_table "timekeeping_reservation_operations", force: :cascade do |t|
+    t.bigint "company_id"
+    t.datetime "created_at", null: false
+    t.bigint "entry_ids", default: [], null: false, array: true
+    t.bigint "invoice_id", null: false
+    t.string "invoice_state"
+    t.string "kind"
+    t.uuid "operation_id", null: false
+    t.string "state", null: false
+    t.datetime "updated_at", null: false
+    t.index ["invoice_id", "operation_id"], name: "index_timekeeping_reservation_operations_identity", unique: true
+    t.index ["invoice_id"], name: "index_timekeeping_reservation_operations_one_unresolved", unique: true, where: "((state)::text = 'prepared'::text)"
+    t.check_constraint "invoice_state::text = ANY (ARRAY['draft'::character varying, 'non_draft'::character varying]::text[])", name: "timekeeping_reservation_operations_invoice_state"
+    t.check_constraint "kind::text = ANY (ARRAY['save'::character varying, 'discard'::character varying, 'destroy'::character varying]::text[])", name: "timekeeping_reservation_operations_kind"
+    t.check_constraint "state::text = 'aborted'::text OR company_id IS NOT NULL AND kind IS NOT NULL AND invoice_state IS NOT NULL", name: "timekeeping_reservation_operations_prepared_described"
+    t.check_constraint "state::text = ANY (ARRAY['prepared'::character varying, 'committed'::character varying, 'aborted'::character varying]::text[])", name: "timekeeping_reservation_operations_state"
+  end
+
+  create_table "timekeeping_reservations", force: :cascade do |t|
+    t.bigint "company_id", null: false
+    t.datetime "created_at", null: false
+    t.string "disposition", null: false
+    t.boolean "edit_lock", null: false
+    t.bigint "entry_id", null: false
+    t.bigint "invoice_id", null: false
+    t.uuid "operation_id"
+    t.string "state", null: false
+    t.datetime "updated_at", null: false
+    t.index ["entry_id", "invoice_id"], name: "index_timekeeping_reservations_committed_identity", unique: true, where: "((state)::text = 'committed'::text)"
+    t.index ["entry_id"], name: "index_timekeeping_reservations_one_live_per_entry", unique: true, where: "((disposition)::text = 'active'::text)"
+    t.index ["invoice_id"], name: "index_timekeeping_reservations_on_invoice_id"
+    t.check_constraint "(state::text = 'provisional'::text) = (operation_id IS NOT NULL)", name: "timekeeping_reservations_operation_iff_provisional"
+    t.check_constraint "disposition::text = ANY (ARRAY['active'::character varying, 'retained'::character varying]::text[])", name: "timekeeping_reservations_disposition"
+    t.check_constraint "state::text = 'committed'::text OR disposition::text = 'active'::text", name: "timekeeping_reservations_provisional_active"
+    t.check_constraint "state::text = ANY (ARRAY['provisional'::character varying, 'committed'::character varying]::text[])", name: "timekeeping_reservations_state"
   end
 
   create_table "timeoff_entries", force: :cascade do |t|
