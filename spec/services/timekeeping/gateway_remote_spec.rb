@@ -188,10 +188,19 @@ RSpec.describe Timekeeping::Gateway::Remote, type: :model do
       expect { gateway.call(create_command) }.to raise_error(Timekeeping::Ownership::Moving, I18n.t("timesheet_entry.ownership_moving"))
     end
 
-    it "answers any other problem with its own status" do
+    it "answers a locked entry as Locked, with 403, so a writer can give today's locked answer" do
       fake.fail_next(:create_entry, status: 403, slug: "entry-locked", retryable: false)
 
-      expect { gateway.call(create_command) }.to raise_error(gateway::Refused, "Entry locked") { |error| expect(error.status).to eq(403) }
+      expect { gateway.call(create_command) }.to raise_error(gateway::Locked, "Entry locked") { |error| expect(error.status).to eq(403) }
+    end
+
+    it "answers any other problem with its own status" do
+      fake.fail_next(:create_entry, status: 403, slug: "forbidden", retryable: false)
+
+      expect { gateway.call(create_command) }.to raise_error(gateway::Refused, "Forbidden") { |error|
+        expect(error).not_to be_a(gateway::Locked)
+        expect(error.status).to eq(403)
+      }
     end
 
     it "refuses a request the contract cannot carry with 422, and sends nothing" do
@@ -209,11 +218,75 @@ RSpec.describe Timekeeping::Gateway::Remote, type: :model do
     end
   end
 
+  describe "BulkMove and BulkDiscard (W2)" do
+    let!(:first) { owned_entry(note: "First") }
+    let!(:second) { owned_entry(note: "Second") }
+    let(:target) { create(:project, client: tenant.client, billable: true) }
+
+    def bulk_move(*entries) = gateway::BulkMove.new(entries: TimesheetEntry.where(id: entries.map(&:id)), project: target)
+
+    it "moves the caller's entries through the owner as the bulk writer, and answers the owner's entries" do
+      moved = forwarded { bulk_move(first, second) }
+
+      call = fake.calls.sole
+      expect(call.input).to match("ids" => contain_exactly(first.id, second.id), "project_id" => target.id)
+      expect(call.claims).to include(
+        "writer" => "bulk", "company_id" => tenant.company.id, "sub" => "user:#{tenant.employee.id}",
+        "project" => include("id" => target.id, "company_id" => tenant.company.id)
+      )
+      expect(moved).to all(be_readonly)
+      expect(moved.map { |entry| [entry.id, entry.project_id, entry.version] })
+        .to contain_exactly([first.id, target.id, 2], [second.id, target.id, 2])
+      expect([first, second].map { |entry| entry.reload.project_id }).to all(eq(tenant.project.id))
+    end
+
+    it "answers a skipped entry as the owner holds it, unmoved (A9: skipped, never refused)" do
+      moved_first = fake.entry(first.id).merge("project_id" => target.id, "version" => 2)
+      WebMock::API.stub_request(:post, %r{/internal/v1/entries/bulk_move\z}).to_return(
+        status: 200, headers: { "content-type" => "application/json" },
+        body: JSON.generate("moved_ids" => [first.id], "skipped_ids" => [second.id], "entries" => [moved_first, fake.entry(second.id)])
+      )
+
+      answered = forwarded { bulk_move(first, second) }
+
+      expect(answered.to_h { |entry| [entry.id, entry.project_id] }).to eq(first.id => target.id, second.id => tenant.project.id)
+    end
+
+    it "discards through the owner in the command's tenant, and answers the ids it discarded" do
+      discarded = forwarded { gateway::BulkDiscard.new(entries: TimesheetEntry.where(id: first.id), company: tenant.company) }
+
+      expect(discarded).to eq([first.id])
+      expect(fake.entry(first.id)["discarded_at"]).to be_present
+      expect(fake.entry(second.id)["discarded_at"]).to be_nil
+      expect(fake.calls.sole.claims).to include("writer" => "bulk", "company_id" => tenant.company.id, "project" => nil)
+      expect(first.reload).not_to be_discarded
+    end
+
+    it "touches nothing of another tenant: the owner scopes by the token's company (§6.3)" do
+      discarded = forwarded { gateway::BulkDiscard.new(entries: TimesheetEntry.where(id: first.id), company: other_tenant.company) }
+
+      expect(discarded).to eq([])
+      expect(fake.entry(first.id)["discarded_at"]).to be_nil
+    end
+
+    it "makes no call for no entries, which select nothing" do
+      expect(forwarded { gateway::BulkDiscard.new(entries: TimesheetEntry.none, company: tenant.company) }).to eq([])
+      expect(forwarded { bulk_move }).to eq([])
+      expect(fake.calls).to be_empty
+    end
+
+    it "answers the owner's lock refusal as Locked (A9 in the write transaction, §6.2)" do
+      fake.fail_next(:bulk_move, status: 403, slug: "entry-locked", retryable: false)
+
+      expect { gateway.call(bulk_move(first)) }.to raise_error(gateway::Locked) { |error| expect(error.status).to eq(403) }
+      expect(fake.entry(first.id)["project_id"]).to eq(tenant.project.id)
+    end
+  end
+
   it "refuses the commands it does not forward yet, and writes nothing" do
-    entry = owned_entry
     writes = timesheet_entry_writes do
-      expect { gateway.call(gateway::BulkDiscard.new(entries: TimesheetEntry.where(id: entry.id))) }
-        .to raise_error(gateway::OwnerUnavailable, /owner timekeeping .* BulkDiscard refused/)
+      expect { gateway.call(gateway::ImportEntry.new(company: tenant.company, attributes: {}, billed: false)) }
+        .to raise_error(gateway::OwnerUnavailable, /owner timekeeping .* ImportEntry refused/)
     end
 
     expect(writes).to eq([])

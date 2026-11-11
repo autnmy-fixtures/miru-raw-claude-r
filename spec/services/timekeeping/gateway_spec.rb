@@ -22,8 +22,8 @@ RSpec.describe Timekeeping::Gateway, type: :model do
   end
 
   # A command the timekeeping owner does not forward yet.
-  def bulk_discard_command
-    described_class::BulkDiscard.new(entries: TimesheetEntry.where(id: entry.id))
+  def unforwarded_command
+    described_class::ImportEntry.new(company: tenant.company, attributes: {}, billed: false)
   end
 
   it "has exactly one legacy handler for every command it defines" do
@@ -33,9 +33,11 @@ RSpec.describe Timekeeping::Gateway, type: :model do
     expect(described_class::Legacy::HANDLERS.keys).to match_array(commands)
   end
 
-  it "forwards only the single-entry commands under the timekeeping owner" do
-    expect(described_class::Remote::REQUESTS.keys)
-      .to contain_exactly(described_class::CreateEntry, described_class::UpdateEntry, described_class::DiscardEntry)
+  it "forwards only the single-entry and bulk commands under the timekeeping owner" do
+    expect(described_class::Remote::REQUESTS.keys).to contain_exactly(
+      described_class::CreateEntry, described_class::UpdateEntry, described_class::DiscardEntry,
+      described_class::BulkMove, described_class::BulkDiscard
+    )
   end
 
   context "with no ownership record (the initial legacy state)" do
@@ -72,7 +74,7 @@ RSpec.describe Timekeeping::Gateway, type: :model do
     refusal, pattern = if attributes[:state] != "open"
       [Timekeeping::Ownership::Moving, /being moved between services/]
     elsif attributes[:owner] != "legacy"
-      [described_class::OwnerUnavailable, /owner #{attributes[:owner]} .* BulkDiscard refused/]
+      [described_class::OwnerUnavailable, /owner #{attributes[:owner]} .* ImportEntry refused/]
     end
 
     if refusal
@@ -80,7 +82,7 @@ RSpec.describe Timekeeping::Gateway, type: :model do
         set_timekeeping_ownership!(attributes)
 
         writes = timesheet_entry_writes do
-          expect { described_class.call(bulk_discard_command) }.to raise_error(refusal, pattern)
+          expect { described_class.call(unforwarded_command) }.to raise_error(refusal, pattern)
         end
 
         expect(writes).to eq([])

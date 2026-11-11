@@ -162,7 +162,11 @@
       "properties": {
         "moved_ids": { "$ref": "common.json#/$defs/ids" },
         "skipped_ids": { "$ref": "common.json#/$defs/ids" },
-        "entries": { "type": "array", "items": { "$ref": "common.json#/$defs/entry" } }
+        "entries": {
+          "description": "Every entry the request named that the token's tenant holds, moved or skipped, as it stands after the move.",
+          "type": "array",
+          "items": { "$ref": "common.json#/$defs/entry" }
+        }
       },
       "required": ["moved_ids", "skipped_ids", "entries"],
       "additionalProperties": false
