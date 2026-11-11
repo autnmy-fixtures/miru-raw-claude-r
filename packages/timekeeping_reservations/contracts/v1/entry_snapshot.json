@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.timekeeping.internal/v1/entry_snapshot.json",
+  "title": "Timekeeping entry snapshot event v1",
+  "description": "Provider: the Timekeeping relay. Consumer: the projection consumer in the existing application, the one writer of timesheet_entries (docs/architecture/timekeeping-soa.md §3.2, §5.4). The consumer upserts by (entry_id, version) and ignores anything not newer, so duplicates and reordering are harmless.",
+  "x-headers": {
+    "every": ["Authorization", "X-Request-Id"],
+    "mutating": []
+  },
+  "x-operations": {
+    "deliver_snapshots": {
+      "method": "POST", "path": "/internal/v1/projection/entry_snapshots", "mutating": true,
+      "request": "#/$defs/snapshot_batch",
+      "responses": { "200": "#/$defs/delivery_receipt" }
+    }
+  },
+  "$defs": {
+    "service_token_claims": {
+      "description": "The relay authenticates with an HS256 JWT signed with the shared token key, 60 s TTL. No user acts here.",
+      "type": "object",
+      "properties": {
+        "sub": { "const": "service:timekeeping-relay" },
+        "aud": { "const": "projection" },
+        "iat": { "type": "integer" },
+        "exp": { "type": "integer" }
+      },
+      "required": ["sub", "aud", "iat", "exp"],
+      "additionalProperties": false
+    },
+    "entry_snapshot": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "timekeeping.entry_snapshot.v1" },
+        "entry_id": { "$ref": "common.json#/$defs/id" },
+        "version": { "$ref": "common.json#/$defs/version" },
+        "company_id": { "$ref": "common.json#/$defs/id" },
+        "data": { "$ref": "common.json#/$defs/entry_data" }
+      },
+      "required": ["type", "entry_id", "version", "company_id", "data"],
+      "additionalProperties": false
+    },
+    "snapshot_batch": {
+      "type": "object",
+      "properties": {
+        "snapshots": { "type": "array", "items": { "$ref": "#/$defs/entry_snapshot" }, "minItems": 1 }
+      },
+      "required": ["snapshots"],
+      "additionalProperties": false
+    },
+    "delivery_receipt": {
+      "description": "How many snapshots the consumer applied and how many it ignored as not newer. A 2xx means the whole batch is durable; the relay then advances its delivered position.",
+      "type": "object",
+      "properties": {
+        "applied": { "type": "integer", "minimum": 0 },
+        "ignored": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["applied", "ignored"],
+      "additionalProperties": false
+    }
+  }
+}

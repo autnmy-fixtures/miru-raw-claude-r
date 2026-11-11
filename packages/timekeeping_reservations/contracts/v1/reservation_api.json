@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.timekeeping.internal/v1/reservation_api.json",
+  "title": "Timekeeping reservation API v1: prepare, commit, abort",
+  "description": "Provider: Timekeeping. Consumer: the invoice reservation boundary and the invoice operation worker in the existing application (docs/architecture/timekeeping-soa.md §5.3, §9). All three calls are idempotent by (invoice_id, operation_id); the Idempotency-Key header carries the operation_id.",
+  "x-headers": {
+    "every": ["Authorization", "X-Request-Id"],
+    "mutating": ["Idempotency-Key", "X-Ownership-Generation"]
+  },
+  "x-operations": {
+    "prepare": {
+      "method": "POST", "path": "/internal/v1/invoices/{invoice_id}/operations/{operation_id}/prepare", "mutating": true,
+      "request": "#/$defs/prepare_request",
+      "responses": { "200": "#/$defs/prepare_response" }
+    },
+    "commit": {
+      "method": "POST", "path": "/internal/v1/invoices/{invoice_id}/operations/{operation_id}/commit", "mutating": true,
+      "request": "#/$defs/resolve_request",
+      "responses": { "200": "#/$defs/terminal_receipt" }
+    },
+    "abort": {
+      "method": "POST", "path": "/internal/v1/invoices/{invoice_id}/operations/{operation_id}/abort", "mutating": true,
+      "request": "#/$defs/resolve_request",
+      "responses": { "200": "#/$defs/terminal_receipt" }
+    }
+  },
+  "$defs": {
+    "operation_id": { "type": "string", "format": "uuid" },
+    "outcome": { "enum": ["committed", "aborted"] },
+    "prepare_request": {
+      "type": "object",
+      "properties": {
+        "company_id": { "$ref": "common.json#/$defs/id" },
+        "generation": { "$ref": "common.json#/$defs/generation" },
+        "kind": { "enum": ["save", "discard", "destroy"] },
+        "invoice_state": { "enum": ["draft", "non_draft"] },
+        "entry_ids": {
+          "description": "The desired set after this operation: every entry the invoice's remaining direct and grouped lines reference (§7.2). Empty for discard and destroy.",
+          "$ref": "common.json#/$defs/ids"
+        },
+        "resolves": {
+          "description": "The outcome of this invoice's earlier, unresolved operation, or null (§5.3).",
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "operation_id": { "$ref": "#/$defs/operation_id" },
+                "outcome": { "$ref": "#/$defs/outcome" }
+              },
+              "required": ["operation_id", "outcome"],
+              "additionalProperties": false
+            },
+            { "type": "null" }
+          ]
+        }
+      },
+      "required": ["company_id", "generation", "kind", "invoice_state", "entry_ids", "resolves"],
+      "additionalProperties": false
+    },
+    "prepared_entry": {
+      "description": "The entry facts line-item validation needs. Authoritative for existence and same-company (L8).",
+      "type": "object",
+      "properties": {
+        "id": { "$ref": "common.json#/$defs/id" },
+        "company_id": { "$ref": "common.json#/$defs/id" },
+        "project_id": { "$ref": "common.json#/$defs/id" },
+        "user_id": { "$ref": "common.json#/$defs/id" },
+        "duration": { "$ref": "common.json#/$defs/duration" },
+        "work_date": { "$ref": "common.json#/$defs/date" },
+        "version": { "$ref": "common.json#/$defs/version" }
+      },
+      "required": ["id", "company_id", "project_id", "user_id", "duration", "work_date", "version"],
+      "additionalProperties": false
+    },
+    "prepared": {
+      "type": "object",
+      "properties": {
+        "status": { "const": "prepared" },
+        "entries": { "type": "array", "items": { "$ref": "#/$defs/prepared_entry" } }
+      },
+      "required": ["status", "entries"],
+      "additionalProperties": false
+    },
+    "terminal_receipt": {
+      "description": "The stored terminal receipt of (invoice, operation). Returned unchanged by any later call for the same operation.",
+      "type": "object",
+      "properties": { "status": { "$ref": "#/$defs/outcome" } },
+      "required": ["status"],
+      "additionalProperties": false
+    },
+    "prepare_response": {
+      "oneOf": [{ "$ref": "#/$defs/prepared" }, { "$ref": "#/$defs/terminal_receipt" }]
+    },
+    "resolve_request": {
+      "type": "object",
+      "properties": { "generation": { "$ref": "common.json#/$defs/generation" } },
+      "required": ["generation"],
+      "additionalProperties": false
+    }
+  }
+}
