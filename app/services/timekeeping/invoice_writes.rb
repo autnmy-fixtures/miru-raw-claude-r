@@ -65,10 +65,14 @@ class Timekeeping::InvoiceWrites
       )
     end
 
-    # `prepared` is nil under `legacy`, where today's callbacks decide.
-    def save(change)
+    # `prepared` is nil under `legacy`, where today's callbacks and today's
+    # line-item checks decide. Under an owner, the line-item checks read the
+    # entries it prepared (Timekeeping::EntryReferences, L8).
+    def save(change, &write)
       @boundary.run(change) do |prepared|
-        yield.tap { |invoice| left_as_desired!(invoice, change) if prepared }
+        next write.call if prepared.nil?
+
+        Timekeeping::EntryReferences.within(prepared, &write).tap { |invoice| left_as_desired!(invoice, change) }
       end.value
     end
 

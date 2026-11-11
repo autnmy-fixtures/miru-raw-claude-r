@@ -19,8 +19,9 @@ class InvoiceLineItem < ApplicationRecord
   # No foreign key ties a line to its entry (docs/architecture/timekeeping-soa.md
   # §10.2 step 3), so an id naming no entry is refused here, with the message
   # belongs_to gives a grouped line's required link (InvoiceLineItemTimeEntry).
-  validates :timesheet_entry, presence: { message: :required }, if: :timesheet_entry_id?
-  validate :timesheet_entry_belongs_to_invoice_company
+  # What an entry is, and its company, come from Timekeeping::EntryReferences:
+  # the entries table, or inside an owner's prepared save the owner (L8).
+  validate :timesheet_entry_exists_in_invoice_company, if: :timesheet_entry_id?
   validate :linked_timesheet_entries_belong_to_invoice_company
 
   def self.total_cost_of_all_line_items
@@ -57,20 +58,37 @@ class InvoiceLineItem < ApplicationRecord
     CompanyDateFormattingService.new(date, company: invoice.company).process
   end
 
+  # The grouped line's entries, read from its own join rows, never from the
+  # entries they name (Timekeeping::EntryReferences). As has_many ids readers
+  # do: the rows in memory when there are any, else one pluck.
+  def linked_timesheet_entry_ids
+    rows = association(:invoice_line_item_time_entries)
+    return rows.scope.pluck(:timesheet_entry_id) unless rows.loaded? || rows.target.any?
+
+    rows.load_target.map(&:timesheet_entry_id)
+  end
+
+  def linked_timesheet_entry_ids=(ids)
+    Timekeeping::EntryReferences.current.link(self, ids)
+  end
+
   private
 
-    def timesheet_entry_belongs_to_invoice_company
-      return if timesheet_entry.blank? || invoice.blank?
-      return if timesheet_entry.company&.id == invoice.company_id
+    def entry_references(ids)
+      Timekeeping::EntryReferences.current.find(ids).values
+    end
+
+    def timesheet_entry_exists_in_invoice_company
+      entry = entry_references([timesheet_entry_id]).first
+      return errors.add(:timesheet_entry, :blank, message: :required) if entry.nil?
+      return if invoice.blank? || entry.company_id == invoice.company_id
 
       errors.add(:timesheet_entry, "must belong to the same company")
     end
 
     def linked_timesheet_entries_belong_to_invoice_company
-      return if invoice.blank? || linked_timesheet_entries.blank?
-
-      invalid_entry = linked_timesheet_entries.find { |entry| entry.company&.id != invoice.company_id }
-      return unless invalid_entry
+      return if invoice.blank?
+      return if entry_references(linked_timesheet_entry_ids).all? { |entry| entry.company_id == invoice.company_id }
 
       errors.add(:linked_timesheet_entries, "must belong to the same company")
     end
