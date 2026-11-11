@@ -10,3 +10,7 @@ require Rails.root.join("packages/timekeeping_reservations/lib/timekeeping_reser
 # credential, so it comes from the process environment and never from a
 # checked-in file. Unset, no Timekeeping token verifies.
 Rails.configuration.x.timekeeping.token_key = ENV["TIMEKEEPING_TOKEN_KEY"]
+
+# Where Timekeeping serves its internal API (§11.2: TIMEKEEPING_URL, a plain
+# value). Unset, nothing in this application calls Timekeeping.
+Rails.configuration.x.timekeeping.url = ENV["TIMEKEEPING_URL"]

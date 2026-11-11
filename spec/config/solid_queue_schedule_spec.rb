@@ -54,6 +54,16 @@ RSpec.describe "Solid Queue schedule" do
     )
   end
 
+  it "runs the Timekeeping invoice operation worker on its own queue and sweeps every 5 seconds in the local runtime" do
+    task = config.dig("default", "dispatchers", 0, "recurring_tasks", "invoice_operations")
+    workers = config.dig("default", "workers")
+
+    expect(task).to include("class" => "Timekeeping::InvoiceOperationsJob", "schedule" => "*/5 * * * * *")
+    expect(Fugit.parse_cron(task.fetch("schedule")).seconds).to eq((0..55).step(5).to_a)
+    expect(workers).to include(include("queues" => "invoice_operations", "threads" => 1, "processes" => 1))
+    expect(Timekeeping::InvoiceOperationsJob.new.queue_name).to eq("invoice_operations")
+  end
+
   it "runs database backups every 30 minutes in production by default" do
     production_task = config.dig("production", "dispatchers", 0, "recurring_tasks", "database_backup")
 
