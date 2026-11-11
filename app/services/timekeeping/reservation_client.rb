@@ -15,9 +15,7 @@
 # or a transport error (Faraday::Error, a 2 s timeout included). This client
 # never retries on its own: the boundary retries prepare (§9.4), and the
 # worker's next sweep is the retry of commit and abort.
-class Timekeeping::ReservationClient
-  include Timekeeping::InternalApi
-
+class Timekeeping::ReservationClient < Timekeeping::InternalApi
   CONTRACT = :reservation_api
   WRITER = "invoice"
 

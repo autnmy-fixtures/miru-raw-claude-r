@@ -11,9 +11,7 @@
 # here, by InvoiceLineItemPolicy. A transport failure or any 5xx raises
 # Unavailable, which the caller answers as a retryable 503. Anything else
 # Timekeeping answers outside the contract raises as in every client.
-class Timekeeping::EntryClient
-  include Timekeeping::InternalApi
-
+class Timekeeping::EntryClient < Timekeeping::InternalApi
   CONTRACT = :entry_api
   WRITER = "invoice"
 

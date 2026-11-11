@@ -3,9 +3,9 @@
 # What every client of Timekeeping's internal API shares
 # (docs/architecture/timekeeping-soa.md §5.1): its configuration, its errors,
 # the system-actor token (§6.1), the 2 s timeout (§9.2 step 2, §9.4), and
-# reading an answer against the client's contract. A client includes this
-# module and names its contract in CONTRACT.
-module Timekeeping::InternalApi
+# reading an answer against the client's contract. A client inherits from
+# this class and names its contract in CONTRACT.
+class Timekeeping::InternalApi
   TIMEOUT = 2 # seconds, §9.2 step 2 and §9.4
   PROBLEM = "common.json#/$defs/problem"
 
