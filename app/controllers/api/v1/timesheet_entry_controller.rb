@@ -15,7 +15,8 @@ class Api::V1::TimesheetEntryController < Api::V1::ApplicationController
       company: current_company,
       from: parsed_date_param(:from) || 1.month.ago.beginning_of_month,
       to: parsed_date_param(:to) || 1.month.since.end_of_month,
-      year: params[:year] || Date.today.year
+      year: params[:year] || Date.today.year,
+      writer:
     ).entries_payload
 
     render :index, locals: {
@@ -54,9 +55,12 @@ class Api::V1::TimesheetEntryController < Api::V1::ApplicationController
 
   private
 
-    # This controller serves both W1 routes; the writer claim tells them
-    # apart (docs/architecture/timekeeping-soa.md §6.1).
+    # This controller serves both W1 routes, and MCP's miru.time.list
+    # reaches its index in-process (app/mcp/api_proxy.rb); the writer claim
+    # tells them apart (docs/architecture/timekeeping-soa.md §6.1).
     def writer
+      return "mcp" if request.env["miru.event_source"] == "mcp"
+
       request.path.start_with?("/api/v1/mobile/") ? "mobile" : "web"
     end
 
@@ -70,8 +74,12 @@ class Api::V1::TimesheetEntryController < Api::V1::ApplicationController
       @_current_project ||= current_company.projects.kept.find(params[:project_id])
     end
 
+    # Read from the owner of the entries (§3.3 rule 1), so an entry just
+    # written can be edited at once and is authorized on its current state.
     def current_timesheet_entry
-      @_current_timesheet_entry ||= current_company.timesheet_entries.kept.find(params[:id])
+      @_current_timesheet_entry ||= Timekeeping::EntryReads.call(
+        Timekeeping::EntryReads::Find.new(id: params[:id], company: current_company, writer:)
+      )
     end
 
     def timesheet_entry_user

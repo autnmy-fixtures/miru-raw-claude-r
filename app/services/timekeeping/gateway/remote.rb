@@ -145,11 +145,11 @@ module Timekeeping::Gateway::Remote
   end
   private_class_method :import_result
 
-  # The owner's entry, for rendering only: never saved.
+  # The owner's entry, for rendering only: never saved. Timekeeping::EntryReads
+  # answers its reads the same way.
   def self.record(entry)
     TimesheetEntry.new(entry.except("company_id")).tap(&:readonly!)
   end
-  private_class_method :record
 
   def self.refusal(problem)
     return Timekeeping::Ownership::Moving.new(I18n.t("timesheet_entry.ownership_moving")) if MOVING.include?(problem.type)

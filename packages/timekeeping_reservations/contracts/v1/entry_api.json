@@ -222,6 +222,7 @@
     "id_param": { "type": "string", "pattern": "^[1-9][0-9]*$" },
     "date_param": { "type": "string", "format": "date" },
     "list_query": {
+      "description": "The entry list (§3.3 rule 1): the kept entries of the token's company, of user_id when given, with work_date from `from` to `to` inclusive, in no stated order. An answer with a next_cursor is followed by asking again with that cursor; a null next_cursor is the last page.",
       "type": "object",
       "properties": {
         "user_id": { "$ref": "#/$defs/id_param" },
