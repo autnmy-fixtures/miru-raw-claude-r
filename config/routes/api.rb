@@ -285,3 +285,8 @@ namespace :internal_api, defaults: { format: "json" } do
     delete "analytics/reports/:id", to: "analytics_reports#destroy"
   end
 end
+
+# The Timekeeping relay delivers entry snapshots to the projection consumer
+# (docs/architecture/timekeeping-soa.md §5.4). The path is the contract's,
+# packages/timekeeping_reservations/contracts/v1/entry_snapshot.json.
+post "/internal/v1/projection/entry_snapshots", to: "timekeeping/entry_snapshots#create", as: :timekeeping_entry_snapshots

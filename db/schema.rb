@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_10_17_112000) do
+ActiveRecord::Schema[8.1].define(version: 2026_11_10_120000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
   enable_extension "pg_stat_statements"
@@ -1121,6 +1121,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_10_17_112000) do
     t.jsonb "source_metadata", default: {}, null: false
     t.datetime "updated_at", null: false
     t.bigint "user_id", null: false
+    t.bigint "version", default: 0, null: false
     t.date "work_date", null: false
     t.index ["agent_id", "review_status"], name: "index_timesheet_entries_on_agent_id_and_review_status"
     t.index ["agent_id"], name: "index_timesheet_entries_on_agent_id"
