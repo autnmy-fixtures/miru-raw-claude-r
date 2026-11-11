@@ -194,6 +194,14 @@ en:
       success:
         failure: Something went wrong, please contact support
         success: Payment successful
+    reservation:
+      busy: This invoice is being changed by another request, so nothing was saved. Try again in a moment.
+      failed: The invoice could not reserve its time entries, so nothing was saved.
+      refused:
+        not_found: Time entry %{entry_id} was not found, so the invoice was not saved.
+        on_other_invoice: Time entry %{entry_id} is already on another invoice, so the invoice was not saved.
+        wrong_company: Time entry %{entry_id} belongs to another workspace, so the invoice was not saved.
+      unavailable: Time tracking is unavailable, so the invoice was not saved. Try again in a minute.
   invoices_controller:
     download:
       pdf_failed: Failed to generate PDF

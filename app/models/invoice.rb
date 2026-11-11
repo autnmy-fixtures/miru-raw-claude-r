@@ -60,8 +60,8 @@ class Invoice < ApplicationRecord
   before_validation :calculate_amounts, if: :totals_recalculation_needed?
   before_validation :calculate_base_currency_amount
   after_save :sync_nested_line_item_totals, if: -> { skip_line_item_total_sync && !syncing_nested_line_item_totals }
-  after_save :lock_timesheet_entries, if: :draft?
-  after_discard :unlock_timesheet_entries, if: :draft?
+  after_save :lock_timesheet_entries, if: :draft_with_callback_reservations?
+  after_discard :unlock_timesheet_entries, if: :draft_with_callback_reservations?
   after_discard :update_invoice_number
   after_commit :reset_skip_line_item_total_sync
   after_rollback :reset_skip_line_item_total_sync
@@ -198,6 +198,10 @@ class Invoice < ApplicationRecord
       if status_changed? && status.to_sym == :waived && ![:sent, :overdue, :viewed].include?(status_was.to_sym)
         errors.add(:status, t("errors.prevent_draft_to_waived"))
       end
+    end
+
+    def draft_with_callback_reservations?
+      draft? && Timekeeping::Ownership.reservations_by_callbacks?
     end
 
     def lock_timesheet_entries

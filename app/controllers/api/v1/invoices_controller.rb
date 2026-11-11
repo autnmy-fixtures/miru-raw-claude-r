@@ -20,7 +20,7 @@ class Api::V1::InvoicesController < Api::V1::ApplicationController
 
   def create
     authorize Invoice
-    @invoice = current_company.invoices.create!(invoice_params)
+    @invoice = Timekeeping::InvoiceWrites.new.create(current_company, invoice_params)
     render :create, locals: {
       invoice: @invoice,
       client: @client,
@@ -40,7 +40,7 @@ class Api::V1::InvoicesController < Api::V1::ApplicationController
 
   def update
     authorize invoice
-    invoice.update!(invoice_params)
+    Timekeeping::InvoiceWrites.new.update(invoice, invoice_params)
     render :update, locals: {
       invoice:,
       client: @client
@@ -58,7 +58,7 @@ class Api::V1::InvoicesController < Api::V1::ApplicationController
 
   def destroy
     authorize invoice
-    invoice.discard!
+    Timekeeping::InvoiceWrites.new.discard(invoice)
   end
 
   def send_invoice
