@@ -2,6 +2,7 @@
 
 class Invoice < ApplicationRecord
   include Discardable
+  include Timekeeping::BillingWriteFence
   include InvoiceSendable
   include ClientPaymentSendable
   include Searchable

@@ -12,42 +12,12 @@ require "rails_helper"
 # it afterwards. The command they run is a bulk discard of no entries: it
 # passes the whole fence and writes nothing, so nothing else needs cleaning.
 RSpec.describe "Timekeeping gateway admission across connections", type: :model do
+  include TimekeepingConnections
+
   gateway = Timekeeping::Gateway
 
   let(:command) { gateway::BulkDiscard.new(entries: TimesheetEntry.none) }
   let(:raise_generation) { { generation: 1, state: "closed" } }
-
-  # Every wait is bounded, so a broken fence fails the example instead of
-  # leaving a thread parked on a queue with a pooled connection.
-  def wait_seconds = 5
-
-  def on_own_connection(&block)
-    Thread.new { ActiveRecord::Base.connection_pool.with_connection(&block) }.tap { |thread| thread.report_on_exception = false }
-  end
-
-  def run_on_own_connection(&)
-    on_own_connection(&).value
-  end
-
-  def take(queue)
-    queue.pop(timeout: wait_seconds) || raise("timed out waiting for another connection")
-  end
-
-  def waiting_on_lock?(connection, pid)
-    connection.select_value(
-      "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = #{Integer(pid)} AND wait_event_type = 'Lock')"
-    )
-  end
-
-  # The lock wait starts within milliseconds of the command being sent.
-  def wait_until_waiting_on_lock(connection, pid)
-    (wait_seconds * 10).times do
-      return true if waiting_on_lock?(connection, pid)
-
-      sleep 0.1
-    end
-    false
-  end
 
   before { run_on_own_connection { Timekeeping::Ownership.create!(TimekeepingOwnershipStates::BEFORE_FIRST_HANDOFF) } }
 
@@ -102,6 +72,6 @@ RSpec.describe "Timekeeping gateway admission across connections", type: :model 
     end
 
     expect(handoff.value).to be(true), "the command never waited on the handoff's lock"
-    expect { writer.value }.to raise_error(gateway::OwnershipMoving)
+    expect { writer.value }.to raise_error(Timekeeping::Ownership::Moving)
   end
 end

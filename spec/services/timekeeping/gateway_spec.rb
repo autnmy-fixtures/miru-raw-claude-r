@@ -58,7 +58,7 @@ RSpec.describe Timekeeping::Gateway, type: :model do
   # owner is; with admission open, only the legacy owner runs here so far.
   TimekeepingOwnershipStates::AFTER_HANDOFF_BEGUN.each do |state, attributes|
     refusal, pattern = if attributes[:state] != "open"
-      [described_class::OwnershipMoving, /being moved between services/]
+      [Timekeeping::Ownership::Moving, /being moved between services/]
     elsif attributes[:owner] != "legacy"
       [described_class::OwnerUnavailable, /owner #{attributes[:owner]} .* DiscardEntry refused/]
     end
