@@ -2,6 +2,19 @@
 
 module GenerateInvoice
   class NewLineItemsService < ApplicationService
+    # Where candidate selection reads (docs/architecture/timekeeping-soa.md
+    # §3.3 rule 1): a read that decides money reads the owner of the entries.
+    # Under `legacy` that is today's table. Under `timekeeping` it is the
+    # owner's candidates, never the projection, which may lag behind it, so a
+    # new entry can be invoiced at once (§12.4 "relay paused"). The `monolith`
+    # owner arrives with its own entry store (§10.5); until then selection
+    # refuses under it, as the gateway and the invoice boundary do.
+    CANDIDATE_READS = { "legacy" => :table_candidates, "timekeeping" => :owner_candidates }.freeze
+
+    # An owner's candidate with the catalogue records the suggestions read,
+    # shaped as a loaded TimesheetEntry is.
+    OwnerCandidate = Data.define(:id, :project_id, :user_id, :note, :work_date, :duration, :project, :user)
+
     attr_reader :client, :projects, :params
     attr_accessor :total_count
 
@@ -12,21 +25,24 @@ module GenerateInvoice
     end
 
     def process
+      entries = new_line_item_entries
       {
         filter_options: {
           team_members: team_members_of_projects
         },
-        new_line_item_entries:,
+        new_line_item_entries: entries,
         total_new_line_items: total_count
       }
     end
 
     private
 
-      # Sending team members list for filter dropdown options
+      # Sending team members list for filter dropdown options. The members of
+      # the candidates are included too: under an owner, a candidate may not
+      # be projected yet.
       def team_members_of_projects
         @team_members_of_projects ||= User.where(
-          id: TimesheetEntry.kept.where(project_id: @projects).pluck(:user_id)
+          id: TimesheetEntry.kept.where(project_id: @projects).pluck(:user_id) | candidates.map(&:user_id)
         )
       end
 
@@ -47,12 +63,11 @@ module GenerateInvoice
       end
 
       def where_clause
-        allowed_project_ids = @projects.ids
         filters = TimeEntries::Filters.process(params)
-        filters[:project_id] = Array(filters[:project_id]) & allowed_project_ids if filters[:project_id]
+        filters[:project_id] = selected_project_ids(filters) if filters[:project_id]
 
         {
-          project_id: allowed_project_ids,
+          project_id: @projects.ids,
           id: { not: filtered_ids },
           bill_status: "unbilled",
           discarded_at: nil
@@ -63,11 +78,65 @@ module GenerateInvoice
         @_search_term = params[:search_term].presence || "*"
       end
 
+      # The client's kept projects, narrowed by the client filter when given.
+      def selected_project_ids(filters)
+        allowed_project_ids = @projects.ids
+        filters.key?(:project_id) ? Array(filters[:project_id]) & allowed_project_ids : allowed_project_ids
+      end
+
       def new_line_item_entries
-        timesheet_entries = search_timesheet_entries(search_term, where_clause)
+        timesheet_entries = candidates
 
         @total_count = timesheet_entries.count
         format_timesheet_entries(timesheet_entries)
+      end
+
+      def candidates
+        @candidates ||= send(CANDIDATE_READS.fetch(owner) {
+          raise Timekeeping::Gateway::OwnerUnavailable, "invoice candidate selection: owner #{owner} has no entry store yet"
+        })
+      end
+
+      def owner
+        @owner ||= Timekeeping::Ownership.current.owner
+      end
+
+      def table_candidates
+        search_timesheet_entries(search_term, where_clause)
+      end
+
+      # The same selection, asked of the owner (§5.2 candidates). The owner
+      # excludes every entry an invoice holds by its reservations, so only
+      # the entries the caller already selected are excluded here; kept and
+      # unbilled are the contract's own conditions.
+      def owner_candidates
+        filters = TimeEntries::Filters.process(params)
+        entries = Timekeeping::EntryClient.new.candidates(
+          company: client.company,
+          client_id: client.id,
+          project_ids: selected_project_ids(filters),
+          user_ids: filters.key?(:user_id) ? row_ids(filters[:user_id]) : nil,
+          exclude_ids: row_ids(params[:selected_entries]),
+          work_dates: filters[:work_date]&.then { |dates| dates.begin.to_date..dates.end.to_date },
+          search_term: (search_term unless search_term == "*")
+        )
+        with_catalogue(entries)
+      end
+
+      # Posted ids as decimal integers; one that can name no row is dropped.
+      def row_ids(ids)
+        Array(ids).filter_map { |id| Integer(id.to_s, 10, exception: false) }.select(&:positive?)
+      end
+
+      def with_catalogue(entries)
+        projects = @projects.index_by(&:id)
+        users = User.where(id: entries.map(&:user_id)).index_by(&:id)
+        entries.map do |entry|
+          OwnerCandidate.new(
+            **entry.to_h.slice(*OwnerCandidate.members),
+            project: projects.fetch(entry.project_id), user: users.fetch(entry.user_id)
+          )
+        end
       end
 
       def search_timesheet_entries(search_term, where_clause)

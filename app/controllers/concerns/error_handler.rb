@@ -12,6 +12,7 @@ module ErrorHandler
     rescue_from Timekeeping::Ownership::Moving, with: :ownership_moving
     rescue_from Timekeeping::InvoiceBoundary::Failed, with: :invoice_reservation_failed
     rescue_from Timekeeping::InvoiceOperation::Busy, with: :invoice_operation_busy
+    rescue_from Timekeeping::EntryClient::Unavailable, with: :timekeeping_unavailable
   end
 
   # How an invoice write that the reservation boundary failed is answered
@@ -105,6 +106,13 @@ module ErrorHandler
     # Another operation of the same invoice is still pending (§9.1).
     def invoice_operation_busy(_exception)
       render json: { errors: I18n.t("invoices.reservation.busy") }, status: 409
+    end
+
+    # A read that decides money could not reach the owner of the entries
+    # (docs/architecture/timekeeping-soa.md §3.3 rule 1). Nothing was read,
+    # and the same request may succeed later.
+    def timekeeping_unavailable(_exception)
+      render json: { errors: I18n.t("timesheet_entry.unavailable") }, status: 503
     end
 
     def invalid_param_value(exception)
