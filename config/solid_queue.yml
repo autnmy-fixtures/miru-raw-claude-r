@@ -30,12 +30,19 @@ default: &default
         update_exchange_rates:
           class: UpdateExchangeRatesJob
           schedule: '0 2 * * *'  # Runs every day at 2AM UTC to warm the FX rate cache
+        invoice_operations:
+          class: Timekeeping::InvoiceOperationsJob
+          schedule: '*/5 * * * * *'  # Every 5 seconds: Timekeeping invoice operation recovery and delivery
   workers:
     - queues: default
       threads: 5
       processes: 1
       polling_interval: 0.1
     - queues: billing_sync
+      threads: 1
+      processes: 1
+      polling_interval: 0.5
+    - queues: invoice_operations
       threads: 1
       processes: 1
       polling_interval: 0.5
