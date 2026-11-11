@@ -54,14 +54,15 @@ class Timekeeping::InvoiceOperation < ApplicationRecord
   # What the invoice operation worker delivers for each outcome (§9.1).
   DELIVERIES = { "succeeded" => :commit, "failed" => :abort }.freeze
 
+  # The terminal receipt the owner stores for each outcome (§5.3).
+  RECEIPTS = { "succeeded" => "committed", "failed" => "aborted" }.freeze
+
   # §9.2 step 3: prepare answered 200 with this operation's terminal receipt,
-  # so the change is never re-run. [receipt, intent] => what the save does.
-  # Every other pair, an intent still pending included, is :unreconciled: a
-  # retryable reconciliation error that changes nothing.
-  RECONCILIATIONS = {
-    ["committed", "succeeded"] => :succeeded,
-    ["aborted", "failed"] => :failed
-  }.freeze
+  # so the change is never re-run. [receipt, intent] => what the save does:
+  # only an outcome and its own receipt agree. Every other pair, an intent
+  # still pending included, is :unreconciled: a retryable reconciliation
+  # error that changes nothing.
+  RECONCILIATIONS = RECEIPTS.to_h { |state, receipt| [[receipt, state], state.to_sym] }.freeze
 
   scope :undelivered, -> { where(state: DELIVERIES.keys, delivered_at: nil) }
   scope :pending_before, ->(time) { state_pending.where(created_at: ...time) }
@@ -127,6 +128,15 @@ class Timekeeping::InvoiceOperation < ApplicationRecord
   # with the intent as stored now.
   def reconcile(receipt)
     RECONCILIATIONS.fetch([receipt.to_s, reload.state], :unreconciled)
+  end
+
+  # The `resolves` this intent's prepare carries (§5.3): the outcome of the
+  # latest earlier operation of its invoice not yet delivered, which the owner
+  # may still hold unresolved, or nil. An undelivered outcome is never
+  # pending: .open! admits one pending intent per invoice, and this one is it.
+  def resolves
+    earlier = self.class.undelivered.where(invoice_id:, id: ...id).order(:id).last
+    earlier && { "operation_id" => earlier.operation_id, "outcome" => RECEIPTS.fetch(earlier.state) }
   end
 
   # The call the worker sends for this outcome. A pending intent has none.
