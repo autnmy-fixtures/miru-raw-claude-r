@@ -22,6 +22,48 @@ RSpec.describe Timekeeping::ReservationClient do
 
   after { expect(fake.violations).to be_empty }
 
+  describe "#prepare" do
+    it "prepares the intent's desired set and answers the prepared entries (§5.3)" do
+      answer = client.prepare(intent, invoice_state: :draft, resolves: nil)
+
+      expect(answer).to eq(described_class::Prepared.new(entries: [described_class::PreparedEntry.new(
+        id: entry["id"], company_id: company.id, project_id: 7, user_id: 3, duration: 90.7, work_date: "2026-11-02", version: 1
+      )]))
+      expect(fake.calls.sole.input).to eq(
+        "company_id" => company.id, "generation" => 4, "kind" => "save", "invoice_state" => "draft",
+        "entry_ids" => [entry["id"]], "resolves" => nil
+      )
+      expect(fake.holding(entry["id"]).state).to eq(:provisional)
+    end
+
+    it "answers the stored receipt of an operation already terminal" do
+      prepare_in_timekeeping(intent)
+      client.commit(intent)
+
+      expect(client.prepare(intent, invoice_state: :draft, resolves: nil)).to eq(described_class::Receipt.new(status: "committed"))
+    end
+
+    it "carries resolves, which settles the invoice's earlier operation first" do
+      earlier = intent.dup.tap { |copy| copy.operation_id = SecureRandom.uuid }
+      prepare_in_timekeeping(earlier)
+
+      client.prepare(intent, invoice_state: :non_draft, resolves: { "operation_id" => earlier.operation_id, "outcome" => "aborted" })
+
+      expect(client.commit(earlier)).to eq(described_class::Receipt.new(status: "aborted"))
+    end
+
+    it "raises a refusal with every refused entry and its reason (F1, L8)" do
+      other_company = create(:company)
+      foreign = fake.seed_entry(company_id: other_company.id, project_id: 8, user_id: 4, duration: 30.0, work_date: "2026-11-03")
+      intent.entry_ids = [entry["id"], foreign["id"]]
+
+      expect { client.prepare(intent, invoice_state: :draft, resolves: nil) }.to raise_error(described_class::Problem) { |problem|
+        expect([problem.status, problem.type, problem.retryable]).to eq([409, "reservation-refused", false])
+        expect(problem.refused).to eq([TimekeepingReservations::Refusal.new(entry_id: foreign["id"], reason: :wrong_company)])
+      }
+    end
+  end
+
   it "commits a prepared operation and answers Timekeeping's receipt" do
     prepare_in_timekeeping(intent)
 

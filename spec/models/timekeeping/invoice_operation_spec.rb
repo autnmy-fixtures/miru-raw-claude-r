@@ -196,6 +196,31 @@ RSpec.describe Timekeeping::InvoiceOperation, type: :model do
     end
   end
 
+  describe "#resolves (§5.3)" do
+    it "carries nothing for the first operation of an invoice" do
+      expect(open_intent.resolves).to be_nil
+    end
+
+    it "carries the outcome of the latest earlier operation of the invoice not yet delivered, as its receipt" do
+      committed = open_intent.tap { |intent| in_invoice_transaction { intent.succeed! } }
+      expect(open_intent.resolves).to eq("operation_id" => committed.operation_id, "outcome" => "committed")
+
+      aborted = described_class.state_pending.find_by!(invoice_id:).tap(&:record_failure!)
+      expect(open_intent.resolves).to eq("operation_id" => aborted.operation_id, "outcome" => "aborted")
+    end
+
+    it "skips outcomes already delivered, other invoices' operations and later ones" do
+      open_intent.tap(&:record_failure!).mark_delivered!
+      described_class.open!(invoice_id: 502, company_id: 42, kind: :save).record_failure!
+      intent = open_intent
+      intent.record_failure!
+      later = open_intent
+
+      expect(intent.resolves).to be_nil
+      expect(later.resolves).to eq("operation_id" => intent.operation_id, "outcome" => "aborted")
+    end
+  end
+
   describe "delivery (§9.1: the ledger is its own outbox)" do
     it "has nothing to deliver for a pending intent" do
       intent = open_intent
