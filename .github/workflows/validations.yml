@@ -15,7 +15,7 @@ concurrency:
 jobs:
   tests:
     name: Running tests
-    runs-on: ubuntu-latest  # Standard 2-core runner
+    runs-on: ubuntu-24.04  # Standard 2-core runner
     timeout-minutes: 45
     permissions:
       contents: read
@@ -148,7 +148,7 @@ jobs:
 
   responsive-system-specs:
     name: Responsive system specs
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -222,7 +222,7 @@ jobs:
 
   security-audit:
     name: Security audit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read
