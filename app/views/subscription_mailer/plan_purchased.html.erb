@@ -1,0 +1,25 @@
+<% content_for :email_preheader, "#{t("mailers.subscription.plan_purchased.title", company: @company.name, plan: @display_plan_label)}. #{t("mailers.subscription.plan_purchased.subtitle")}" %>
+<% content_for :email_eyebrow, t("mailers.subscription.plan_purchased.badge") %>
+<% content_for :email_title, t("mailers.subscription.plan_purchased.title", company: @company.name, plan: @display_plan_label) %>
+<% content_for :email_subtitle do %>
+  <%= t("mailers.subscription.plan_purchased.subtitle") %>
+<% end %>
+
+<div class="email-panel email-panel-success">
+  <p class="email-panel-title"><%= t("mailers.subscription.plan_purchased.company") %></p>
+  <p style="margin: 0;"><%= t("mailers.subscription.plan_purchased.subtitle") %></p>
+</div>
+
+<%= render "shared/mailer/fact_rows", rows: [
+  { label: t("mailers.subscription.plan_purchased.company"), value: @company.name },
+  { label: t("mailers.subscription.plan_purchased.plan"), value: @display_plan_label },
+  { label: t("mailers.subscription.plan_purchased.billing_interval"), value: @subscription_interval },
+  { label: t("mailers.subscription.plan_purchased.team_seats"), value: @seat_quantity },
+  { label: t("mailers.subscription.plan_purchased.stripe_subscription"), value: @stripe_subscription_id }
+] %>
+
+<%= render "shared/mailer/button", href: @billing_url, label: t("mailers.subscription.plan_purchased.cta") %>
+
+<p class="email-muted" style="margin-top: 18px;">
+  <%= t("mailers.subscription.plan_purchased.billing_settings_html", url: @billing_url) %>
+</p>

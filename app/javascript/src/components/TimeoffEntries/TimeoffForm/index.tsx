@@ -1,0 +1,417 @@
+import { HOLIDAY_TYPES } from "constants/index";
+
+import React, { useState, useEffect } from "react";
+
+import { timeoffEntriesApi } from "apis/api";
+import { useTimesheetEntries } from "context/TimesheetEntries";
+import { useUserContext } from "context/UserContext";
+import dayjs from "dayjs";
+import customParseFormat from "dayjs/plugin/customParseFormat";
+import { buildDateParseFormats, minFromHHMM, minToHHMM } from "helpers";
+
+import { i18n } from "../../../i18n";
+import DesktopTimeoffForm from "./DesktopTimeoffForm";
+import MobileTimeoffForm from "./MobileTimeoffForm";
+
+dayjs.extend(customParseFormat);
+
+const TimeoffForm = ({ isDisplayEditTimeoffEntryForm = false }) => {
+  const { company, isDesktop } = useUserContext();
+
+  const {
+    leaveTypes,
+    setLeaveTypes,
+    entryList,
+    selectedFullDate,
+    setUpdateView,
+    setNewTimeoffEntryView,
+    selectedEmployeeId,
+    fetchEntries,
+    fetchEntriesOfMonths,
+    handleAddEntryDateChange,
+    refreshVisibleEntries,
+    editTimeoffEntryId,
+    setEditTimeoffEntryId,
+    handleFilterEntry,
+    setSelectedFullDate,
+    holidayList,
+    holidaysHashObj,
+    hasNationalHoliday,
+    hasOptionalHoliday,
+  } = useTimesheetEntries();
+
+  const [note, setNote] = useState<string>("");
+  const [displayDatePicker, setDisplayDatePicker] = useState<boolean>(false);
+  const [duration, setDuration] = useState<string>("08:00");
+  const [selectedDate, setSelectedDate] = useState<string>(selectedFullDate);
+  const [leaveTypeId, setLeaveTypeId] = useState<number | string>("");
+  const [leaveType, setLeaveType] = useState<string>("");
+  const [holidayId, setHolidayId] = useState<number | string>("");
+  const [holiday, setHoliday] = useState<string>("");
+  const [isShowHolidayList, setIsShowHolidayList] = useState<boolean>(false);
+  const [holidayOptions, setHolidayOptions] = useState([]);
+  const [showLeavesList, setShowLeavesList] = useState<boolean>(false);
+  const [showDeleteDialog, setShowDeleteDialog] = useState<boolean>(false);
+
+  useEffect(() => {
+    const tempLeaveTypes = [...leaveTypes];
+    if (hasNationalHoliday) {
+      const isNationalHolidayAlreadyAdded = leaveTypes?.find(
+        leave => leave.category === HOLIDAY_TYPES.NATIONAL
+      );
+      if (!isNationalHolidayAlreadyAdded) {
+        const nationalHolidayLeaveTypeObj = {
+          id: HOLIDAY_TYPES.NATIONAL,
+          name: i18n.t("leaveManagement.nationalHoliday"),
+          category: HOLIDAY_TYPES.NATIONAL,
+        };
+        tempLeaveTypes.push({ ...nationalHolidayLeaveTypeObj });
+      }
+    }
+
+    if (hasOptionalHoliday) {
+      const isOptionalHolidayAlreadyAdded = leaveTypes?.find(
+        leave => leave.category === HOLIDAY_TYPES.OPTIONAL
+      );
+      if (!isOptionalHolidayAlreadyAdded) {
+        const optionalHolidayLeaveTypeObj = {
+          id: HOLIDAY_TYPES.OPTIONAL,
+          name: i18n.t("leaveManagement.optionalHoliday"),
+          category: HOLIDAY_TYPES.OPTIONAL,
+        };
+        tempLeaveTypes.push({ ...optionalHolidayLeaveTypeObj });
+      }
+    }
+
+    if (leaveTypes?.length !== tempLeaveTypes?.length) {
+      setLeaveTypes([...tempLeaveTypes]);
+    }
+  }, [hasNationalHoliday, hasOptionalHoliday]);
+
+  useEffect(() => {
+    if (isDisplayEditTimeoffEntryForm) {
+      handleFillData();
+    }
+  }, [
+    isDisplayEditTimeoffEntryForm,
+    editTimeoffEntryId,
+    selectedFullDate,
+    entryList,
+    leaveTypes,
+  ]);
+
+  useEffect(() => {
+    if (isHolidayEntry()) {
+      const tempHolidayOptions =
+        holidayList?.filter(holiday => holiday?.category === leaveTypeId) || [];
+      setHolidayOptions([...tempHolidayOptions]);
+      handleSuggestedHolidayBasedOnDate(tempHolidayOptions);
+    } else {
+      setIsShowHolidayList(false);
+    }
+  }, [leaveTypeId]);
+
+  useEffect(() => {
+    if (!isDisplayEditTimeoffEntryForm && selectedFullDate !== selectedDate) {
+      setSelectedDate(selectedFullDate);
+    }
+  }, [selectedFullDate, isDisplayEditTimeoffEntryForm]);
+
+  const handleSuggestedHolidayBasedOnDate = (currentHolidayOptions: any[]) => {
+    if (!isDisplayEditTimeoffEntryForm && currentHolidayOptions?.length > 0) {
+      const suggestedHoliday = currentHolidayOptions?.find(
+        holiday => holiday?.date === selectedDate
+      );
+      setHolidayId(suggestedHoliday?.id || 0);
+    }
+  };
+
+  const isHolidayEntry = () =>
+    leaveTypeId === HOLIDAY_TYPES.NATIONAL ||
+    leaveTypeId === HOLIDAY_TYPES.OPTIONAL;
+
+  const isCustomLeaveEntry = () =>
+    typeof leaveTypeId === "string" &&
+    leaveTypeId.toString().startsWith("custom_");
+
+  const getCustomLeaveId = () => {
+    if (isCustomLeaveEntry()) {
+      return Number(leaveTypeId.toString().replace("custom_", ""));
+    }
+
+    return null;
+  };
+
+  const findEditableTimeoffEntry = () => {
+    const selectedDateEntries = entryList[selectedFullDate] || [];
+    const matchingSelectedDateEntry = selectedDateEntries.find(
+      entry => entry.id === editTimeoffEntryId
+    );
+    if (matchingSelectedDateEntry) return matchingSelectedDateEntry;
+
+    const allEntries = Object.values(entryList || {}).flat();
+
+    return allEntries.find(entry => entry.id === editTimeoffEntryId);
+  };
+
+  const parseLeaveDate = (leaveDate?: string) => {
+    if (!leaveDate) return null;
+
+    const parsedDate = dayjs(
+      leaveDate,
+      buildDateParseFormats(company?.date_format || company?.dateFormat),
+      true
+    );
+
+    return parsedDate.isValid() ? parsedDate.format("YYYY-MM-DD") : null;
+  };
+
+  const handleFillData = () => {
+    const timeoffEntry = findEditableTimeoffEntry();
+
+    if (timeoffEntry) {
+      setDuration(minToHHMM(timeoffEntry?.duration || 0));
+      setNote(timeoffEntry?.note || "");
+      if (timeoffEntry?.leave_date) {
+        setSelectedDate(
+          parseLeaveDate(timeoffEntry.leave_date) || selectedFullDate
+        );
+      }
+
+      if (timeoffEntry?.holiday_info_id) {
+        const currentHolidayId = timeoffEntry.holiday_info_id || 0;
+        const currentHolidayDetails = holidaysHashObj[currentHolidayId];
+        const selectedLeaveType = leaveTypes.find(
+          leaveType => leaveType.id === currentHolidayDetails?.category
+        );
+        setLeaveTypeId(selectedLeaveType?.id);
+        setLeaveType(selectedLeaveType?.name);
+        setHolidayId(currentHolidayId);
+        setHoliday(currentHolidayDetails?.name);
+      } else if (timeoffEntry?.custom_leave_id) {
+        // Custom leave uses composite id format: "custom_<id>"
+        const compositeId = `custom_${timeoffEntry.custom_leave_id}`;
+        const selectedLeaveType = leaveTypes.find(
+          leaveType => leaveType.id === compositeId
+        );
+        setLeaveTypeId(compositeId);
+        setLeaveType(selectedLeaveType?.name || "");
+      } else {
+        const selectedLeaveType = leaveTypes.find(
+          leaveType => leaveType.id === timeoffEntry.leave_type_id
+        );
+        setLeaveTypeId(timeoffEntry.leave_type_id);
+        setLeaveType(selectedLeaveType?.name || "");
+      }
+    }
+  };
+
+  const handleDateChangeFromDatePicker = (date: Date) => {
+    setSelectedDate(dayjs(date).format("YYYY-MM-DD"));
+    setDisplayDatePicker(false);
+  };
+
+  const handleDurationChange = val => {
+    setDuration(val);
+  };
+
+  const incrementOrDecrementTime = (increment = true) => {
+    const currentMinutes = minFromHHMM(duration);
+    const updatedMinutes = increment
+      ? currentMinutes + 15
+      : currentMinutes - 15;
+    const updatedDuration = minToHHMM(updatedMinutes);
+    setDuration(updatedDuration);
+  };
+
+  const isValidTimeEntry = () => {
+    const isValidLeaveTypeOrHolidayId =
+      (isHolidayEntry() && Number(holidayId) > 0) ||
+      isCustomLeaveEntry() ||
+      Number(leaveTypeId) > 0;
+
+    return (
+      isValidLeaveTypeOrHolidayId &&
+      duration?.length > 0 &&
+      selectedDate?.length > 0
+    );
+  };
+
+  const getPayload = (timeoffEntry?: any) => {
+    if (isValidTimeEntry()) {
+      const payload = {
+        duration: timeoffEntry?.duration || minFromHHMM(duration),
+        leave_date: parseLeaveDate(timeoffEntry?.leave_date) || selectedDate,
+        user_id: selectedEmployeeId,
+        note: timeoffEntry?.note || note,
+      };
+
+      if (isHolidayEntry()) {
+        payload["holiday_info_id"] =
+          timeoffEntry?.holiday_info_id || Number(holidayId);
+        payload["leave_type_id"] = null;
+        payload["custom_leave_id"] = null;
+      } else if (isCustomLeaveEntry()) {
+        payload["custom_leave_id"] =
+          timeoffEntry?.custom_leave_id || getCustomLeaveId();
+        payload["leave_type_id"] = null;
+        payload["holiday_info_id"] = null;
+      } else {
+        payload["leave_type_id"] =
+          timeoffEntry?.leave_type_id || Number(leaveTypeId);
+        payload["holiday_info_id"] = null;
+        payload["custom_leave_id"] = null;
+      }
+
+      return { timeoff_entry: { ...payload } };
+    }
+  };
+
+  const handleSubmit = () => {
+    if (editTimeoffEntryId && isDisplayEditTimeoffEntryForm) {
+      handleEditTimeoffEntry();
+    } else {
+      handleSaveTimeoffEntry();
+    }
+  };
+
+  const handleSaveTimeoffEntry = async () => {
+    const payload = getPayload();
+    if (payload) {
+      const res = await timeoffEntriesApi.create(payload, selectedEmployeeId);
+
+      if (res.status === 200) {
+        const fetchEntriesRes =
+          (await refreshVisibleEntries?.(selectedEmployeeId)) ||
+          (await fetchEntries(selectedDate, selectedDate));
+
+        if (fetchEntriesRes) {
+          setNewTimeoffEntryView(false);
+          setUpdateView(true);
+          handleAddEntryDateChange(dayjs(selectedDate));
+        }
+      }
+    }
+  };
+
+  const handleEditTimeoffEntry = async () => {
+    const payload = getPayload();
+
+    if (payload) {
+      const updateRes = await timeoffEntriesApi.update(
+        editTimeoffEntryId,
+        payload
+      );
+
+      if (updateRes.status >= 200 && updateRes.status < 300) {
+        (await refreshVisibleEntries?.(selectedEmployeeId)) ||
+          (await fetchEntries(selectedDate, selectedDate));
+
+        setEditTimeoffEntryId(0);
+        setNewTimeoffEntryView(false);
+        setUpdateView(true);
+        handleAddEntryDateChange(dayjs(selectedDate));
+        if (dayjs(selectedDate).isValid()) {
+          setSelectedFullDate(dayjs(selectedDate).format("YYYY-MM-DD"));
+        }
+      }
+    }
+  };
+
+  const handleClose = () => {
+    setNewTimeoffEntryView(false);
+    setEditTimeoffEntryId(0);
+  };
+
+  const handleDeleteTimeoffEntry = async timeoffEntryId => {
+    if (!timeoffEntryId) return;
+    setEditTimeoffEntryId(0);
+    setNewTimeoffEntryView(false);
+    const res = await timeoffEntriesApi.destroy(timeoffEntryId);
+
+    if (res.status === 200) {
+      await handleFilterEntry(selectedFullDate, timeoffEntryId);
+    }
+  };
+
+  const handleDuplicateTimeoffEntry = async () => {
+    if (!editTimeoffEntryId) return;
+    setEditTimeoffEntryId(0);
+    setNewTimeoffEntryView(false);
+    const timeoffEntry = entryList[selectedFullDate]?.find(
+      entry => entry.id === editTimeoffEntryId
+    );
+
+    if (timeoffEntry) {
+      const payload = getPayload(timeoffEntry);
+      if (payload) {
+        const res = await timeoffEntriesApi.create(payload, selectedEmployeeId);
+        if (res.status === 200) {
+          await fetchEntries(selectedFullDate, selectedFullDate);
+          await fetchEntriesOfMonths();
+        }
+      }
+    }
+  };
+
+  return (
+    <>
+      {isDesktop ? (
+        <DesktopTimeoffForm
+          displayDatePicker={displayDatePicker}
+          duration={duration}
+          handleDateChangeFromDatePicker={handleDateChangeFromDatePicker}
+          handleDurationChange={handleDurationChange}
+          handleSubmit={handleSubmit}
+          holidayId={holidayId}
+          holidayOptions={holidayOptions}
+          isDisplayEditTimeoffEntryForm={isDisplayEditTimeoffEntryForm}
+          isHolidayEntry={isHolidayEntry}
+          isShowHolidayList={isShowHolidayList}
+          isValidTimeEntry={isValidTimeEntry}
+          leaveTypeId={leaveTypeId}
+          note={note}
+          selectedDate={selectedDate}
+          setDisplayDatePicker={setDisplayDatePicker}
+          setHolidayId={setHolidayId}
+          setLeaveTypeId={setLeaveTypeId}
+          setNote={setNote}
+        />
+      ) : (
+        <MobileTimeoffForm
+          displayDatePicker={displayDatePicker}
+          duration={duration}
+          handleClose={handleClose}
+          handleDateChangeFromDatePicker={handleDateChangeFromDatePicker}
+          handleDeleteTimeoffEntry={handleDeleteTimeoffEntry}
+          handleDuplicateTimeoffEntry={handleDuplicateTimeoffEntry}
+          handleDurationChange={handleDurationChange}
+          handleSubmit={handleSubmit}
+          holiday={holiday}
+          holidayOptions={holidayOptions}
+          incrementOrDecrementTime={incrementOrDecrementTime}
+          isHolidayEntry={isHolidayEntry}
+          isShowHolidayList={isShowHolidayList}
+          isValidTimeEntry={isValidTimeEntry}
+          leaveType={leaveType}
+          note={note}
+          selectedDate={selectedDate}
+          setDisplayDatePicker={setDisplayDatePicker}
+          setHoliday={setHoliday}
+          setHolidayId={setHolidayId}
+          setIsShowHolidayList={setIsShowHolidayList}
+          setLeaveType={setLeaveType}
+          setLeaveTypeId={setLeaveTypeId}
+          setNote={setNote}
+          setSelectedDate={setSelectedDate}
+          setShowDeleteDialog={setShowDeleteDialog}
+          setShowLeavesList={setShowLeavesList}
+          showDeleteDialog={showDeleteDialog}
+          showLeavesList={showLeavesList}
+        />
+      )}
+    </>
+  );
+};
+
+export default TimeoffForm;

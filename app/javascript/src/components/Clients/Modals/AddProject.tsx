@@ -1,0 +1,156 @@
+import React, { useState } from "react";
+
+import { projectApi } from "apis/api";
+import { XIcon } from "miruIcons";
+import { Modal } from "StyledComponents";
+import { i18n } from "../../../i18n";
+
+const AddProject = ({
+  showProjectModal,
+  setShowProjectModal,
+  clientDetails,
+  fetchProjectList,
+}) => {
+  const [client, setClient] = useState<any>(null);
+  const [projectName, setProjectName] = useState<any>(null);
+  const [projectType, setProjectType] = useState<any>("Billable");
+
+  const handleSubmit = async () => {
+    await projectApi.create({
+      project: {
+        client_id: client,
+        name: projectName,
+        billable: projectType === "Billable",
+      },
+    });
+    setShowProjectModal(false);
+    fetchProjectList();
+  };
+
+  return (
+    <Modal
+      customStyle="sm:my-8 sm:w-full sm:max-w-lg sm:align-middle"
+      isOpen={showProjectModal}
+      onClose={() => setShowProjectModal(false)}
+    >
+      <div className="modal__position">
+        <h6 className="modal__title"> {i18n.t("clients.addNewProject")} </h6>
+        <div className="modal__close">
+          <button
+            className="modal__button"
+            onClick={() => {
+              setShowProjectModal(false);
+            }}
+          >
+            <XIcon color="#CDD6DF" size={15} />
+          </button>
+        </div>
+      </div>
+      <div className="modal__form flex-col">
+        <div className="mt-4">
+          <div className="field">
+            <div className="field_with_errors">
+              <label className="block text-xs font-normal tracking-wider text-foreground">
+                {i18n.t("client")}
+              </label>
+            </div>
+            <div className="mt-1">
+              <select
+                className="block h-8 w-full rounded border-0 bg-muted px-2 py-1 text-sm font-medium text-foreground focus:outline-none sm:text-base"
+                defaultValue={client}
+                onChange={e => setClient(e.target.value)}
+              >
+                <option value="0">{i18n.t("projects.selectClient")}</option>
+                <option value={clientDetails.id}>{clientDetails.name}</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div className="mt-4">
+          <div className="field">
+            <div className="field_with_errors">
+              <label className="block text-xs font-normal tracking-wider text-foreground">
+                {i18n.t("projects.projectName")}
+              </label>
+            </div>
+            <div className="mt-1">
+              <input
+                className="block h-8 w-full appearance-none rounded border-0 bg-muted px-3 py-2 text-sm font-medium text-foreground focus:outline-none sm:text-base"
+                placeholder={i18n.t("projects.enterProjectName")}
+                type="text"
+                value={projectName}
+                onChange={e => setProjectName(e.target.value)}
+              />
+            </div>
+          </div>
+        </div>
+        <div className="mt-4">
+          <div className="field">
+            <label className="block text-xs font-normal tracking-wider text-foreground">
+              {i18n.t("projects.projectType")}
+            </label>
+            <div className="mt-1">
+              <div className="sm:space-XIcon-10 w-57.5 flex items-center justify-between space-y-4 sm:space-y-0">
+                <div className="flex items-center">
+                  <input
+                    defaultChecked
+                    className="h-4 w-4 cursor-pointer border-primary text-foreground focus:ring-ring"
+                    id="billable"
+                    name="project_type"
+                    type="radio"
+                    onClick={() => setProjectType("Billable")}
+                  />
+                  <label
+                    className="ml-3 block text-sm font-medium text-foreground"
+                    htmlFor="billable"
+                  >
+                    {i18n.t("billable")}
+                  </label>
+                </div>
+                <div className="flex items-center">
+                  <input
+                    className="h-4 w-4 cursor-pointer border-primary bg-primary text-foreground focus:ring-ring"
+                    defaultChecked={false}
+                    id="non-billable"
+                    name="project_type"
+                    type="radio"
+                    onClick={() => setProjectType("Non-Billable")}
+                  />
+                  <label
+                    className="ml-3 block text-sm font-medium text-foreground "
+                    htmlFor="non-billable"
+                  >
+                    {i18n.t("nonBillable")}
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div className="actions mt-4">
+          {client && projectName && projectType ? (
+            <button
+              className="flex h-10 w-full cursor-pointer justify-center rounded border border-transparent bg-primary px-4 py-1 font-sans text-base font-medium tracking-widest text-primary-foreground shadow-sm hover:bg-primary/90 focus:outline-none"
+              type="submit"
+              onClick={() => handleSubmit()}
+            >
+              {" "}
+              {i18n.t("clients.addProject").toUpperCase()}{" "}
+            </button>
+          ) : (
+            <button
+              disabled
+              className="flex h-10 w-full cursor-pointer justify-center rounded border border-transparent bg-muted-foreground px-4 py-1 font-sans text-base font-medium tracking-widest text-primary-foreground shadow-sm focus:outline-none"
+              type="submit"
+            >
+              {" "}
+              {i18n.t("clients.addProject").toUpperCase()}{" "}
+            </button>
+          )}
+        </div>
+      </div>
+    </Modal>
+  );
+};
+
+export default AddProject;

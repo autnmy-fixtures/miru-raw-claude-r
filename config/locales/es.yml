@@ -1,0 +1,780 @@
+---
+es:
+  analytics:
+    activity:
+      amount_collected: Cantidad recaudada
+      bank_transfers_month: Transferencias bancarias (mensuales)
+      created: Creado
+      downloaded: Descargado
+      invoice_activity_today: Actividad de facturación de hoy
+      payment_activity: Actividad de pago
+      payments_today: Pagos hoy
+      sent: Enviado
+      stripe_payments_month: Pagos con Stripe (mes)
+      viewed: Visto
+    currency:
+      conversion_impact: Impacto de la conversión
+      currencies_in_use: Monedas en circulación
+      invoices_with_conversion: Facturas con conversión
+      recent_exchange_rates: Tipos de cambio recientes
+      table:
+        date: Fecha
+        from: De
+        rate: Tasa
+        source: Fuente
+        to: A
+      title: Información sobre conversión de divisas
+    overview:
+      active_clients: Clientes activos
+      outstanding: Pendiente
+      overdue: Atrasado
+      total_revenue: Ingresos totales
+    recent_activity:
+      ago: Hace %{time} años
+      invoice_reference: factura
+      system: Sistema
+      title: Actividad reciente
+    super_admin: Superadministrador
+    tabs:
+      activity: Actividad
+      clients: Clientela
+      currency_exchange: Divisas y cambio
+      overview: Descripción general
+      revenue: Ganancia
+      users: Usuarios
+    title: Panel de análisis
+    welcome: Bienvenido, %{name}
+  app:
+    name: Sistema operativo de la agencia Miru
+    tagline: Gestiona las operaciones de tu agencia desde un único centro de mando.
+  application_controller:
+    not_found: Ruta no encontrada
+  avatar:
+    destroy:
+      success: Avatar eliminado correctamente
+    update:
+      success: Avatar actualizado correctamente
+    validation:
+      file_too_large: must be smaller than %{size_mb}MB
+      invalid_content_type: must be a PNG, JPG, JPEG, or WEBP image
+  client:
+    add: AÑADIR CLIENTE
+    address:
+      label: DIRECCIÓN
+      placeholder: Introduzca la dirección
+    create:
+      failure: Falló la creación del cliente.
+      success: Cliente añadido correctamente
+    delete:
+      success:
+        message: El cliente fue eliminado correctamente.
+    email:
+      label: Correo electrónico
+      placeholder: Ingrese su dirección de correo electrónico.
+    name:
+      label: Nombre
+      placeholder: Ingrese su nombre
+    phone:
+      label: Número de teléfono
+      placeholder: Ingrese su número de teléfono
+    update:
+      failure:
+        message: No se pudieron guardar los cambios.
+        unauthorized: El usuario no está autorizado a modificar los datos de este
+          cliente.
+      success:
+        message: Cambios guardados correctamente
+  clients:
+    add_client_contact:
+      success: Invitación enviada correctamente.
+    send_payment_reminder:
+      success: Se ha enviado un recordatorio de pago.
+  companies:
+    create:
+      failure: La creación de la empresa fracasó.
+      success: Empresa creada con éxito
+    purge_logo:
+      destroy:
+        success: Logotipo de la empresa eliminado correctamente
+    update:
+      success: Cambios guardados correctamente
+  company:
+    address: DIRECCIÓN
+    base_currency: moneda base
+    business_phone: teléfono de negocios
+    cancel: Cancelar
+    company: compañía
+    country: país
+    date_format: Formato de fecha
+    fiscal_year: año fiscal
+    logo: logo
+    save: ahorrar
+    save_org: guardar detalles de la organización
+    setup: organización de configuración
+    standard_price: precio estándar
+    timezone: zona horaria
+  confirmation:
+    send_instructions: Se ha enviado un correo electrónico de confirmación a %{email}.
+  currency_pairs:
+    from_to_required: Se requieren desde y hasta
+    rate_not_found: No se encontró la tasa
+  custom_leaves:
+    update:
+      success: Hojas personalizadas actualizadas correctamente
+  employment:
+    update:
+      success: Empleo actualizado con éxito
+  expenses:
+    approve: Gasto aprobado con éxito
+    create: Gasto enviado correctamente
+    destroy: Gasto eliminado correctamente
+    mark_paid: Gasto marcado como pagado
+    must_be_approved: El gasto debe ser aprobado antes de marcarlo como pagado.
+    reject: Gasto rechazado correctamente
+    update: Gasto actualizado correctamente
+  holidays:
+    update:
+      success: Información sobre las vacaciones actualizada correctamente
+  invitation:
+    create:
+      success:
+        message: Invitación enviada correctamente
+    delete:
+      success:
+        message: Invitación eliminada correctamente
+    resent:
+      success:
+        message: Invitación reenviada con éxito
+    update:
+      success:
+        message: Cambios guardados correctamente
+  invitations:
+    accept:
+      index:
+        success: Invitación aceptada
+      show:
+        success: Invitación aceptada
+      success: Invitación aceptada
+    create:
+      failure: No se pudieron guardar los cambios.
+      success: Se enviará la invitación.
+    destroy:
+      failure: No se pudo eliminar la invitación.
+      success: Invitación eliminada
+    update:
+      failure: No se pudieron guardar los cambios.
+      success: Invitación actualizada
+  invoices:
+    payments:
+      success:
+        failure: Algo salió mal, por favor contacta con soporte
+        success: Pago realizado con éxito
+  invoices_controller:
+    download:
+      pdf_failed: No se pudo generar el PDF.
+    send_invoice:
+      already_paid: La factura ya está pagada.
+      pdf_failed: No se pudo generar el PDF.
+      recipient_limit: El correo electrónico solo se puede enviar a 5 destinatarios.
+      recipients_required: Se requieren destinatarios
+      success: La factura se ha enviado correctamente.
+    send_reminder:
+      overdue_only: Solo se pueden enviar recordatorios para facturas vencidas.
+      success: Se ha enviado un recordatorio.
+  invoices_view:
+    not_found: No se encontró ninguna factura.
+  leave_types:
+    create:
+      success: Se agregó correctamente el tipo de permiso
+    update:
+      success: Tipo de permiso actualizado correctamente
+  leave_with_leave_types:
+    update:
+      success: Hojas actualizadas correctamente
+  leaves:
+    create:
+      success: Permiso creado correctamente
+    update:
+      success: Salida actualizada correctamente
+  mailers:
+    actions:
+      join_miru: Únete a Miru
+      open_expense: Gasto abierto
+      open_invoice: Factura abierta
+      open_time_tracking: Seguimiento del tiempo de apertura
+      view_reports: Ver informes en Miru
+    client_payment_mailer:
+      payment:
+        eyebrow: Pagos
+        preheader: Comprobante de pago de la factura %{invoice_number}.
+        receipt_title: Pago recibido
+        records_body: Este recibo confirma su pago. Puede volver a abrir la factura
+          en cualquier momento si necesita consultar los detalles nuevamente.
+        records_title: Guarda esto para tus registros.
+        subject: Recibo de pago de la factura %{invoice_number}
+        subtitle_html: Hemos recibido su pago correspondiente a la factura <strong>%{invoice_number}</strong>
+          .
+        summary_html: Recibimos <strong>%{amount}</strong> el <strong>%{paid_on}</strong>
+          para la factura <strong>%{invoice_number}</strong> .
+        title: Recibo de pago
+    devise:
+      confirmation:
+        body_intro: 'Ya casi está todo listo. Aquí tienes algunas de las cosas que
+          puedes hacer con Miru desde el primer día:'
+        cta: Confirmar el correo
+        cta_body: Utilice el botón de abajo para confirmar su dirección de correo
+          electrónico.
+        eyebrow: Configuración de la cuenta
+        feature_1: Envía facturas profesionales con enlaces de pago alojados.
+        feature_2: Controla el tiempo, los gastos y la utilización de recursos en
+          un único flujo de trabajo.
+        feature_3: Gestiona tu equipo, clientes y facturación desde un único espacio
+          de trabajo.
+        feature_4: Manténgase al tanto de los ingresos, las facturas vencidas y la
+          actividad de pagos.
+        footer_note: Si no has creado una cuenta de Miru, puedes ignorar este mensaje
+          sin problema.
+        greeting_html: Hola <strong>%{name}</strong> ,
+        preheader: Confirma tu dirección de correo electrónico para finalizar la configuración
+          de Miru.
+        subtitle: Confirma tu dirección de correo electrónico para empezar a registrar
+          el tiempo, enviar facturas y gestionar tu equipo desde un único lugar.
+        title: Bienvenido a Miru
+      email_changed:
+        changed_html: Tu correo electrónico de cuenta ha sido cambiado a <strong>%{email}</strong>
+          .
+        eyebrow: Seguridad de la cuenta
+        greeting_html: Hola <strong>%{email}</strong> ,
+        pending_html: El correo electrónico de tu cuenta se está cambiando a <strong>%{email}</strong>
+          .
+        preheader: Tu dirección de correo electrónico de Miru ha cambiado.
+        subtitle: Este mensaje confirma un cambio en la dirección de correo electrónico
+          de su cuenta de Miru.
+        title: Dirección de correo electrónico actualizada
+        warning_body_html: Comuníquese con nuestro equipo de soporte inmediatamente
+          al <a href="mailto:%{email}">%{email}</a> .
+        warning_title: "¿No solicitaste este cambio?"
+      password_change:
+        eyebrow: Seguridad de la cuenta
+        greeting_html: Hola <strong>%{name}</strong> ,
+        preheader: Tu contraseña de Miru ha sido cambiada.
+        subtitle: La contraseña de tu cuenta Miru se ha actualizado correctamente.
+        success_body: Puedes seguir iniciando sesión en Miru con tu nueva contraseña.
+        success_title: Tu contraseña ha sido actualizada.
+        title: La contraseña se cambió correctamente.
+        warning_body_html: Comuníquese con <a href="mailto:%{email}">%{email}</a>
+          de inmediato para que podamos ayudarle a proteger su cuenta.
+        warning_title: "¿No realizaste este cambio?"
+      reset_password:
+        cta: Restablecer contraseña
+        cta_body: Utilice el botón de abajo para elegir una nueva contraseña. Este
+          enlace de restablecimiento caduca en 24 horas.
+        eyebrow: Seguridad de la cuenta
+        footer_note: Si no solicitaste un restablecimiento de contraseña, puedes ignorar
+          este mensaje y tu contraseña seguirá siendo la misma.
+        greeting: Hola,
+        preheader: Restablece la contraseña de tu cuenta Miru.
+        request_html: Hemos recibido una solicitud para cambiar la contraseña asociada
+          con <strong>%{email}</strong> .
+        subtitle: Hemos recibido una solicitud para restablecer la contraseña de su
+          cuenta Miru.
+        title: Restablecer su contraseña
+      shared:
+        signature_html: Gracias,<br> <strong>Equipo Miru</strong>
+      unlock:
+        cta: Restablecer contraseña
+        eyebrow: Seguridad de la cuenta
+        footer_note: Si no intentaste iniciar sesión, espera a que expire el bloqueo
+          y cambia tu contraseña inmediatamente.
+        greeting_html: Hola <strong>%{email}</strong> ,
+        preheader: Desbloquea tu cuenta de Miru después de demasiados intentos fallidos
+          de inicio de sesión.
+        subtitle: Hemos bloqueado tu cuenta de Miru tras demasiados intentos fallidos
+          de inicio de sesión.
+        title: Tu cuenta está bloqueada temporalmente.
+        warning_body: Miru desbloquea las cuentas automáticamente después de 30 minutos.
+          Si no reconoces estos intentos, restablece tu contraseña para que tu cuenta
+          quede segura una vez que expire el bloqueo.
+        warning_title: Los intentos de inicio de sesión superaron el límite permitido.
+    expense_mailer:
+      approved:
+        eyebrow: Gastos
+        preheader: Su solicitud de reembolso ha sido aprobada.
+        subject: Su reembolso ha sido aprobado.
+        subtitle: Su solicitud de reembolso ha sido revisada y aprobada.
+        title: Reembolso aprobado
+      paid:
+        eyebrow: Gastos
+        preheader: Su solicitud de reembolso ha sido marcada como pagada.
+        subject: Su reembolso ha sido marcado como pagado.
+        subtitle: El pago de su solicitud de reembolso se ha completado.
+        title: Reembolso pagado
+      rejected:
+        eyebrow: Gastos
+        next_step_body: Abra el gasto, realice las actualizaciones y envíelo de nuevo.
+        next_step_title: Siguiente paso
+        preheader: Su solicitud de reembolso necesita ser actualizada.
+        subject: Su reembolso necesita actualizaciones antes de ser aprobado.
+        subtitle: Por favor, revise los detalles de la solicitud, realice los cambios
+          necesarios y vuelva a enviarla.
+        title: El sistema de reembolso necesita actualizaciones.
+      submitted:
+        eyebrow: Gastos
+        preheader: Es necesario revisar una nueva solicitud de reembolso.
+        subject: "%{submitter_name} presentó una solicitud de reembolso"
+        subtitle_html: "<strong>%{submitter_name}</strong> presentó una solicitud
+          de reembolso que está lista para su revisión."
+        title: Nueva solicitud de reembolso
+    invoice_mailer:
+      invoice:
+        eyebrow: Facturas
+        payment_link_subvalue: Revise los detalles del pedido y pague en línea.
+        payment_link_value: Página de factura segura
+        preheader: Factura %{invoice_number} de %{company_name}.
+        ready_body: Abra la página segura de la factura para revisar los detalles,
+          confirmar el total y pagar en línea.
+        ready_title: Revisa antes de pagar
+        subject: Factura %{invoice_number}
+        subtitle_html: "<strong>%{company_name}</strong> envió la factura <strong>%{invoice_number}</strong>
+          . Puede revisarla y pagarla en línea cuando lo desee."
+        support_html: ¿Tiene alguna pregunta sobre esta factura? Responda a este correo
+          electrónico o póngase en contacto con <a href="mailto:%{support_email}">%{support_email}</a>
+          .
+        title: Factura lista para su revisión.
+      send_invoice:
+        attachment_subvalue: Consérvalo, reenvíalo o archívalo.
+        attachment_value: PDF adjunto
+        eyebrow: Facturas
+        next_steps_body: Abra la factura para confirmar el importe, revise los detalles
+          y pague cuando esté listo.
+        next_steps_title: Qué esperar
+        note_title: Una nota de %{company_name}
+        preheader: La factura %{invoice_number} de %{company_name} está lista.
+        subject: Factura %{invoice_number} de %{company_name}
+        subtitle_html: "<strong>%{company_name}</strong> envió la factura <strong>%{invoice_number}</strong>
+          . Ábrala para revisar los detalles, descargue el PDF y pague de forma segura."
+        support_html: ¿Necesitas ayuda? Responde a este correo electrónico o contacta
+          con <a href="mailto:%{support_email}">%{support_email}</a> .
+        title: Factura lista para su revisión.
+    labels:
+      amount: Cantidad
+      amount_due: Cantidad adeudada
+      amount_paid: Cantidad pagada
+      attachment: Adjunto
+      category: Categoría
+      client: Cliente
+      date: Fecha
+      description: Descripción
+      due_date: Fecha de vencimiento
+      invited_by: Invitado por
+      invoice: Factura
+      invoice_number: Número de factura
+      issue_date: Fecha de asunto
+      issued_to: Emitido a
+      members: Miembros
+      outstanding_amount: Cantidad pendiente
+      paid_on: Pagado el
+      payment_link: Enlace de pago
+      payment_method: Método de pago
+      reference: Referencia
+      status: Estado
+      total_amount: Cantidad total
+      workspace: Espacio de trabajo
+    layout:
+      brand: Miru
+      footer_body: Miru centraliza la gestión del tiempo, las facturas, los pagos
+        y las operaciones en un espacio de trabajo tranquilo.
+      footer_contact: soporte@getmiru.com
+      footer_copyright: "© Miru. Todos los derechos reservados."
+      footer_site: app.miru.so
+      preheader: Una actualización clara de Miru.
+    monthly_reports_mailer:
+      cash_flow_digest:
+        average_daily_net_change_html: Cambio neto diario promedio <strong>%{amount}</strong>
+        compare_to_previous: vs. %{amount} en %{month_label}
+        eyebrow: Resumen mensual
+        money_in: Dinero en
+        money_out: Salida de dinero
+        net_change: Cambio neto en %{month_label}
+        no_money_in: No se registraron pagos en Miru para %{month_year_label}.
+        no_money_out: No se registraron gastos pagados en Miru para %{month_year_label}.
+        preheader: Resumen del flujo de caja de %{company_name} y %{month_label}
+        subject: Resumen del flujo de caja de %{company_name} y %{month_label}
+        subtitle: Aquí hay una visión concisa del dinero que se mueve a través de
+          Miru para %{month_year_label}.
+        title: Resumen del flujo de caja de %{company_name} y %{month_label}
+        top_money_in_sources: Principales fuentes de ingresos
+        top_money_out_sources: Cubos de dinero máximo
+    payment_mailer:
+      payment:
+        eyebrow: Pagos
+        follow_up_body: Abra la factura para confirmar el pago, archive el recibo
+          o continúe con el siguiente paso.
+        follow_up_title: "¿Qué hacer a continuación?"
+        preheader: Confirmación de pago de la factura %{invoice_number}.
+        received_title: Pago recibido
+        subject: Detalles de pago de la factura %{invoice_number}
+        subtitle_html: "<strong>%{client_name}</strong> pagó la factura <strong>%{invoice_number}</strong>
+          ."
+        summary_html: "<strong>%{client_name}</strong> pagó a <strong>%{amount}</strong>
+          la factura <strong>%{invoice_number}</strong> . Esta factura ya está totalmente
+          pagada."
+        title: Confirmación de pago
+    send_payment_reminder_mailer:
+      send_payment_reminder:
+        eyebrow: Facturas
+        preheader: Recordatorio de pago para %{company_name} facturas.
+        subject: Recordatorio de pago para %{company_name}
+        subtitle: Aquí están las facturas que aún requieren atención.
+        title: Recordatorio de pago
+    send_reminder_mailer:
+      send_reminder:
+        eyebrow: Facturas
+        preheader: Recordatorio de la factura %{invoice_number} de %{company_name}.
+        subject: Recordatorio de la factura %{invoice_number} de %{company_name}
+        subtitle_html: La factura <strong>%{invoice_number}</strong> de <strong>%{company_name}</strong>
+          aún está pendiente de pago.
+        title: Recordatorio de pago
+    send_weekly_reminder_to_user_mailer:
+      notify_user_about_missed_entries:
+        body_html: Registraste menos de 40 horas entre <strong>%{starting_date}</strong>
+          y <strong>%{ending_date}</strong> .
+        eyebrow: Seguimiento del tiempo
+        follow_up: Abre Miru, añade las entradas que faltan y finaliza la semana.
+        greeting_html: Hola <strong>%{name}</strong> ,
+        preheader: Actualiza tu hoja de horas de Miru para la semana que falta.
+        signoff_html: Gracias,<br> <strong>Miru</strong>
+        subject: Completa tu hoja de horas de Miru de la semana pasada.
+        subtitle: Tus registros de tiempo para %{company_name} aún están por debajo
+          del total semanal esperado.
+        title: Completa tu hoja de horas trabajadas
+    subscription:
+      plan_purchased:
+        badge: Cha-ching
+        billing_interval: Intervalo de facturación
+        billing_settings_html: 'Configuración de facturación: <a href="%{url}" style="color:
+          #111827;">%{url}</a>'
+        company: Compañía
+        cta: Abrir configuración de facturación
+        image_label: Nuevo plan de pago
+        image_text: Nuevo espacio de trabajo remunerado
+        plan: Plan
+        stripe_subscription: Suscripción a Stripe
+        subtitle: Nuevo espacio de trabajo de pago en Miru. La facturación ya está
+          activa.
+        team_seats: Asientos del equipo
+        title: "%{company} acaba de comprar %{plan}"
+      plan_purchased_text:
+        billing_interval: 'Intervalo de facturación: %{interval}'
+        billing_settings: 'Abrir configuración de facturación: %{url}'
+        company: 'Empresa: %{company}'
+        plan: 'Plan: %{plan}'
+        stripe_subscription: 'Suscripción a Stripe: %{id}'
+        team_seats: 'Asientos del equipo: %{seats}'
+      trial_started:
+        body_html: Tu prueba gratuita de 14 días de Miru Pro para <strong>%{company}</strong>
+          ya está activa.
+        cta: Facturación abierta
+        eyebrow: Facturación
+        footer_body: Puedes revisar tu facturación, comparar planes y actualizar tu
+          plan en cualquier momento desde la configuración de facturación.
+        greeting_html: Hola <strong>%{name}</strong> ,
+        preheader: Tu prueba gratuita de Miru Pro ya está activa.
+        subtitle: Durante tu prueba gratuita de 14 días, explora la facturación, los
+          informes y el resto del flujo de trabajo de la versión Pro.
+        title: Tu prueba gratuita de Miru Pro ya está disponible.
+        trial_ends: Finaliza el juicio
+      trial_started_text:
+        body: Tu prueba gratuita de 14 días de Miru Pro para %{company} ya está activa.
+        greeting: Hola %{name},
+        review_billing: Revise la facturación en %{url}.
+        trial_ends: El juicio finaliza el %{date}.
+    user_invitation_mailer:
+      send_user_invitation:
+        about_body: Miru centraliza la gestión del tiempo, las facturas, los pagos
+          y las operaciones diarias en un único espacio de trabajo.
+        about_title: Acerca de Miru
+        eyebrow: Invitación
+        get_started_body: Acepta la invitación, crea tu contraseña y ya estás dentro.
+        get_started_title: Comience
+        preheader: Has recibido una invitación para unirte a un equipo en Miru.
+        subject: Estás invitado a unirte a Miru.
+        subtitle_html: "<strong>%{sender_name}</strong> te invitó a unirte <strong>a
+          %{company_name}</strong> en Miru."
+        support_html: Si no esperabas esta invitación, ponte en contacto con nuestro
+          equipo en <a href="mailto:%{support_email}">%{support_email}</a> .
+        title: Únete a tu espacio de trabajo Miru
+        workspace_members:
+          one: 1 miembro
+          other: "%{count} miembros"
+  navbar:
+    clients: Clientela
+    help: Ayuda
+    invoices: Facturas
+    logout: Cerrar sesión
+    payments: Pagos
+    profile: Perfil
+    projects: Proyectos
+    reports: Informes
+    settings: Ajustes
+    team: Equipo
+    time_tracking: Control del tiempo
+    view_notifications: Ver notificaciones
+  passkeys:
+    add_passkey_first: Agregue una clave de acceso antes de que sea necesaria para
+      iniciar sesión.
+    added: Clave de acceso añadida
+    disable_totp_first: Desactive la autenticación de dos factores (2FA) de la aplicación
+      de autenticación antes de requerir el inicio de sesión con clave de acceso.
+    not_found: Contraseña no encontrada.
+    removed: Clave de acceso eliminada
+    requirement_disabled: Requisito de clave de acceso desactivado
+    requirement_enabled: Requisito de clave de acceso habilitado
+    session_expired: La sesión con clave de acceso ha caducado. Inténtelo de nuevo.
+    verification_failed: Falló la verificación de la clave de acceso.
+  password:
+    create:
+      success: Las instrucciones para restablecer su contraseña se han enviado a su
+        correo electrónico.
+    update:
+      success: Tu contraseña ha sido actualizada.
+  pdfs:
+    accounts_aging:
+      client: Cliente
+      title: Informe de antigüedad de cuentas
+      total: Total
+    client_revenues:
+      client: Cliente
+      outstanding_amount: Cantidad pendiente
+      overdue_amount: Cantidad vencida
+      paid_amount: Cantidad pagada
+      title: Informe de ingresos por cliente
+      total_revenue: Ingresos totales
+    invoices:
+      amount_due: Cantidad adeudada
+      amount_paid: Cantidad pagada
+      billed_to: Facturado a
+      client_invoice: Factura del cliente
+      discount: Descuento
+      due: 'Fecha de vencimiento: %{due_date}'
+      invoice_number: Número de factura
+      issue_date: Fecha de asunto
+      paid: 'Pagado: %{amount}'
+      payment_details: Detalles de pago
+      payment_rows:
+        account_number: Número de cuenta
+        bank_name: Nombre del banco
+        ein: EIN
+        gst_number: Número de GST
+        routing_number: Número de ruta
+        swift_code: Código SWIFT
+        tax_id: Número de identificación fiscal
+        us_taxpayer_id: U.S. Taxpayer ID
+        vat_number: Número de IVA
+      prepared_by: Preparado por %{company_name}, emitido %{issue_date}, con vencimiento
+        %{due_date}.
+      reference: 'Referencia: %{reference}'
+      sub_total: Subtotal
+      table:
+        date: Fecha
+        description: Descripción
+        line_total: Total de línea
+        name: Nombre
+        qty: Cantidad
+        rate: Tasa
+      tax: Impuesto
+      title: Factura
+      total: Total
+      total_invoice_amount: Importe total de la factura
+      work_summary: Resumen del trabajo
+    outstanding_overdue_invoices:
+      amount: Cantidad
+      client: Cliente
+      due_date: Fecha de vencimiento
+      invoice_number: Número de factura
+      issue_date: Fecha de asunto
+      no_clients_found: No se encontraron clientes
+      outstanding_amount: Cantidad pendiente
+      overdue_amount: Cantidad vencida
+      status: Estado
+      title: Informe de facturas pendientes y vencidas
+      total_amounts: Cantidades totales
+      total_invoice_amount: Importe total de la factura
+    time_entries:
+      client: Cliente
+      date: Fecha
+      hours_logged: Horas registradas
+      note: Nota
+      project: Proyecto
+      team_member: Miembro del equipo
+      title: Informe de registro de horas trabajadas
+  projects:
+    add_new_project: Agregar nuevo proyecto
+    add_project: Agregar proyecto
+    billable: Facturable
+    client: Cliente
+    create:
+      failure: La creación del proyecto falló.
+      success: Proyecto añadido correctamente.
+    delete:
+      success:
+        message: Proyecto eliminado correctamente
+    edit: editar
+    hours_logged: HORAS REGISTRADAS
+    new_project: NUEVO PROYECTO
+    non_billable: No facturable
+    project: Proyecto
+    project_name: Nombre del proyecto
+    projects: Proyectos
+    update:
+      success: Cambios guardados correctamente.
+    update_members:
+      failure:
+        message: No se pudieron guardar los cambios.
+        unauthorized: El usuario no está autorizado a modificar los detalles de este
+          proyecto.
+      success:
+        message: Cambios guardados correctamente
+  pundit:
+    client_policy:
+      create?: No tienes autorización para crear clientes.
+      show?: No tienes autorización para acceder a esta página. Ponte en contacto
+        con tu administrador para obtener ayuda.
+      update?: No tienes autorización para actualizar el cliente.
+    company_policy:
+      create?: No estás autorizado a crear una empresa.
+      new?: No estás autorizado a crear una nueva empresa.
+      show?: No tienes autorización para ver la información de la empresa.
+      update?: No estás autorizado a actualizar la información de la empresa.
+    current_company_policy:
+      company_not_present: Empresa no presente.
+    default: Usted no está autorizado a realizar esta acción.
+    different_workspace: No tiene autorización para acceder a registros fuera de su
+      espacio de trabajo actual.
+    project_policy:
+      create?: No tienes autorización para crear proyectos.
+      show?: No tienes autorización para acceder a esta página. Ponte en contacto
+        con tu administrador para obtener ayuda.
+    team_policy:
+      destroy?: No estás autorizado a destruir el equipo.
+      edit?: No tienes autorización para editar el equipo.
+      update?: No tienes autorización para actualizar el equipo.
+  registration:
+    confirm_password: confirmar Contraseña
+    email_id: correo electrónico
+    first_name: nombre de pila
+    last_name: apellido
+    name: nombre
+    or: o
+    password: contraseña
+    remember_me: Acuérdate de mí
+    sign_in: iniciar sesión
+    sign_up: inscribirse
+    signin_with_github: Iniciar sesión con GitHub
+    signin_with_google: Iniciar sesión con Google
+    signup_with_apple: Regístrate con Apple.
+    signup_with_github: Regístrate en GitHub.
+    signup_with_google: Regístrate con Google.
+  reports:
+    heading: Informe de registro de horas trabajadas
+  sessions:
+    failure:
+      invalid: Correo electrónico o contraseña incorrectos
+  settings:
+    cancel: Cancelar
+    change_password: cambiar la contraseña
+    confirm_password: confirmar Contraseña
+    current_password: Contraseña actual
+    email: correo electrónico
+    name: nombre
+    organization_setting: entornos de la organización
+    password: contraseña
+    payment_setting: configuración de pago
+    profile_picture: foto de perfil
+    profile_setting: configuración del perfil
+    save: ahorrar
+    settings: ajustes
+  shared_links:
+    already_have_an_account: "¿Ya tienes una cuenta?"
+    back_to_login: Volver a la página de inicio de sesión
+    confirmation_instruction: "¿No recibió las instrucciones de confirmación?"
+    dont_have_an_account: "¿No tienes una cuenta?"
+    forgot_password: Has olvidado tu contraseña ?
+    unlock_instruction: "¿No recibió las instrucciones para desbloquearlo?"
+  subscriptions:
+    no_billing_customer: Esta empresa no tiene ningún cliente facturable.
+    pricing_not_configured: La configuración de precios de suscripción de Stripe no
+      está establecida.
+    trial_not_eligible: Tu espacio de trabajo no cumple los requisitos para una prueba
+      Pro.
+    trial_started: Tu prueba Pro de 14 días ha comenzado.
+  team:
+    changed_email: Correo electrónico cambiado
+    create_new_user: Crear nuevo usuario
+    current_email: Correo electrónico actual
+    delete:
+      success:
+        message: Miembro del equipo eliminado correctamente
+    email: Correo electrónico
+    email_id: ID DE CORREO ELECTRÓNICO
+    first_name: Nombre de pila
+    form_admin: Administración
+    form_book_keeper: Contable
+    form_email: Correo electrónico
+    form_employee: Empleado
+    form_name: Nombre
+    form_role: Role
+    invitation: INVITACIÓN PENDIENTE
+    last_name: Apellido
+    name: NOMBRE
+    new_user: NUEVO USUARIO
+    profile_picture: FOTO
+    reconfirmation: RECONFIRMACIÓN PENDIENTE
+    role: ROLE
+    team: Equipo
+    update:
+      error:
+        role: Se produjo un error al actualizar el rol.
+      success:
+        message: Cambios guardados correctamente
+    update_user: Actualizar usuario
+  timeoff_entries:
+    create:
+      success: Tiempo libre añadido con éxito
+    destroy:
+      success: Se eliminó el tiempo libre correctamente.
+    update:
+      success: Tiempo libre actualizado correctamente
+  timesheet_entry:
+    create:
+      message: Hoja de horas creada
+    destroy:
+      failure: No se pudieron eliminar las entradas de la hoja de horas.
+      locked: "Solo los administradores y propietarios pueden eliminar entradas con más de %{days} días de antigüedad"
+      message: Hoja de horas eliminada
+    update:
+      failure: No se pudieron actualizar las entradas de la hoja de horas.
+      locked: "Solo los administradores y propietarios pueden editar entradas con más de %{days} días de antigüedad"
+      message: Hoja de horas actualizada
+  totp:
+    disable_passkey_first: Desactive el inicio de sesión con clave de acceso obligatoria
+      antes de habilitar la autenticación de dos factores (2FA) de la aplicación de
+      autenticación.
+    disabled: Aplicación de autenticación desactivada
+    enabled: Aplicación de autenticación habilitada
+    invalid_code: Código de autenticación no válido.
+    invalid_verification: Código de verificación no válido.
+    not_enabled: Primero, habilita la autenticación de dos factores (2FA) de la aplicación
+      de autenticación.
+    recovery_codes_regenerated: Códigos de recuperación regenerados
+    session_expired: Esa solicitud de verificación ya no es válida. Por favor, inicie
+      sesión de nuevo.
+  user:
+    login:
+      failure:
+        disabled: Tu acceso ha sido desactivado.
+        pending_invitation: Tu cuenta aún no está activada.
+  workspaces:
+    update:
+      failure: No se pudo cambiar de espacio de trabajo
+      success: El cambio de espacio de trabajo se realizó correctamente.

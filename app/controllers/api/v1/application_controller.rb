@@ -1,0 +1,74 @@
+# frozen_string_literal: true
+
+class Api::V1::ApplicationController < ActionController::API
+  include PunditConcern
+  include ActionController::MimeResponds
+  include ErrorHandler
+  include CurrentCompanyConcern
+  include QuickbooksConnectionAccess
+  include Pagy::Backend
+  include Authenticable
+  include SetCurrentDetails
+
+  around_action :switch_locale
+  before_action :authenticate_user!
+  before_action :set_virtual_verified_invitations_allowed
+
+  def not_found
+    skip_authorization
+
+    render json: { error: "Route not found" }, status: 404
+  end
+
+  def set_virtual_verified_invitations_allowed
+    allowed_emails = ENV.fetch("VIRTUAL_VERIFIED_ADMIN_EMAILS", "")
+      .split(/[,\s]+/)
+      .map { |email| email.strip.downcase }
+      .reject(&:blank?)
+    @virtual_verified_invitations_allowed = current_user.present? &&
+      allowed_emails.include?(current_user.email.to_s.downcase)
+  end
+
+  private
+
+    def require_current_password!
+      return if current_user.valid_password?(params[:current_password].to_s)
+
+      render json: { error: "Current password is invalid" }, status: 422
+    end
+
+    def financial_api_meta(currency: nil)
+      {
+        i18n: {
+          locale: I18n.locale.to_s,
+          default_locale: I18n.default_locale.to_s,
+          transliteration_enabled: true
+        },
+        formatting: {
+          currency: currency || current_company&.base_currency,
+          decimal_precision: 2
+        },
+        timezone: company_time_zone.tzinfo.name,
+        generated_at: Time.current.iso8601
+      }
+    end
+
+    def company_time_zone
+      ActiveSupport::TimeZone[current_company&.timezone.to_s] || Time.zone
+    end
+
+    def switch_locale(&action)
+      locale = LocaleConfig.normalize(
+        params[:locale].presence ||
+        current_user_locale ||
+        request.headers["X-Miru-Locale"].presence ||
+        LocaleConfig.from_accept_language(request.headers["Accept-Language"])
+      ).to_sym
+
+      I18n.with_locale(locale, &action)
+    end
+
+    def current_user_locale
+      current_user&.respond_to?(:locale) ? current_user&.locale.presence : nil
+    end
+end

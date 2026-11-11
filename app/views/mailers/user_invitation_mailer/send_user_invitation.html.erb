@@ -1,0 +1,25 @@
+<% content_for :email_preheader, t("mailers.user_invitation_mailer.send_user_invitation.preheader") %>
+<% content_for :email_eyebrow, t("mailers.user_invitation_mailer.send_user_invitation.eyebrow") %>
+<% content_for :email_title, t("mailers.user_invitation_mailer.send_user_invitation.title") %>
+<% content_for :email_subtitle do %>
+  <%= t("mailers.user_invitation_mailer.send_user_invitation.subtitle_html", sender_name: @sender_details&.[](:name), company_name: @company_details&.[](:name)).html_safe %>
+<% end %>
+
+<div class="email-highlight">
+  <p class="email-highlight-label"><%= t("mailers.labels.workspace") %></p>
+  <p class="email-highlight-value"><%= @company_details&.[](:name) %></p>
+</div>
+
+<div class="email-panel email-panel-accent">
+  <p class="email-panel-title"><%= t("mailers.user_invitation_mailer.send_user_invitation.get_started_title") %></p>
+  <p style="margin: 0;"><%= t("mailers.user_invitation_mailer.send_user_invitation.get_started_body") %></p>
+</div>
+
+<%= render "shared/mailer/fact_rows", rows: [
+  { label: t("mailers.labels.invited_by"), value: @sender_details&.[](:name) },
+  { label: t("mailers.labels.members"), value: t("mailers.user_invitation_mailer.send_user_invitation.workspace_members", count: @company_details&.[](:employee_count)) }
+] %>
+
+<%= render "shared/mailer/button", href: invitations_accepts_url(token: @token), label: t("mailers.actions.join_miru") %>
+
+<p class="email-muted" style="margin-top: 18px;"><%= t("mailers.user_invitation_mailer.send_user_invitation.support_html", support_email: t("mailers.layout.footer_contact")).html_safe %></p>

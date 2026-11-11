@@ -1,0 +1,321 @@
+import React, { useEffect, useState } from "react";
+
+import CustomDateRangePicker from "common/CustomDateRangePicker";
+import { useUserContext } from "context/UserContext";
+import dayjs from "dayjs";
+import { XIcon, SearchIcon } from "miruIcons";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../../../ui/select";
+
+import { handleDateRangeOptions } from "./DateRange";
+import SearchTeamMembers from "./SearchTeamMembers";
+import { i18n } from "../../../../i18n";
+
+const Filters = ({
+  teamMembers,
+  filterParams,
+  setFilterParams,
+  selectedInput,
+  setSelectedInput,
+  filterIntialValues,
+  handleSelectAll,
+}) => {
+  const [showCustomFilter, setShowCustomFilter] = useState<boolean>(false);
+  const [dateRange, setDateRange] = useState<any>({ from: "", to: "" });
+  const [customDate, setCustomDate] = useState<boolean>(false);
+  const [filters, setFilters] = useState<any>(filterParams);
+  const [disableDateBtn, setDisableDateBtn] = useState<boolean>(true);
+  const [dateRangeOptions, setDateRangeOptions] = useState(
+    handleDateRangeOptions()
+  );
+  const { isDesktop } = useUserContext();
+  const isResetActive =
+    filters.teamMembers.length > 0 ||
+    filters.dateRange.label !== "All" ||
+    filters.searchTerm !== "" ||
+    filters.groupByProject;
+
+  useEffect(() => {
+    const { value, from, to } = filterParams.dateRange;
+    if (value == "custom" && from && to) {
+      setDateRange({ ...dateRange, from, to });
+      handleCustomDate(from, to);
+      setDisableDateBtn(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const { value, from, to } = filters.dateRange;
+    if (value == "custom" && from && to) {
+      setCustomDate(true);
+    }
+
+    if (value == "all") {
+      setDateRange({ ...dateRange, from: "", to: "" });
+      setCustomDate(false);
+    }
+
+    if (dateRange.from && dateRange.to) {
+      setDisableDateBtn(false);
+    }
+  }, [filters.dateRange.value, dateRange.from, dateRange.to]);
+
+  const handleSelectFilter = (selectedValue, field) => {
+    if (selectedValue.value === "custom") {
+      setShowCustomFilter(true);
+      setFilters({
+        ...filters,
+        [field.name]: { ...selectedValue, ...dateRange },
+      });
+    }
+
+    if (Array.isArray(selectedValue)) {
+      setFilters({
+        ...filters,
+        [field.name]: selectedValue,
+      });
+    } else {
+      if (selectedValue.value !== "custom") {
+        setFilters({
+          ...filters,
+          [field.name]: selectedValue,
+        });
+      }
+    }
+  };
+
+  const handleSelectDate = date => {
+    if (selectedInput === "from-input") {
+      setDateRange({ ...dateRange, ...{ from: date } });
+    } else {
+      setDateRange({ ...dateRange, ...{ to: date } });
+    }
+  };
+
+  const hideCustomFilter = () => {
+    setShowCustomFilter(false);
+  };
+
+  const onClickInput = e => {
+    setSelectedInput(e.target.name);
+  };
+
+  const handleCustomDate = (from, to) => {
+    const fromDate = dayjs(from).format("DD/MM/YY");
+    const toDate = dayjs(to).format("DD/MM/YY");
+    setDateRangeOptions(
+      handleDateRangeOptions({
+        value: "custom",
+        label: `Custom ${fromDate} - ${toDate}`,
+      })
+    );
+    setCustomDate(true);
+
+    return { fromDate, toDate };
+  };
+
+  const submitCustomDatePicker = () => {
+    if (dateRange.from && dateRange.to) {
+      const { fromDate, toDate } = handleCustomDate(
+        dateRange.from,
+        dateRange.to
+      );
+
+      setFilters({
+        ...filters,
+        ["dateRange"]: {
+          value: "custom",
+          label: `Custom ${fromDate} - ${toDate}`,
+          ...dateRange,
+        },
+      });
+    }
+    hideCustomFilter();
+  };
+
+  const defaultDateRange = () => {
+    const { value } = filters.dateRange;
+    if (value == "all") {
+      return true;
+    } else if (value == "custom" && !customDate) {
+      return true;
+    }
+
+    return false;
+  };
+
+  const setDefaultDateRange = () => ({
+    ...filters,
+    ["dateRange"]: { value: "all", label: "All", from: "", to: "" },
+  });
+
+  const resetCustomDatePicker = () => {
+    if (defaultDateRange()) {
+      setFilters(setDefaultDateRange());
+    }
+    hideCustomFilter();
+  };
+
+  const handleApply = () => {
+    defaultDateRange()
+      ? setFilterParams(setDefaultDateRange())
+      : setFilterParams(filters);
+  };
+
+  const handleReset = e => {
+    setFilters(filterIntialValues);
+    setFilterParams(filterIntialValues);
+    handleSelectAll(e);
+  };
+
+  const customStyles = {
+    container: base => ({
+      ...base,
+      width: isDesktop ? "13rem" : "auto",
+    }),
+    control: provided => ({
+      ...provided,
+      color: "#1D1A31",
+      padding: "0",
+    }),
+    menu: provided => ({
+      ...provided,
+      fontSize: "12px",
+      letterSpacing: "2px",
+    }),
+    option: (styles, { isSelected }) => ({
+      ...styles,
+      backgroundColor: isSelected && "hsl(var(--primary))",
+      "&:hover": {
+        backgroundColor: isSelected ? "hsl(var(--primary))" : "#F5F7F9",
+      },
+    }),
+  };
+
+  return (
+    <div className="flex flex-col items-center justify-between px-2 pt-2 pb-4 lg:flex-row lg:px-6">
+      <div className="relative flex w-full items-center lg:w-4/12 lg:py-0">
+        <input
+          placeholder={i18n.t("search")}
+          type="text"
+          value={filters.searchTerm}
+          className="focus:outline-none w-full rounded bg-muted p-2
+            text-sm font-medium focus:border-border focus:ring-1 focus:ring-ring"
+          onChange={e => setFilters({ ...filters, searchTerm: e.target.value })}
+        />
+        {filters.searchTerm ? (
+          <XIcon
+            className="absolute right-3"
+            color="#1D1A31"
+            size={16}
+            onClick={() => setFilters({ ...filters, searchTerm: "" })}
+          />
+        ) : (
+          <SearchIcon className="absolute right-3" color="#CDD6DF" size={16} />
+        )}
+      </div>
+      <div className="flex w-full items-center justify-between py-4 lg:w-6/12 lg:justify-evenly">
+        <SearchTeamMembers
+          filters={filters}
+          setFilters={setFilters}
+          teamMembers={teamMembers}
+        />
+        <label className="ml-2 flex items-center gap-2 text-sm font-medium text-foreground">
+          <input
+            checked={filters.groupByProject}
+            className="h-4 w-4 accent-primary"
+            type="checkbox"
+            onChange={e =>
+              setFilters({ ...filters, groupByProject: e.target.checked })
+            }
+          />
+          {i18n.t("invoices.groupByProject")}
+        </label>
+        <div className="ml-2 w-1/2 lg:w-auto">
+          <Select
+            name="dateRange"
+            value={filters.dateRange?.value || ""}
+            onValueChange={value => {
+              const selectedOption = dateRangeOptions.find(
+                option => option.value === value
+              );
+              handleSelectFilter(selectedOption, { name: "dateRange" });
+            }}
+          >
+            <SelectTrigger type="button" className="w-full">
+              <SelectValue placeholder={i18n.t("selectDateRange")} />
+            </SelectTrigger>
+            <SelectContent>
+              {dateRangeOptions.map(option => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {showCustomFilter && (
+            <div className="absolute z-20 mt-1 flex flex-col rounded-lg bg-background shadow-c1">
+              <CustomDateRangePicker
+                dateRange={dateRange}
+                handleSelectDate={handleSelectDate}
+                hideCustomFilter={hideCustomFilter}
+                selectedInput={selectedInput}
+                onClickInput={onClickInput}
+              />
+              <div className="flex h-full items-end justify-center bg-background p-6 ">
+                <button
+                  type="button"
+                  className="sidebar__reset"
+                  onClick={resetCustomDatePicker}
+                >
+                  {i18n.t("cancel")}
+                </button>
+                <button
+                  type="button"
+                  disabled={disableDateBtn}
+                  className={`sidebar__apply ${
+                    disableDateBtn
+                      ? "cursor-not-allowed border-transparent bg-indigo-100 hover:border-transparent"
+                      : "cursor-pointer"
+                  }`}
+                  onClick={submitCustomDatePicker}
+                >
+                  {i18n.t("done")}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+      <div className="flex w-full items-center justify-between px-2 lg:w-2/12 lg:py-0">
+        <button
+          type="button"
+          disabled={!isResetActive}
+          className={`text-base lg:hover:text-primary ${
+            isResetActive ? "text-primary" : "text-muted-foreground"
+          }`}
+          onClick={handleReset}
+        >
+          {i18n.t("reset")}
+        </button>
+        <button
+          type="button"
+          disabled={!isResetActive}
+          className={`text-base lg:hover:text-primary ${
+            isResetActive ? "text-primary" : "text-muted-foreground"
+          }`}
+          onClick={handleApply}
+        >
+          {i18n.t("apply").toUpperCase()}
+        </button>
+      </div>
+    </div>
+  );
+};
+
+export default Filters;

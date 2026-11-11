@@ -1,0 +1,77 @@
+import React, { useState } from "react";
+
+import { DeleteIcon, DownloadSimpleIcon } from "miruIcons";
+import { MoreOptions } from "StyledComponents";
+
+import AppliedFilters from "./AppliedFilters";
+import BulkActions from "./BulkActions";
+import { i18n } from "../../../../i18n";
+
+const BulkActionsWrapper = ({
+  clearCheckboxes,
+  filterParams,
+  filterParamsStr,
+  filterIntialValues,
+  isInvoiceSelected,
+  downloading,
+  isDesktop,
+  setFilterParams,
+  selectedInvoiceCount,
+  setShowBulkDeleteDialog,
+  setShowBulkDownloadDialog,
+}) => {
+  const [isMoreOptionsOpen, setIsMoreOptionsOpen] = useState<boolean>(false);
+
+  return (
+    <div className="flex w-full flex-wrap items-center justify-between lg:mb-4">
+      <div className="flex items-center justify-start">
+        <h1 className="text-base font-semibold text-foreground lg:text-2xl lg:font-normal">
+          {i18n.t("invoiceDashboard.allInvoices")}
+        </h1>
+        {isDesktop && (
+          <AppliedFilters
+            filterIntialValues={filterIntialValues}
+            filterParams={filterParams}
+            filterParamsStr={filterParamsStr}
+            setFilterParams={setFilterParams}
+          />
+        )}
+      </div>
+      <div className="relative">
+        <BulkActions
+          clearCheckboxes={clearCheckboxes}
+          downloading={downloading}
+          isInvoiceSelected={isInvoiceSelected}
+          isMoreOptionsOpen={isMoreOptionsOpen}
+          selectedInvoiceCount={selectedInvoiceCount}
+          setIsMoreOptionsOpen={setIsMoreOptionsOpen}
+        />
+        {isMoreOptionsOpen && (
+          <MoreOptions className="right-0" setVisibilty={setIsMoreOptionsOpen}>
+            <li
+              className="flex cursor-pointer items-center py-2.5 px-4 text-xs font-medium text-primary hover:bg-muted lg:text-sm"
+              onClick={() => {
+                setShowBulkDownloadDialog(true);
+                setIsMoreOptionsOpen(false);
+              }}
+            >
+              <DownloadSimpleIcon className="mr-2" size={16} weight="bold" />{" "}
+              {i18n.t("download")}
+            </li>
+            <li
+              className="flex cursor-pointer items-center py-2.5 px-4 text-xs font-medium text-destructive hover:bg-muted lg:text-sm"
+              onClick={() => {
+                setShowBulkDeleteDialog(true);
+              }}
+            >
+              <DeleteIcon className="mr-2" size={16} weight="bold" />{" "}
+              {i18n.t("delete")}
+            </li>
+          </MoreOptions>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export default BulkActionsWrapper;

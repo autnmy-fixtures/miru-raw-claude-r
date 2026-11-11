@@ -1,0 +1,60 @@
+.org-setup-form-wrapper {
+  .rc-steps-item-process {
+    .rc-steps-item-icon.bg-primary {
+      background-color: #171717 !important;
+    }
+    .rc-steps-item-title {
+      color: #171717 !important;
+    }
+  }
+  .rc-steps-item-wait {
+    .rc-steps-icon {
+      color: #fff !important;
+    }
+    .rc-steps-item-icon {
+      background: #e5e5e5 !important;
+    }
+    .rc-steps-item-title {
+      color: #737373 !important;
+    }
+  }
+
+  .rc-steps-item-finish {
+    .rc-steps-item-icon {
+      position: relative !important;
+      border: none !important;
+    }
+    .green-tick {
+      position: absolute;
+      left: -2px !important;
+      top: -2px !important;
+    }
+    .text-emerald-500 {
+      color: #0da163 !important;
+    }
+    .bg-emerald-500 {
+      background-color: #0da163 !important;
+    }
+  }
+
+  .rc-steps-item-title:after {
+    background-color: #ebeff2 !important;
+  }
+  .rc-steps-item-title {
+    @media screen and (max-width: 500px) {
+      font-size: 0.75rem !important;
+    }
+  }
+
+  .react-select-filter__indicator-separator {
+    display: none !important;
+  }
+  .react-select-filter__input {
+    font-family: "Manrope", "sans-serif" !important;
+  }
+}
+
+.rc-steps-item-process .rc-steps-item-icon {
+  background: #171717;
+  border-color: #171717;
+}

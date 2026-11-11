@@ -1,0 +1,31 @@
+# frozen_string_literal: true
+
+class InvitationPolicy < ApplicationPolicy
+  def create?
+    user_owner_role? || user_admin_role?
+  end
+
+  def edit?
+    user_owner_role? || user_admin_role?
+  end
+
+  def update?
+    user_owner_role? || user_admin_role?
+  end
+
+  def assign_owner?
+    user_owner_role?(record.company)
+  end
+
+  def destroy?
+    user_owner_role? || user_admin_role?
+  end
+
+  def resend?
+    user_owner_role? || user_admin_role?
+  end
+
+  def permitted_attributes
+    [:first_name, :last_name, :recipient_email, :role, :virtual_verified]
+  end
+end

@@ -1,0 +1,358 @@
+# frozen_string_literal: true
+
+# == Schema Information
+#
+# Table name: clients
+#
+#  id           :bigint           not null, primary key
+#  address      :string
+#  currency     :string           default("USD"), not null
+#  discarded_at :datetime
+#  ein          :string
+#  email        :string
+#  name         :string           not null
+#  phone        :string
+#  created_at   :datetime         not null
+#  updated_at   :datetime         not null
+#  company_id   :bigint           not null
+#  stripe_id    :string
+#
+# Indexes
+#
+#  index_clients_on_company_id            (company_id)
+#  index_clients_on_discarded_at          (discarded_at)
+#  index_clients_on_email_and_company_id  (email,company_id) UNIQUE
+#  index_clients_on_email_trgm            (email) USING gin
+#  index_clients_on_name_and_company_id   (name,company_id) UNIQUE
+#  index_clients_on_name_trgm             (name) USING gin
+#
+# Foreign Keys
+#
+#  fk_rails_...  (company_id => companies.id)
+#
+require "rails_helper"
+
+RSpec.describe Client, type: :model do
+  subject { create(:client) }
+
+  describe "Validations" do
+    it { is_expected.to validate_presence_of(:name) }
+
+    describe "logo constraints" do
+      let(:client) { build(:client) }
+
+      def attach_logo(content_type:, byte_size: 1.kilobyte)
+        client.logo.attach(
+          io: StringIO.new("x" * byte_size),
+          filename: "logo",
+          content_type:,
+          identify: false
+        )
+      end
+
+      it "rejects an oversized logo" do
+        attach_logo(content_type: "image/png", byte_size: 5.megabytes + 1)
+
+        expect(client).not_to be_valid
+        expect(client.errors[:logo]).to be_present
+      end
+
+      it "rejects SVG content" do
+        attach_logo(content_type: "image/svg+xml")
+
+        expect(client).not_to be_valid
+        expect(client.errors[:logo]).to be_present
+      end
+
+      it "accepts a JPEG logo within the size limit" do
+        attach_logo(content_type: "image/jpeg")
+
+        expect(client).to be_valid
+        expect(client.errors[:logo]).to be_empty
+      end
+    end
+
+    it "validates case-insensitive uniqueness of name within the scope of company_id" do
+      existing_client = create(:client)
+      new_client = build(:client, name: existing_client.name.upcase, company: existing_client.company)
+      expect(new_client).not_to be_valid
+      expect(new_client.errors[:name]).to include("The client #{existing_client.name.upcase} already exists")
+    end
+
+
+    it { is_expected.to validate_length_of(:name).is_at_most(30) }
+
+    describe "EIN validation" do
+      it "accepts blank and NN-NNNNNNN formatted EIN values" do
+        expect(build(:client, ein: nil)).to be_valid
+        expect(build(:client, ein: "")).to be_valid
+        expect(build(:client, ein: "12-3456789")).to be_valid
+      end
+
+      it "rejects invalid EIN values" do
+        client = build(:client, ein: "123456789")
+
+        expect(client).not_to be_valid
+        expect(client.errors[:ein]).to include("must be a valid 9-digit EIN (NN-NNNNNNN)")
+      end
+
+      it "does not expose invalid persisted EIN values in client detail payloads" do
+        client = create(:client, ein: "12-3456789")
+        client.update_column(:ein, "invalid")
+
+        expect(client.reload.client_detail[:ein]).to be_nil
+      end
+    end
+
+    describe "phone number validation" do
+      let(:client) { build(:client) }
+
+      it "accepts valid US phone number" do
+        client.phone = "+14155552671"
+        expect(client).to be_valid
+      end
+
+      it "accepts valid Indian phone number" do
+        client.phone = "+919876543210"
+        expect(client).to be_valid
+      end
+
+      it "accepts valid UK phone number" do
+        client.phone = "+442071234567"
+        expect(client).to be_valid
+      end
+
+      it "accepts blank phone number" do
+        client.phone = nil
+        expect(client).to be_valid
+      end
+
+      it "rejects invalid phone number" do
+        client.phone = "123"
+        expect(client).not_to be_valid
+        expect(client.errors[:phone]).to include("is invalid")
+      end
+
+      it "rejects phone number shorter than 2 digits" do
+        client.phone = "+1"
+        expect(client).not_to be_valid
+        expect(client.errors[:phone]).to include("must contain at least 2 digits")
+      end
+
+      it "rejects phone number exceeding 15 digits" do
+        client.phone = "+1234567890123456"
+        expect(client).not_to be_valid
+        expect(client.errors[:phone]).to include("cannot exceed 15 digits")
+      end
+
+      it "rejects invalid Indian phone number" do
+        client.phone = "+9198765432101"
+        expect(client).not_to be_valid
+        expect(client.errors[:phone]).to include("is invalid")
+      end
+    end
+  end
+
+  describe "Associations" do
+    it { is_expected.to have_many(:projects) }
+    it { is_expected.to have_many(:timesheet_entries) }
+    it { is_expected.to have_many(:addresses).dependent(:destroy) }
+    it { is_expected.to belong_to(:company) }
+  end
+
+  describe "signature_enabled" do
+    it "defaults to false for a new client" do
+      client = create(:client)
+      expect(client.signature_enabled).to eq(false)
+    end
+
+    it "responds to signature_enabled?" do
+      client = create(:client)
+      expect(client.signature_enabled?).to eq(false)
+    end
+  end
+
+  describe "Public methods" do
+    describe "#total_hours_logged" do
+      let(:company) { create(:company) }
+      let(:user) { create(:user, email: "client-spec-hours@example.com") }
+      let(:client) { create(:client, company:) }
+      let(:project_1) { create(:project, client:) }
+      let(:project_2) { create(:project, client:) }
+      let(:results) do
+      end
+
+      before do
+        create_list(:timesheet_entry, 5, user:, project: project_1)
+        create_list(:timesheet_entry, 5, user:, project: project_2)
+      end
+
+      context "when time_frame is last week" do
+        let(:time_frame) { "last_week" }
+
+        it "returns the total hours logged for a client in the last week" do
+          range = 1.week.ago.beginning_of_week..1.week.ago.end_of_week
+          result = ([project_1, project_2].map { |project|
+            project.timesheet_entries.where(work_date: range).sum(:duration)
+          }).sum
+          expect(client.total_hours_logged(time_frame)).to eq(result)
+        end
+      end
+
+      context "when time_frame in a week" do
+        let(:time_frame) { "week" }
+
+        it "returns the total hours logged for a client in that week" do
+          range = 0.week.ago.beginning_of_week..0.week.ago.end_of_week
+          result = ([project_1, project_2].map { |project|
+            project.timesheet_entries.where(work_date: range).sum(:duration)
+          }).sum
+          expect(client.total_hours_logged(time_frame)).to eq(result)
+        end
+      end
+
+      context "when time_frame in a month" do
+        let(:time_frame) { "month" }
+
+        it "returns the total hours logged for a client in that month" do
+          range = 0.month.ago.beginning_of_week..0.month.ago.end_of_week
+          result = ([project_1, project_2].map { |project|
+            project.timesheet_entries.where(work_date: range).sum(:duration)
+          }).sum
+          expect(client.total_hours_logged(time_frame)).to eq(result)
+        end
+      end
+
+      context "when time_frame in a year" do
+        let(:time_frame) { "year" }
+
+        it "returns the total hours logged for a client in that year" do
+          range = 0.year.ago.beginning_of_week..0.year.ago.end_of_week
+          result = ([project_1, project_2].map { |project|
+            project.timesheet_entries.where(work_date: range).sum(:duration)
+          }).sum
+          expect(client.total_hours_logged(time_frame)).to eq(result)
+        end
+      end
+    end
+
+    describe "#strip_attributes" do
+      let(:company) { create(:company) }
+      let(:user) { create(:user, email: "client-spec-strip@example.com") }
+
+      it "strips the whitespaces for the client name" do
+        client = build(:client, company:, name: " Client with whitespace ")
+        client.save!
+        expect(client.name).to eq(client.name.strip)
+      end
+    end
+
+    describe "#project_details" do
+      let(:company) { create(:company) }
+      let(:user) { create(:user, email: "client-spec-project-details@example.com") }
+      let(:client) { create(:client, company:) }
+      let(:project_1) { create(:project, client:) }
+      let(:project_2) { create(:project, client:) }
+      let(:results) do
+        range = DateRangeService.new(timeframe: time_frame).process
+        [project_1, project_2].map do | project |
+          {
+            id: project.id, name: project.name, billable: project.billable, team: project.project_member_full_names,
+            minutes_spent: project.timesheet_entries.where(work_date: range).sum(:duration)
+          }
+        end
+      end
+
+      before do
+        create_list(:timesheet_entry, 5, user:, project: project_1)
+        create_list(:timesheet_entry, 5, user:, project: project_2)
+      end
+
+      context "when time_frame is last_week" do
+        let(:time_frame) { "last_week" }
+
+        it "returns the hours_logged for a project in the last week" do
+          expect(client.project_details(time_frame)).to match_array(results)
+        end
+      end
+
+      context "when time_frame is week" do
+        let(:time_frame) { "week" }
+
+        it "returns the hours_logged for a project in that week" do
+          expect(client.project_details(time_frame)).to match_array(results)
+        end
+      end
+
+      context "when time_frame is month" do
+        let(:time_frame) { "month" }
+
+        it "returns the hours_logged for a project in that month" do
+          expect(client.project_details(time_frame)).to match_array(results)
+        end
+      end
+
+      context "when time_frame is year" do
+        let(:time_frame) { "year" }
+
+        it "returns the hours_logged for a project in that year" do
+          expect(client.project_details(time_frame)).to match_array(results)
+        end
+      end
+    end
+
+    describe "#client_overdue_and_outstanding_calculation" do
+      let(:company) { create(:company) }
+      let(:user) { create(:user, email: "client-spec-rate-this-month@example.com") }
+      let(:client) { create(:client, company:) }
+
+      before do
+        create_list(:invoice, 5, client:)
+      end
+
+      it "return outstanding_amount overdue_amount amounts" do
+        currency = client.company.base_currency
+        client_currency = client.currency
+        status_and_amount = client.invoices.group_by(&:status).transform_values { |invoices|
+          invoices.sum { |invoice|
+            invoice.base_currency_amount.to_f > 0.00 ? invoice.base_currency_amount : invoice.amount
+          }
+        }
+        status_and_amount.default = 0
+        outstanding_amount = status_and_amount["sent"] + status_and_amount["viewed"] + status_and_amount["overdue"]
+        result = {
+          overdue_amount: status_and_amount["overdue"],
+          outstanding_amount:,
+          currency:,
+          client_currency:
+        }
+        expect(client.client_overdue_and_outstanding_calculation).to match_array(result)
+      end
+    end
+
+    describe "#register_on_stripe!" do
+      let(:company) { create(:company) }
+      let(:user) { create(:user, email: "client-spec-total-revenue@example.com") }
+      let(:client) { create(:client, company:) }
+
+      context "when associated stripe connected account doesn't exist" do
+        it "raises ActiveRecord::RecordNotFound" do
+          expect { client.register_on_stripe! }.to raise_error(ActiveRecord::RecordNotFound)
+        end
+      end
+
+      context "when associated stripe connected account exists" do
+        let(:stripe_connected_account) { build(:stripe_connected_account, company:) }
+
+        it "creates customer for the connected account" do
+          allow(Stripe::Account).to receive(:create)
+            .and_return(OpenStruct.new({ id: stripe_connected_account.account_id }))
+          allow(Stripe::Customer).to receive(:create)
+            .and_return(OpenStruct.new({ id: 123 }))
+          stripe_connected_account.save!
+          expect(client.register_on_stripe!).to eq(true)
+        end
+      end
+    end
+  end
+end

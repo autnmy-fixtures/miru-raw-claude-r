@@ -1,0 +1,233 @@
+import React, { useEffect, useState } from "react";
+
+import { useUserContext } from "context/UserContext";
+
+import Footer from "./Footer";
+import TimeEntrySelectionHeader from "./TimeEntrySelectionHeader";
+import TimeEntrySelectionTable from "./TimeEntrySelectionTable";
+
+import { fetchMultipleNewLineItems } from "../common/utils";
+import { i18n } from "../../../i18n";
+
+const selectedEntryIds = entry =>
+  entry.linked_timesheet_entry_ids?.length
+    ? entry.linked_timesheet_entry_ids
+    : [entry.timesheet_entry_id].filter(Boolean);
+
+const selectionId = item => item.selection_id || item.timesheet_entry_id;
+
+const MultipleEntriesModal = ({
+  selectedClient,
+  selectedOption,
+  setSelectedOption,
+  setMultiLineItemModal,
+  dateFormat,
+}) => {
+  const { isDesktop } = useUserContext();
+  const filterIntialValues = {
+    teamMembers: [],
+    dateRange: { label: "All", value: "all", from: "", to: "" },
+    searchTerm: "",
+    groupByProject: false,
+  };
+
+  const [lineItems, setLineItems] = useState<any>([]);
+  const [selectedLineItems, setSelectedLineItems] = useState<any>([]);
+  const [allCheckboxSelected, setAllCheckboxSelected] =
+    useState<boolean>(false);
+  const [teamMembers, setTeamMembers] = useState<any>([]);
+  const [filterParams, setFilterParams] = useState(filterIntialValues);
+  const [selectedInput, setSelectedInput] = useState("from-input");
+  const [loading, setLoading] = useState(true);
+
+  const handleItemSelection = id => {
+    const checkboxes = lineItems.map(item => {
+      if (selectionId(item) === id) {
+        if (item.checked) {
+          const selectedItem = selectedLineItems.filter(
+            lineItem => selectionId(lineItem) !== selectionId(item)
+          );
+          setSelectedLineItems(selectedItem);
+          setAllCheckboxSelected(false);
+
+          return { ...item, checked: false };
+        }
+        const selectedItem = [...selectedLineItems, item];
+        setSelectedLineItems(selectedItem);
+        setAllCheckboxSelected(selectedItem.length == lineItems.length);
+
+        return { ...item, checked: true };
+      }
+
+      return item;
+    });
+
+    setLineItems(checkboxes);
+  };
+
+  const handleSelectAll = e => {
+    const checkedLineItems = lineItems.map(item => ({
+      ...item,
+      checked: e.target.checked,
+    }));
+    if (e.target.checked) {
+      setSelectedLineItems(checkedLineItems);
+    } else {
+      setSelectedLineItems([]);
+    }
+    setLineItems(checkedLineItems);
+    setAllCheckboxSelected(e.target.checked);
+  };
+
+  useEffect(() => {
+    setLoading(true);
+    loadMore();
+  }, [filterParams]);
+
+  const loadMore = () => {
+    fetchMultipleNewLineItems(
+      setLoading,
+      handleFilterParams,
+      selectedLineItems,
+      setSelectedLineItems,
+      setLineItems,
+      allCheckboxSelected,
+      setTeamMembers
+    );
+  };
+
+  const handleSubmitModal = () => {
+    if (selectedLineItems.length > 0) {
+      setSelectedOption([...selectedOption, ...selectedLineItems]);
+      setMultiLineItemModal(false);
+    }
+  };
+
+  const handleFilterParams = () => {
+    let filterQueryParams = "";
+
+    filterQueryParams += `client_id=${selectedClient.id}`;
+
+    selectedOption.forEach(entry => {
+      if (!entry._destroy) {
+        selectedEntryIds(entry).forEach(id => {
+          filterQueryParams += `&selected_entries[]=${id}`;
+        });
+      }
+    });
+
+    filterQueryParams += `&search_term=${filterParams.searchTerm}`;
+
+    filterParams.teamMembers.forEach(member => {
+      filterQueryParams += `&team_member[]=${member.value}`;
+    });
+
+    const { value, from, to } = filterParams.dateRange;
+
+    if (value != "all" && value != "custom") {
+      filterQueryParams += `&date_range=${value}`;
+    }
+
+    if (value === "custom" && from && to) {
+      filterQueryParams += `&date_range=${value}`;
+      filterQueryParams += `&from=${from}`;
+      filterQueryParams += `&to=${to}`;
+    }
+
+    if (filterParams.groupByProject) {
+      filterQueryParams += "&group_by_project=true";
+    }
+
+    return `${filterQueryParams}`;
+  };
+
+  return isDesktop ? (
+    <div
+      className="fixed inset-0 z-50 flex h-full w-full justify-center px-10 py-20 md:px-52"
+      style={{ background: "rgba(29, 26, 49,0.6)" }}
+    >
+      <div className="flex h-160 w-full flex-col justify-between rounded-lg border border-border bg-background text-foreground">
+        <TimeEntrySelectionHeader
+          filterIntialValues={filterIntialValues}
+          filterParams={filterParams}
+          handleSelectAll={handleSelectAll}
+          selectedInput={selectedInput}
+          setFilterParams={setFilterParams}
+          setMultiLineItemModal={setMultiLineItemModal}
+          setSelectedInput={setSelectedInput}
+          teamMembers={teamMembers}
+        />
+        {loading ? (
+          <p className="tracking-wide flex items-center justify-center text-base font-medium text-primary">
+            {i18n.t("loading")}
+          </p>
+        ) : (
+          <div className="mx-6 flex-1 overflow-y-auto">
+            {lineItems.length > 0 ? (
+              <TimeEntrySelectionTable
+                allCheckboxSelected={allCheckboxSelected}
+                dateFormat={dateFormat}
+                handleItemSelection={handleItemSelection}
+                handleSelectAll={handleSelectAll}
+                lineItems={lineItems}
+              />
+            ) : (
+              <p className="tracking-wide flex items-center justify-center text-base font-medium text-primary">
+                {i18n.t("noResultsFound")}
+              </p>
+            )}
+          </div>
+        )}
+        <Footer
+          handleSelectAll={handleSelectAll}
+          handleSubmitModal={handleSubmitModal}
+          selectedRowCount={selectedLineItems.length}
+        />
+      </div>
+    </div>
+  ) : (
+    <div
+      className="flex w-full flex-col"
+      style={{ height: "calc(100vh - 48px)" }}
+    >
+      <TimeEntrySelectionHeader
+        filterIntialValues={filterIntialValues}
+        filterParams={filterParams}
+        handleSelectAll={handleSelectAll}
+        selectedInput={selectedInput}
+        setFilterParams={setFilterParams}
+        setMultiLineItemModal={setMultiLineItemModal}
+        setSelectedInput={setSelectedInput}
+        teamMembers={teamMembers}
+      />
+      {loading ? (
+        <p className="tracking-wide flex items-center justify-center text-base font-medium text-primary">
+          {i18n.t("loading")}
+        </p>
+      ) : (
+        <div className="mx-2 flex-1 overflow-y-auto">
+          {lineItems.length > 0 ? (
+            <TimeEntrySelectionTable
+              allCheckboxSelected={allCheckboxSelected}
+              dateFormat={dateFormat}
+              handleItemSelection={handleItemSelection}
+              handleSelectAll={handleSelectAll}
+              lineItems={lineItems}
+            />
+          ) : (
+            <p className="tracking-wide flex items-center justify-center text-base font-medium text-primary">
+              {i18n.t("noResultsFound")}
+            </p>
+          )}
+        </div>
+      )}
+      <Footer
+        handleSelectAll={handleSelectAll}
+        handleSubmitModal={handleSubmitModal}
+        selectedRowCount={selectedLineItems.length}
+      />
+    </div>
+  );
+};
+
+export default MultipleEntriesModal;

@@ -1,0 +1,394 @@
+# frozen_string_literal: true
+
+class Invoice < ApplicationRecord
+  include Discardable
+  include InvoiceSendable
+  include ClientPaymentSendable
+  include Searchable
+
+  # Audit currency conversions and amount changes
+  audited associated_with: :company,
+    only: [:amount, :base_currency_amount, :exchange_rate, :exchange_rate_date, :currency, :status, :amount_paid, :amount_due]
+
+  # Configure pg_search - use ILIKE for more precise matching
+  scope :pg_search, ->(query) {
+    return all if query.blank?
+
+    joins(:client).where(
+      "invoices.invoice_number ILIKE :query OR invoices.reference ILIKE :query OR clients.name ILIKE :query",
+      query: "%#{sanitize_sql_like(query)}%"
+    )
+  }
+
+  attr_accessor :sub_total
+  attr_accessor :skip_line_item_total_sync
+  attr_accessor :syncing_nested_line_item_totals
+
+  enum :status, [
+    :draft,
+    :sent,
+    :viewed,
+    :paid,
+    :declined,
+    :overdue,
+    :sending,
+    :waived
+  ]
+
+  belongs_to :company
+  belongs_to :client
+  has_many :invoice_line_items, dependent: :destroy
+  has_many :invoice_taxes, dependent: :destroy
+  has_many :payments, dependent: :restrict_with_error
+  accepts_nested_attributes_for :invoice_line_items, allow_destroy: true
+  accepts_nested_attributes_for :invoice_taxes, allow_destroy: true
+
+  # Payment info details
+  store_accessor :payment_infos,
+    :stripe_payment_intent,
+    :razorpay_payment_link_id,
+    :razorpay_payment_link_url,
+    :razorpay_payment_link_status,
+    :razorpay_payment_id,
+    :paypal_order_id,
+    :paypal_order_status,
+    :paypal_capture_id
+
+  before_validation :set_external_view_key, on: :create
+  before_validation :set_currency_from_client, if: :should_sync_currency_from_client?
+  before_validation :calculate_amounts, if: :totals_recalculation_needed?
+  before_validation :calculate_base_currency_amount
+  after_save :sync_nested_line_item_totals, if: -> { skip_line_item_total_sync && !syncing_nested_line_item_totals }
+  after_save :lock_timesheet_entries, if: :draft?
+  after_discard :unlock_timesheet_entries, if: :draft?
+  after_discard :update_invoice_number
+  after_commit :reset_skip_line_item_total_sync
+  after_rollback :reset_skip_line_item_total_sync
+  after_create { Rails.event.notify(Invoices::Created.new(self)) }
+  after_update(if: :saved_change_to_status?) do
+    from, to = saved_change_to_status
+    Rails.event.notify(Invoices::StatusChanged.new(self, from:, to:))
+  end
+
+  validates :issue_date, :due_date, :invoice_number, presence: true
+  validates :due_date, comparison: { greater_than_or_equal_to: :issue_date }, if: :not_waived
+  validates :amount, :outstanding_amount, :tax,
+    :amount_paid, :amount_due, :discount, numericality: { greater_than_or_equal_to: 0 }
+  validates :invoice_number, uniqueness: { scope: :company_id }
+  validates :reference, length: { maximum: 12 }, allow_blank: true
+  validate :check_if_invoice_paid, on: :update
+  validate :prevent_waived_change, on: :update
+  validates :base_currency_amount, presence: true, unless: :same_currency?
+
+  scope :with_statuses, -> (statuses) { where(status: statuses) if statuses.present? }
+  scope :issue_date_range, -> (date_range) { where(issue_date: date_range) if date_range.present? }
+  scope :for_clients, -> (client_ids) { where(client_id: client_ids) if client_ids.present? }
+  scope :during, -> (duration) {
+    where(issue_date: duration) if duration.present?
+  }
+  scope :active, -> { where(discarded_at: nil) }
+
+  delegate :name, to: :client, prefix: :client
+  delegate :email, to: :client, prefix: :client
+  delegate :logo_url, to: :client, prefix: :client
+
+  ARCHIVED_PREFIX = "ARC"
+  def sync_totals_from_line_items!(line_items = nil)
+    attrs =
+      if line_items
+        calculated_totals_from_line_items(line_items)
+      else
+        calculated_totals_from_persisted_line_items
+      end
+    return false unless totals_differ?(attrs)
+
+    assign_attributes(attrs)
+    save!
+
+    true
+  end
+
+  def totals_stale?(line_items = nil)
+    attrs =
+      if line_items
+        calculated_totals_from_line_items(line_items)
+      else
+        calculated_totals_from_persisted_line_items
+      end
+
+    totals_differ?(attrs)
+  end
+
+  def recently_sent_mail?
+    sent_at.nil? || (sent_at && !(sent_at > 1.minute.ago))
+  end
+
+  def update_timesheet_entry_status!
+    TimesheetEntry.kept.where(id: invoice_timesheet_entry_ids).update!(bill_status: :billed)
+  end
+
+  def create_checkout_session!(success_url:, cancel_url:)
+    InvoicePayment::Checkout.process(invoice: self, success_url:, cancel_url:, metadata: { invoice_id: self.id })
+  end
+
+  def unit_amount(base_currency)
+    (amount * Money::Currency.new(base_currency).subunit_to_unit).to_i
+  end
+
+  def settle!(payment)
+    self.amount_paid += payment.amount
+
+    if payment.settles?(self)
+      self.status = :paid
+      self.amount_due = 0
+    else
+      self.amount_due = amount_due - payment.amount
+    end
+
+    self.save!
+  end
+
+  def pdf_content(company_logo, root_url)
+    InvoicePayment::PdfGeneration.process(
+      self,
+      company_logo,
+      root_url
+    )
+  end
+
+  def temp_pdf(company_logo, root_url)
+    file = Tempfile.new()
+    InvoicePayment::PdfGeneration.process(
+      self,
+      company_logo,
+      root_url,
+      file.path
+    )
+    file
+  end
+
+  def formatted_due_date
+    CompanyDateFormattingService.new(due_date, company:).process
+  end
+
+  def formatted_issue_date
+    CompanyDateFormattingService.new(issue_date, company:).process
+  end
+
+  private
+
+    def set_external_view_key
+      self.external_view_key = SecureRandom.hex
+    end
+
+    def check_if_invoice_paid
+      if status_changed? && status_was == "paid"
+        errors.add(:status, t("errors.can't change status"))
+      end
+    end
+
+    def not_waived
+      !(status.to_sym == :waived)
+    end
+
+    def prevent_waived_change
+      if status_changed? && status.to_sym == :waived && ![:sent, :overdue, :viewed].include?(status_was.to_sym)
+        errors.add(:status, t("errors.prevent_draft_to_waived"))
+      end
+    end
+
+    def lock_timesheet_entries
+      TimesheetEntry.in_workspace(company).where(id: invoice_timesheet_entry_ids).update!(locked: true)
+    end
+
+    def unlock_timesheet_entries
+      TimesheetEntry.in_workspace(company).where(id: invoice_timesheet_entry_ids).update!(locked: false)
+    end
+
+    def invoice_timesheet_entry_ids
+      direct_ids = invoice_line_items.pluck(:timesheet_entry_id)
+      linked_ids = InvoiceLineItemTimeEntry
+        .joins(:invoice_line_item)
+        .where(invoice_line_items: { invoice_id: id })
+        .pluck(:timesheet_entry_id)
+
+      (direct_ids + linked_ids).compact.uniq
+    end
+
+    def same_currency?
+      if currency.present?
+        currency == company&.base_currency
+      else
+        client&.currency == company&.base_currency
+      end
+    end
+
+    def calculate_amounts
+      kept_line_items = invoice_line_items.reject(&:marked_for_destruction?)
+      self.skip_line_item_total_sync =
+        association(:invoice_line_items).loaded? &&
+        invoice_line_items.any? { |item| item.changed_for_autosave? || item.marked_for_destruction? }
+      return reset_amounts_if_all_line_items_removed unless kept_line_items.any?
+
+      assign_attributes(calculated_totals_from_line_items(kept_line_items))
+    end
+
+    def reset_amounts_if_all_line_items_removed
+      return unless invoice_line_items.any?(&:marked_for_destruction?)
+
+      mark_total_attributes_for_zero_sync
+      assign_attributes(zero_total_attributes)
+    end
+
+    def totals_recalculation_needed?
+      new_record? ||
+        will_save_change_to_discount? ||
+        will_save_change_to_tax? ||
+        will_save_change_to_amount_paid? ||
+        will_save_change_to_status? ||
+        invoice_taxes_changed_for_autosave? ||
+        (association(:invoice_line_items).loaded? &&
+          invoice_line_items.any? { |item| item.changed_for_autosave? || item.marked_for_destruction? })
+    end
+
+    def calculated_totals_from_line_items(line_items)
+      subtotal = line_items.sum { |item| (item.quantity.to_f / 60) * item.rate.to_f }.round(2)
+      sync_invoice_tax_amounts(subtotal)
+      total_attributes_for(subtotal)
+    end
+
+    def calculated_totals_from_persisted_line_items
+      line_item_totals = invoice_line_items.pluck(:quantity, :rate)
+      return zero_total_attributes if line_item_totals.empty?
+
+      subtotal = line_item_totals.sum { |quantity, rate| (quantity.to_f / 60) * rate.to_f }.round(2)
+      sync_invoice_tax_amounts(subtotal)
+      total_attributes_for(subtotal)
+    end
+
+    def zero_total_attributes
+      {
+        amount: 0,
+        amount_due: 0,
+        outstanding_amount: 0
+      }
+    end
+
+    def mark_total_attributes_for_zero_sync
+      persisted_totals = persisted_total_attributes
+
+      zero_total_attributes.each do |attribute, value|
+        public_send("#{attribute}_will_change!") if persisted_totals[attribute].to_f != value.to_f
+      end
+    end
+
+    def persisted_total_attributes
+      return zero_total_attributes if new_record?
+
+      amount_value, amount_due_value, outstanding_amount_value =
+        self.class.where(id:).pick(:amount, :amount_due, :outstanding_amount)
+
+      {
+        amount: amount_value,
+        amount_due: amount_due_value,
+        outstanding_amount: outstanding_amount_value
+      }
+    end
+
+    def totals_differ?(attrs)
+      amount.to_f.round(2) != attrs[:amount].to_f.round(2) ||
+        amount_due.to_f.round(2) != attrs[:amount_due].to_f.round(2) ||
+        outstanding_amount.to_f.round(2) != attrs[:outstanding_amount].to_f.round(2)
+    end
+
+    def total_attributes_for(subtotal)
+      total = (subtotal - discount.to_f + tax.to_f).round(2)
+
+      if paid? || waived?
+        {
+          amount: total,
+          amount_due: 0,
+          outstanding_amount: 0
+        }
+      else
+        open_amount = [total - amount_paid.to_f, 0].max.round(2)
+        {
+          amount: total,
+          amount_due: open_amount,
+          outstanding_amount: open_amount
+        }
+      end
+    end
+
+    def update_invoice_number
+      self.update(invoice_number: "#{ARCHIVED_PREFIX}-#{id}-#{invoice_number}")
+    end
+
+    def calculate_base_currency_amount
+      if same_currency?
+        self.base_currency_amount = amount if amount.present?
+        return
+      end
+      return unless amount_changed? || currency_changed? || new_record?
+
+      invoice_date = issue_date || Date.current
+      rate = CurrencyConversionService.get_exchange_rate(
+        currency || client&.currency,
+        company&.base_currency,
+        invoice_date
+      )
+
+      if rate
+        self.exchange_rate = rate
+        self.exchange_rate_date = invoice_date
+        self.base_currency_amount = (amount * rate).round(2)
+      else
+        # If we can't get a rate, make sure validation will fail
+        self.base_currency_amount = nil unless base_currency_amount.present?
+      end
+    end
+
+    def should_sync_currency_from_client?
+      new_record? && currency.blank? && client.present?
+    end
+
+    def set_currency_from_client
+      self.currency = client.currency || company&.base_currency
+    end
+
+    def sync_nested_line_item_totals
+      attrs = calculated_totals_from_persisted_line_items
+      return unless totals_differ?(attrs)
+
+      assign_attributes(attrs)
+      calculate_base_currency_amount
+      self.syncing_nested_line_item_totals = true
+      save!
+    ensure
+      self.syncing_nested_line_item_totals = false
+    end
+
+    def reset_skip_line_item_total_sync
+      self.skip_line_item_total_sync = false
+    end
+
+    def invoice_taxes_changed_for_autosave?
+      association(:invoice_taxes).loaded? &&
+        invoice_taxes.any? { |invoice_tax| invoice_tax.changed_for_autosave? || invoice_tax.marked_for_destruction? }
+    end
+
+    def sync_invoice_tax_amounts(subtotal)
+      active_invoice_taxes = invoice_taxes.reject(&:marked_for_destruction?)
+      return if active_invoice_taxes.empty?
+
+      if should_recalculate_invoice_taxes?
+        active_invoice_taxes.each { |invoice_tax| invoice_tax.sync_amount_from_subtotal(subtotal) }
+      end
+
+      self.tax = active_invoice_taxes.sum { |invoice_tax| BigDecimal(invoice_tax.amount.to_s) }.round(2)
+    end
+
+    def should_recalculate_invoice_taxes?
+      new_record? || draft? || status_in_database.to_s == "draft"
+    end
+end

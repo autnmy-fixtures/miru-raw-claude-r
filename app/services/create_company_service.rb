@@ -1,0 +1,48 @@
+# frozen_string_literal: true
+
+class CreateCompanyService
+  attr_reader :params, :current_user
+  attr_accessor :company
+
+  def initialize(current_user, params: nil, company: nil)
+    @params = params
+    @current_user = current_user
+    @company = company || Company.new(params)
+  end
+
+  def process
+    company.save!
+    add_current_user_to_company
+    create_notification_preference
+    start_pro_trial
+    company
+  end
+
+  private
+
+    def add_current_user_to_company
+      current_user.companies << company
+      current_user.current_workspace_id = company.id
+      current_user.add_role(:owner, company)
+      current_user.save!
+    end
+
+    def create_notification_preference
+      NotificationPreference.find_or_create_by(
+        user_id: current_user.id,
+        company_id: company.id)
+    end
+
+    def start_pro_trial
+      return unless company.trial_available?
+
+      company.start_pro_trial!
+      Analytics::TrackingService.new(user: current_user).track_trial_started(company, source: "organization_setup")
+      return unless TrialEmailsJob.billing_configured?
+
+      SubscriptionMailer.with(
+        company_id: company.id,
+        recipient_id: current_user.id
+      ).trial_started.deliver_later
+    end
+end

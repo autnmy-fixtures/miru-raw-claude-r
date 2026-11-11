@@ -1,0 +1,240 @@
+import React, { Fragment, useEffect, useState, useRef } from "react";
+
+import { useOutsideClick, useDebounce } from "helpers";
+
+import MultipleEntriesModal from "../../MultipleEntriesModal";
+import LineItemTableHeader from "../LineItemTableHeader";
+import ManualEntry from "../ManualEntry";
+import NewLineItemRow from "../NewLineItemRow";
+import NewLineItemTable from "../NewLineItemTable";
+import { fetchNewLineItems } from "../utils";
+import { i18n } from "../../../../i18n";
+
+const InvoiceTable = ({
+  clientCurrency,
+  dateFormat,
+  selectedClient,
+  lineItems,
+  setLineItems,
+  selectedLineItems,
+  setSelectedLineItems,
+  manualEntryArr,
+  setManualEntryArr,
+  onDraftChange,
+}) => {
+  const [addNew, setAddNew] = useState<boolean>(false);
+  const [showNewLineItemTable, setShowNewLineItemTable] =
+    useState<boolean>(false);
+  const [multiLineItemModal, setMultiLineItemModal] = useState<boolean>(false);
+  const [filteredLineItems, setFilteredLineItems] = useState<any>();
+  const [lineItem, setLineItem] = useState<any>({});
+  const [loading, setLoading] = useState<boolean>(false);
+  const wrapperRef = useRef(null);
+  const debouncedSearchName = useDebounce(lineItem.name, 500);
+
+  const loadNewLineItems = () => {
+    fetchNewLineItems(selectedClient, setLineItems, selectedLineItems);
+  };
+
+  useEffect(() => {
+    if (debouncedSearchName) {
+      const newLineItems = lineItems.filter(item =>
+        item.first_name
+          .toLowerCase()
+          .includes(debouncedSearchName.toLowerCase())
+      );
+      setFilteredLineItems(newLineItems);
+      setLoading(false);
+    } else {
+      setFilteredLineItems(lineItems);
+      setLoading(false);
+    }
+  }, [debouncedSearchName, lineItems]);
+
+  const handleAddEntry = () => {
+    if (!addNew && lineItem.name) {
+      if (!lineItem.date) {
+        lineItem.date = new Date().toISOString();
+      }
+      setManualEntryArr([...manualEntryArr, lineItem]);
+    }
+  };
+
+  useEffect(() => handleAddEntry(), [addNew]);
+
+  useEffect(() => {
+    if (!onDraftChange) return;
+
+    onDraftChange(addNew && lineItem.name ? lineItem : null);
+  }, [addNew, lineItem, onDraftChange]);
+
+  useOutsideClick(
+    wrapperRef,
+    () => {
+      setShowNewLineItemTable(false);
+    },
+    addNew
+  );
+
+  const getNewLineItemDropdown = () => {
+    if (selectedClient && lineItems && showNewLineItemTable) {
+      return (
+        <NewLineItemTable
+          dateFormat={dateFormat}
+          filteredLineItems={filteredLineItems}
+          loadMoreItems={loadNewLineItems}
+          loading={loading}
+          selectedLineItems={selectedLineItems}
+          setAddNew={setAddNew}
+          setFilteredLineItems={setFilteredLineItems}
+          setLineItem={setLineItem}
+          setLoading={setLoading}
+          setMultiLineItemModal={setMultiLineItemModal}
+          setSelectedLineItems={setSelectedLineItems}
+        />
+      );
+    }
+
+    return (
+      <div className="flex h-10 items-center justify-center rounded-md border border-border/60 bg-card px-4 text-sm text-muted-foreground sm:h-48">
+        {i18n.t("invoices.selectAClient")}
+      </div>
+    );
+  };
+
+  const getAddNewButton = () => {
+    if (!addNew) {
+      return (
+        <tr className="w-full pt-4">
+          <td className="relative w-full pt-4 pr-10" colSpan={6}>
+            <button
+              type="button"
+              disabled={!selectedClient}
+              className={`hoverButton w-full rounded-md border-2 border-dashed bg-card py-1 pr-10 pl-4 text-left text-base font-bold tracking-widest transition-colors sm:pl-0 sm:text-center ${
+                selectedClient
+                  ? "border-primary/40 text-foreground hover:border-primary/60 hover:bg-accent"
+                  : "border-border text-muted-foreground"
+              }`}
+              onClick={() => setAddNew(!addNew)}
+            >
+              + {i18n.t("invoices.lineItems").toUpperCase()}
+            </button>
+            {!selectedClient && (
+              <span className="invisible absolute top-full left-1/3 ml-10 rounded bg-card p-2 text-sm font-bold text-muted-foreground">
+                {i18n.t("invoices.selectAClient")}
+              </span>
+            )}
+          </td>
+        </tr>
+      );
+    }
+  };
+
+  const getManualEntryItem = () => {
+    if (selectedClient) {
+      return (
+        <ManualEntry
+          addNew={addNew}
+          clientCurrency={clientCurrency}
+          dateFormat={dateFormat}
+          getNewLineItemDropdown={getNewLineItemDropdown}
+          lineItem={lineItem}
+          manualEntryArr={manualEntryArr}
+          setAddNew={setAddNew}
+          setLineItem={setLineItem}
+          setManualEntryArr={setManualEntryArr}
+          setNewLineItemTable={setShowNewLineItemTable}
+          showNewLineItemTable={showNewLineItemTable}
+        />
+      );
+    }
+
+    return (
+      <tr>
+        <td colSpan={5}>
+          <div className="shadow-2 mt-4 flex h-10 w-full items-center justify-center rounded-md border border-border/60 bg-card px-4 text-sm text-muted-foreground sm:h-48">
+            {i18n.t("invoices.selectAClient")}
+          </div>
+        </td>
+      </tr>
+    );
+  };
+
+  const lineItemKey = (item, index, prefix) => {
+    if (item.id !== undefined && item.id !== null) {
+      return `${prefix}-invoice-line-item-${item.id}`;
+    }
+
+    if (
+      item.timesheet_entry_id !== undefined &&
+      item.timesheet_entry_id !== null
+    ) {
+      return `${prefix}-timesheet-entry-${item.timesheet_entry_id}`;
+    }
+
+    return `${prefix}-${index}`;
+  };
+
+  return (
+    <Fragment>
+      <div className="w-full overflow-x-auto overscroll-x-contain">
+        <table className="min-w-[760px] w-full table-fixed bg-card">
+          <colgroup>
+            <col className="w-[38%]" />
+            <col className="w-[18%]" />
+            <col className="w-[14%]" />
+            <col className="w-[12%]" />
+            <col className="w-[13%]" />
+            <col className="w-[5%]" />
+          </colgroup>
+          <LineItemTableHeader />
+          <tbody className="w-full" ref={wrapperRef}>
+            {getAddNewButton()}
+            {addNew && getManualEntryItem()}
+            {manualEntryArr[0]?.name &&
+              manualEntryArr.map(
+                (item, index) =>
+                  !item._destroy && (
+                    <NewLineItemRow
+                      clientCurrency={clientCurrency}
+                      dateFormat={dateFormat}
+                      item={item}
+                      key={lineItemKey(item, index, "manual")}
+                      selectedOption={manualEntryArr}
+                      setSelectedOption={setManualEntryArr}
+                    />
+                  )
+              )}
+            {selectedLineItems.length > 0 &&
+              selectedLineItems.map(
+                (item, index) =>
+                  !item._destroy && (
+                    <NewLineItemRow
+                      clientCurrency={clientCurrency}
+                      dateFormat={dateFormat}
+                      item={item}
+                      key={lineItemKey(item, index, "selected")}
+                      selectedOption={selectedLineItems}
+                      setSelectedOption={setSelectedLineItems}
+                    />
+                  )
+              )}
+          </tbody>
+        </table>
+      </div>
+      <div>
+        {multiLineItemModal && (
+          <MultipleEntriesModal
+            dateFormat={dateFormat}
+            selectedClient={selectedClient}
+            selectedOption={selectedLineItems}
+            setMultiLineItemModal={setMultiLineItemModal}
+            setSelectedOption={setSelectedLineItems}
+          />
+        )}
+      </div>
+    </Fragment>
+  );
+};
+
+export default InvoiceTable;

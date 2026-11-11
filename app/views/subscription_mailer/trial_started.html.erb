@@ -1,0 +1,21 @@
+<% content_for :email_preheader, t("mailers.subscription.trial_started.preheader") %>
+<% content_for :email_eyebrow, t("mailers.subscription.trial_started.eyebrow") %>
+<% content_for :email_title, t("mailers.subscription.trial_started.title") %>
+<% content_for :email_subtitle do %>
+  <%= t("mailers.subscription.trial_started.subtitle") %>
+<% end %>
+
+<p><%= t("mailers.subscription.trial_started.greeting_html", name: @recipient.first_name.presence || @recipient.email) %></p>
+
+<p><%= t("mailers.subscription.trial_started.body_html", company: @company.name) %></p>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="detail-grid" style="margin-top: 24px;">
+  <tr>
+    <%= render "shared/mailer/detail_card", label: t("mailers.labels.workspace"), value: @company.name %>
+    <%= render "shared/mailer/detail_card", label: t("mailers.subscription.trial_started.trial_ends"), value: @trial_end_date_text %>
+  </tr>
+</table>
+
+<p><%= t("mailers.subscription.trial_started.footer_body") %></p>
+
+<%= render "shared/mailer/button", href: @billing_url, label: t("mailers.subscription.trial_started.cta") %>

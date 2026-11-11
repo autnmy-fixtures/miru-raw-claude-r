@@ -1,0 +1,307 @@
+import { TeamModalType } from "constants/index";
+
+import React, { useState, useRef } from "react";
+
+import { teamApi } from "apis/api";
+import CustomRadioButton from "common/CustomRadio";
+import { InputErrors, InputField } from "common/FormikFields";
+import { useList } from "context/TeamContext";
+import { useUserContext } from "context/UserContext";
+import { Formik, Form, FormikProps } from "formik";
+import { useOutsideClick, useKeypress } from "helpers";
+import { i18n } from "../../../i18n";
+import { XIcon } from "miruIcons";
+import { Button, Modal } from "StyledComponents";
+import * as Yup from "yup";
+
+import TeamForm from "./TeamForm";
+
+const TeamMemberSchema = Yup.object().shape({
+  firstName: Yup.string()
+    .matches(/^[a-zA-Z]+$/, i18n.t("team.firstNameLettersOnly") as string)
+    .max(20, i18n.t("team.maxCharacters", { count: 20 }) as string)
+    .required(i18n.t("team.firstNameRequired") as string),
+  lastName: Yup.string()
+    .matches(/^[a-zA-Z]+$/, i18n.t("team.lastNameLettersOnly") as string)
+    .max(20, i18n.t("team.maxCharacters", { count: 20 }) as string)
+    .required(i18n.t("team.lastNameRequired") as string),
+  email: Yup.string()
+    .email(i18n.t("team.invalidEmail") as string)
+    .required(i18n.t("team.emailRequired") as string),
+});
+
+const getInitialvalues = user => ({
+  id: user?.id,
+  firstName: user.firstName,
+  lastName: user.lastName,
+  email: user.email,
+  role: user.role ? user.role : "employee",
+});
+
+interface FormValues {
+  id?: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  role: string;
+}
+interface Props {
+  user: any;
+  isEdit: boolean;
+}
+
+const EditClient = ({ user = {}, isEdit = false }: Props) => {
+  const [apiError, setApiError] = useState<string>("");
+  const { setModalState, modal, setTeamList, teamList } = useList();
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const { isDesktop, company } = useUserContext();
+
+  const updateTeamList = updatedUser => {
+    const updatedTeamList = teamList.map(member => {
+      if (member.id === updatedUser.id) {
+        return updatedUser;
+      }
+
+      return member;
+    });
+    setTeamList(updatedTeamList);
+  };
+
+  const handleSubmit = async values => {
+    const { id, firstName, lastName, email, role } = values;
+    const payload = {
+      first_name: firstName,
+      last_name: lastName,
+      email,
+      role,
+    };
+
+    if (isEdit) payload["id"] = id;
+
+    if (!user.isTeamMember) payload["recipient_email"] = email;
+
+    try {
+      if (isEdit) {
+        if (user.isTeamMember) {
+          const res = await teamApi.updateTeamMember(user.id, payload);
+          updateTeamList(res.data.user);
+        } else {
+          const res = await teamApi.updateInvitedMember(user.id, payload);
+          updateTeamList(res.data.invitation);
+        }
+      } else {
+        const res = await teamApi.inviteMember(payload);
+        const invitation = res.data.invitation;
+        const updatedTeamList = teamList;
+        const IsMemberPresent = updatedTeamList.findIndex(
+          user => user.id === invitation.id
+        );
+        if (IsMemberPresent === -1) {
+          updatedTeamList.push(...[invitation]);
+        }
+        setTeamList(updatedTeamList);
+      }
+      setModalState("");
+    } catch (err) {
+      setApiError(err.message);
+    }
+  };
+
+  const getLabel = () => {
+    if (isEdit) {
+      return i18n.t("team.editMember");
+    }
+
+    return i18n.t("team.inviteMember");
+  };
+
+  const handleCloseModal = () => {
+    setModalState(TeamModalType.NONE);
+  };
+
+  useOutsideClick(wrapperRef, handleCloseModal);
+
+  useKeypress("Escape", handleCloseModal);
+
+  if (isDesktop) {
+    return (
+      <Modal
+        customStyle="sm:my-8 sm:w-full sm:max-w-lg sm:align-middle"
+        isOpen={modal == "addEdit"}
+        onClose={handleCloseModal}
+      >
+        <div className="flex items-center justify-between">
+          <h6 className="text-base font-extrabold">{getLabel()}</h6>
+          <Button style="ternary" onClick={handleCloseModal}>
+            <XIcon className="text-foreground" size={16} weight="bold" />
+          </Button>
+        </div>
+        <Formik
+          initialValues={getInitialvalues(user)}
+          validationSchema={TeamMemberSchema}
+          onSubmit={handleSubmit}
+        >
+          {(props: FormikProps<FormValues>) => {
+            const {
+              touched,
+              errors,
+              isValid,
+              dirty,
+              values,
+              setFieldError,
+              setFieldValue,
+            } = props;
+
+            const teamSeatLimitReached =
+              !company?.pro_access &&
+              Boolean(company?.team_member_limit_reached) &&
+              !isEdit &&
+              values.role !== "client";
+
+            return (
+              <Form>
+                <div className="mt-4 flex gap-4">
+                  <div className="field w-1/2">
+                    <InputField
+                      hasError={errors.firstName && touched.firstName}
+                      id="firstName"
+                      label={i18n.t("contacts.firstName")}
+                      name="firstName"
+                      setFieldError={setFieldError}
+                      setFieldValue={setFieldValue}
+                      type="text"
+                    />
+                    <InputErrors
+                      fieldErrors={errors.firstName}
+                      fieldTouched={touched.firstName}
+                    />
+                  </div>
+                  <div className="field w-1/2">
+                    <InputField
+                      hasError={errors.lastName && touched.lastName}
+                      id="lastName"
+                      label={i18n.t("contacts.lastName")}
+                      name="lastName"
+                      setFieldError={setFieldError}
+                      setFieldValue={setFieldValue}
+                      type="text"
+                    />
+                    <InputErrors
+                      fieldErrors={errors.lastName}
+                      fieldTouched={touched.lastName}
+                    />
+                  </div>
+                </div>
+                <div className="field">
+                  <InputField
+                    autoFocus
+                    hasError={errors.email && touched.email}
+                    id="email"
+                    label={i18n.t("email")}
+                    name="email"
+                    setFieldError={setFieldError}
+                    setFieldValue={setFieldValue}
+                  />
+                  <InputErrors
+                    fieldErrors={errors.email}
+                    fieldTouched={touched.email}
+                  />
+                </div>
+                <div className="field">
+                  <label className="text-xs font-normal text-foreground">
+                    {i18n.t("role")}
+                  </label>
+                  <div className="mt-2 flex items-center gap-6">
+                    <CustomRadioButton
+                      classNameLabel="font-medium text-sm text-foreground"
+                      classNameWrapper="py-2 pr-2 rounded"
+                      defaultCheck={values.role == "admin"}
+                      groupName="role"
+                      id="admin"
+                      key="admin"
+                      label={i18n.t("team.admin")}
+                      value={values.role}
+                      handleOnChange={() => {
+                        setFieldValue("role", "admin", true);
+                      }}
+                    />
+                    <CustomRadioButton
+                      classNameLabel="font-medium text-sm text-foreground"
+                      classNameWrapper="py-2 pr-2 rounded"
+                      defaultCheck={values.role == "employee"}
+                      groupName="role"
+                      id="employee"
+                      key="employee"
+                      label={i18n.t("team.employee")}
+                      value={values.role}
+                      handleOnChange={() => {
+                        setFieldValue("role", "employee", true);
+                      }}
+                    />
+                    <CustomRadioButton
+                      classNameLabel="font-medium text-sm text-foreground"
+                      classNameWrapper="py-2 pr-2 rounded"
+                      defaultCheck={values.role == "book_keeper"}
+                      groupName="role"
+                      id="book_keeper"
+                      key="book_keeper"
+                      label={i18n.t("team.bookkeeper")}
+                      value={values.role}
+                      handleOnChange={() => {
+                        setFieldValue("role", "book_keeper", true);
+                      }}
+                    />
+                    <CustomRadioButton
+                      classNameLabel="font-medium text-sm text-foreground"
+                      classNameWrapper="py-2 pr-2 rounded"
+                      defaultCheck={values.role == "client"}
+                      groupName="role"
+                      id="client"
+                      key="client"
+                      label={i18n.t("team.clientRole")}
+                      value={values.role}
+                      handleOnChange={() => {
+                        setFieldValue("role", "client", true);
+                      }}
+                    />
+                  </div>
+                </div>
+                <div className="actions mt-6">
+                  {teamSeatLimitReached && (
+                    <p className="mb-3 text-sm text-muted-foreground">
+                      {i18n.t("team.seatLimitReached")}
+                    </p>
+                  )}
+                  <Button
+                    disabled={!(dirty && isValid) || teamSeatLimitReached}
+                    type="submit"
+                    className={
+                      !isValid || !dirty || teamSeatLimitReached
+                        ? "focus:outline-none flex h-10 w-full justify-center rounded border border-transparent bg-secondary text-base font-medium tracking-widest text-primary-foreground shadow-sm"
+                        : "form__input_submit"
+                    }
+                  >
+                    {isEdit ? i18n.t("save") : i18n.t("team.inviteMember")}
+                  </Button>
+                </div>
+              </Form>
+            );
+          }}
+        </Formik>
+      </Modal>
+    );
+  }
+
+  return (
+    <TeamForm
+      TeamMemberSchema={TeamMemberSchema}
+      getLabel={getLabel}
+      handleCloseModal={handleCloseModal}
+      handleSubmit={handleSubmit}
+      initialValues={getInitialvalues(user)}
+      isEdit={isEdit}
+    />
+  );
+};
+
+export default EditClient;

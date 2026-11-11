@@ -1,0 +1,22 @@
+# frozen_string_literal: true
+
+class Leave < ApplicationRecord
+  include Discardable
+
+  belongs_to :company
+
+  has_many :leave_types, class_name: "LeaveType", dependent: :destroy
+  has_many :custom_leaves, class_name: "CustomLeave", dependent: :destroy
+  has_many :timeoff_entries, through: :leave_types
+
+  validates :year, presence: true,
+    numericality: { greater_than_or_equal_to: 1000, less_than_or_equal_to: 9999 }
+
+  after_discard :discard_leave_types
+
+  private
+
+    def discard_leave_types
+      leave_types.discard_all
+    end
+end

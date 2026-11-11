@@ -1,0 +1,80 @@
+# frozen_string_literal: true
+
+class UpdateProfileSettingsService
+  attr_reader :current_user, :user_params
+
+  def initialize(current_user, user_params)
+    @current_user = current_user
+    @user_params = user_params
+  end
+
+  def process
+    if sensitive_change? && user_params[:current_password].blank?
+      current_user.errors.add(:current_password, :blank)
+      return { res: { errors: current_user.errors.full_messages }, status: :unprocessable_content }
+    end
+
+    if phone_change? && user_params[:password].blank?
+      unless current_user.valid_password?(user_params[:current_password])
+        current_user.errors.add(:current_password, :invalid)
+        return { res: { errors: current_user.errors.full_messages }, status: :unprocessable_content }
+      end
+
+      return update_user_without_password
+    end
+
+    if user_params[:current_password].blank?
+      update_user_without_password
+    else
+      update_user_with_password
+    end
+  end
+
+  def update_user_without_password
+    if current_user.update_without_password(user_params.except(:current_password))
+      { res: success_payload(I18n.t("companies.update.success")), status: :ok }
+    else
+      { res: { errors: current_user.errors.full_messages }, status: :unprocessable_content }
+    end
+  end
+
+  def update_user_with_password
+    if new_password_same_as_current_password?
+      current_user.errors.add(:password, :same_as_current_password)
+      return { res: { errors: current_user.errors.full_messages }, status: :unprocessable_content }
+    end
+
+    if current_user.update_with_password(user_params)
+      { res: success_payload(I18n.t("password.update.success")), status: :ok }
+    else
+      { res: { errors: current_user.errors.full_messages }, status: :unprocessable_content }
+    end
+  end
+
+  private
+
+    def sensitive_change?
+      user_params[:password].present? || phone_change?
+    end
+
+    def phone_change?
+      user_params.key?(:phone) && user_params[:phone].to_s != current_user.phone.to_s
+    end
+
+    def new_password_same_as_current_password?
+      user_params[:password].present? &&
+        user_params[:current_password].present? &&
+        current_user.valid_password?(user_params[:current_password]) &&
+        user_params[:password] == user_params[:current_password]
+    end
+
+    def success_payload(notice)
+      {
+        notice:,
+        user: {
+          avatar_url: current_user.avatar_url,
+          password_changed_at: current_user.password_changed_at
+        }
+      }
+    end
+end

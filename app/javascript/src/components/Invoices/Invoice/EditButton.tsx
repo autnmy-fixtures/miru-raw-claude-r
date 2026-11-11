@@ -1,0 +1,26 @@
+import React from "react";
+
+import { PencilIcon } from "miruIcons";
+import { Link } from "react-router-dom";
+import { i18n } from "../../../i18n";
+
+const EditButton = ({ editInvoiceLink }) => (
+  <div className="edit-button-container mx-1 flex flex-col justify-items-center">
+    <Link
+      className="flex h-10 w-32 flex-row justify-center rounded border border-primary"
+      to={editInvoiceLink}
+      type="button"
+    >
+      <div className="flex flex-row items-center justify-between self-center">
+        <div className="mr-1">
+          <PencilIcon color="hsl(var(--primary))" size={16} weight="bold" />
+        </div>
+        <p className="ml-1 text-base font-bold tracking-widest text-primary">
+          {i18n.t("edit").toUpperCase()}
+        </p>
+      </div>
+    </Link>
+  </div>
+);
+
+export default EditButton;

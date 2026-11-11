@@ -1,0 +1,201 @@
+import React, { useState } from "react";
+
+import { XIcon } from "miruIcons";
+import Steps from "rc-steps";
+import "rc-steps/assets/index.css";
+import { Button, Modal, Toastr } from "StyledComponents";
+import { clientApi } from "apis/api";
+import { i18n } from "../../../../i18n";
+import type { SendPaymentReminderEmail } from "../../../../types/email";
+
+import EmailPreview from "./EmailPreview";
+import Step from "./Step";
+import Table from "./Table";
+import { organizationSetupSteps, TOTAL_NUMBER_OF_STEPS } from "./utils";
+
+const PaymentReminder = ({
+  sendPaymentReminder,
+  setSendPaymentReminder,
+  client,
+  clientInvoices,
+  isDesktop,
+}) => {
+  const invoiceStatus = ["overdue", "viewed", "sent"];
+  const invoices = clientInvoices.filter(invoice =>
+    invoiceStatus.includes(invoice.status)
+  );
+
+  const sortByStatus = (a, b) => {
+    const statusAIndex = invoiceStatus.indexOf(a.status);
+    const statusBIndex = invoiceStatus.indexOf(b.status);
+
+    return statusAIndex - statusBIndex;
+  };
+
+  const [selectedInvoices, setSelectedInvoices] = useState<any[]>(
+    invoices
+      .sort(sortByStatus)
+      .filter(invoice => invoice.status === "overdue")
+      .map(invoice => invoice.id)
+  );
+  const [currentStep, setCurrentStep] = useState<number>(1);
+  const [stepNoOfLastSubmittedForm, setStepNoOfLastSubmittedForm] =
+    useState<number>(0);
+
+  const [emailParams, setEmailParams] = useState<SendPaymentReminderEmail>({
+    subject: i18n.t("clients.paymentReminderSubject"),
+    message: i18n.t("clients.paymentReminderMessage"),
+    recipients: client.clientMembersEmails,
+  });
+
+  const isStepFormSubmittedOrVisited = stepNo => {
+    if (stepNo == currentStep) {
+      return true;
+    }
+
+    return (
+      stepNo <= TOTAL_NUMBER_OF_STEPS &&
+      stepNo > 0 &&
+      stepNo <= stepNoOfLastSubmittedForm
+    );
+  };
+
+  const updateStepNumber = (stepNo: number) => {
+    if (isStepFormSubmittedOrVisited(stepNo)) {
+      setCurrentStep(stepNo);
+    }
+  };
+
+  const onNextBtnClick = () => {
+    const nextStepNo = currentStep + 1;
+    setStepNoOfLastSubmittedForm(currentStep);
+    setCurrentStep(nextStepNo);
+  };
+
+  const handleSendReminder = async () => {
+    try {
+      await clientApi.sendPaymentReminder(client.id, {
+        client_email: {
+          email_params: emailParams,
+          selected_invoices: selectedInvoices,
+        },
+      });
+      setSendPaymentReminder(false);
+    } catch (error) {
+      Toastr.error(error.message);
+    }
+  };
+
+  const renderSelectedForm = () => {
+    // render invoices list
+    if (currentStep === 1) {
+      return (
+        <Table
+          invoices={invoices}
+          selectedInvoices={selectedInvoices}
+          setSelectedInvoices={setSelectedInvoices}
+        />
+      );
+    }
+
+    // render email preview
+    return (
+      <EmailPreview
+        emailParams={emailParams}
+        invoices={invoices}
+        isDesktop={isDesktop}
+        selectedInvoices={selectedInvoices}
+        setEmailParams={setEmailParams}
+      />
+    );
+  };
+
+  return (
+    <Modal
+      customStyle="sm:my-8 sm:w-full sm:max-w-lg sm:align-middle min-w-1008 relative min-h-80v"
+      isOpen={sendPaymentReminder}
+      onClose={() => setSendPaymentReminder(false)}
+    >
+      <div className="h-full" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center">
+          <h6 className="form__title">
+            {i18n.t("clients.sendPaymentReminder")}
+          </h6>
+          <div className="mx-auto flex w-1/3 items-center">
+            <Steps
+              current={currentStep - 1}
+              items={organizationSetupSteps}
+              labelPlacement="horizontal"
+              itemRender={props => (
+                <Step
+                  {...props}
+                  isActiveStep={isStepFormSubmittedOrVisited}
+                  updateStepNumber={updateStepNumber}
+                />
+              )}
+            />
+          </div>
+          <button
+            className="text-foreground"
+            type="button"
+            onClick={() => setSendPaymentReminder(false)}
+          >
+            <XIcon size={16} weight="bold" />
+          </button>
+        </div>
+        {renderSelectedForm()}
+        <div className="absolute bottom-0 left-0 right-0 flex items-center justify-between border-t border-border bg-background p-4 shadow-c1">
+          {currentStep === 1 ? (
+            <div className="flex w-full items-center justify-between">
+              <small>
+                {selectedInvoices.length > 1
+                  ? i18n.t("clients.invoicesSelected", {
+                      count: selectedInvoices.length,
+                    })
+                  : i18n.t("clients.invoiceSelected", {
+                      count: selectedInvoices.length,
+                    })}
+              </small>
+              <Button
+                className="py-2 px-10 text-base"
+                disabled={selectedInvoices.length < 1}
+                style="primary"
+                onClick={() => {
+                  onNextBtnClick();
+                  setCurrentStep(2);
+                }}
+              >
+                {i18n.t("continue")}
+              </Button>
+            </div>
+          ) : (
+            <div className="flex w-full items-center justify-end">
+              <Button
+                className="mr-4 py-2 px-10 text-base"
+                disabled={selectedInvoices.length < 1}
+                style="secondary"
+                onClick={() => {
+                  setCurrentStep(1);
+                }}
+              >
+                {i18n.t("back")}
+              </Button>
+              <Button
+                className="py-2 px-10 text-base"
+                disabled={selectedInvoices.length < 1}
+                style="primary"
+                onClick={() => {
+                  handleSendReminder();
+                }}
+              >
+                {i18n.t("clients.sendReminder")}
+              </Button>
+            </div>
+          )}
+        </div>
+      </div>
+    </Modal>
+  );
+};
+
+export default PaymentReminder;

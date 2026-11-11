@@ -1,0 +1,109 @@
+import React, { useEffect, useState } from "react";
+
+import { invoicesApi } from "apis/api";
+import Loader from "common/Loader/index";
+import ConnectPaymentGateway from "components/Invoices/popups/ConnectPaymentGateway";
+import StripeDisabledInvoice from "components/Invoices/popups/StripeDisabledInvoice";
+import { useUserContext } from "context/UserContext";
+import { useParams } from "react-router-dom";
+
+import Header from "./Header";
+import InvoiceDetails from "./InvoiceDetails";
+import MobileView from "./MobileView";
+
+import NoInvoices from "../List/NoInvoices";
+
+const ClientInvoiceDetails = () => {
+  const { isDesktop } = useUserContext();
+  const params = useParams();
+
+  const [loading, setLoading] = useState(true);
+  const [data, setData] = useState(null);
+  const [showConnectPaymentDialog, setShowConnectPaymentDialog] =
+    useState<boolean>(false);
+
+  const [showStripeDisabledDialog, setShowStripeDisabledDialog] =
+    useState<boolean>(false);
+
+  useEffect(() => {
+    fetchViewInvoice();
+  }, []);
+
+  const fetchViewInvoice = async () => {
+    try {
+      const res = await invoicesApi.viewInvoice(params.id);
+      setData(res.data);
+      setLoading(false);
+    } catch {
+      setLoading(false);
+    }
+  };
+
+  if (loading) {
+    return <Loader />;
+  }
+
+  if (data) {
+    const {
+      url,
+      invoice,
+      logo,
+      lineItems,
+      company,
+      client,
+      bank_payment,
+      upi_payment,
+      razorpay_payment,
+      paypal_payment,
+      stripe_connected_account,
+    } = data;
+
+    return isDesktop ? (
+      <div className="flex flex-col justify-between">
+        <div className="font-sans">
+          <Header
+            invoice={invoice}
+            setShowConnectPaymentDialog={setShowConnectPaymentDialog}
+            setShowStripeDisabledDialog={setShowStripeDisabledDialog}
+            stripeUrl={url}
+            upiPayment={upi_payment}
+            razorpayPayment={razorpay_payment}
+            paypalPayment={paypal_payment}
+            stripe_connected_account={stripe_connected_account}
+          />
+          <div className="m-0 mt-5 mb-10 w-full bg-muted p-0">
+            <InvoiceDetails
+              client={client}
+              company={company}
+              invoice={invoice}
+              lineItems={lineItems}
+              logo={logo}
+              bankPayment={bank_payment}
+              upiPayment={upi_payment}
+            />
+          </div>
+          {showConnectPaymentDialog && (
+            <ConnectPaymentGateway
+              isInvoiceEmail
+              invoice={invoice}
+              setShowConnectPaymentDialog={setShowConnectPaymentDialog}
+              showConnectPaymentDialog={showConnectPaymentDialog}
+            />
+          )}
+          {showStripeDisabledDialog && (
+            <StripeDisabledInvoice
+              setShowStripeDisabledDialog={setShowStripeDisabledDialog}
+              showStripeDisabledDialog={showStripeDisabledDialog}
+            />
+          )}
+        </div>
+      </div>
+    ) : (
+      <MobileView data={data} />
+    );
+  }
+
+  return <NoInvoices />;
+};
+
+export default ClientInvoiceDetails;

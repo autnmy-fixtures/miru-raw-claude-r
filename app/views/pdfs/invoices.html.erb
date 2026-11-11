@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title><%= t("pdfs.invoices.title") %></title>
+  <style>
+    html {
+      -webkit-print-color-adjust: exact;
+    }
+
+    body {
+      margin: 0;
+      padding: 0;
+      background: #ffffff;
+      color: #0f172a;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .invoice-page {
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 32px 28px;
+    }
+
+    /* Header / Company Info */
+    .company-header {
+      margin-bottom: 24px;
+    }
+
+    .company-logo {
+      height: 56px;
+      object-fit: contain;
+      margin-bottom: 12px;
+    }
+
+    .company-name {
+      font-size: 22px;
+      font-weight: 700;
+      margin: 0 0 8px;
+      color: #0f172a;
+    }
+
+    .company-details {
+      color: #64748b;
+      font-size: 12px;
+      line-height: 1.5;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 2px 24px;
+    }
+
+    .company-details p {
+      margin: 0;
+    }
+
+    /* Invoice Title & Meta */
+    .invoice-title-section {
+      margin-bottom: 24px;
+    }
+
+    .invoice-title {
+      font-size: 24px;
+      font-weight: 700;
+      margin: 0 0 6px;
+      color: #0f172a;
+    }
+
+    .invoice-number-label {
+      color: #64748b;
+      font-size: 12px;
+      margin: 0;
+    }
+
+    .invoice-number-value {
+      font-size: 16px;
+      font-weight: 600;
+      margin: 2px 0 0;
+      color: #0f172a;
+    }
+
+    .invoice-meta {
+      margin-top: 12px;
+      font-size: 12px;
+    }
+
+    .invoice-meta-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 0;
+      max-width: 320px;
+    }
+
+    .invoice-meta-label {
+      color: #64748b;
+    }
+
+    .invoice-meta-value {
+      font-weight: 500;
+      color: #0f172a;
+    }
+
+    /* Billed To */
+    .billed-to-section {
+      margin-bottom: 24px;
+    }
+
+    .section-heading {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #64748b;
+      margin: 0 0 8px;
+    }
+
+    .client-name {
+      font-size: 16px;
+      font-weight: 600;
+      margin: 0 0 4px;
+      color: #0f172a;
+    }
+
+    .client-details {
+      color: #64748b;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .client-details p {
+      margin: 0;
+    }
+
+    /* Line Items Table */
+    .line-items-section {
+      margin-bottom: 24px;
+    }
+
+    .line-items-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    .line-items-table thead tr {
+      border-bottom: 2px solid #e2e8f0;
+    }
+
+    .line-items-table thead th {
+      padding: 8px 8px;
+      font-size: 12px;
+      font-weight: 600;
+      color: #0f172a;
+      text-align: left;
+    }
+
+    .line-items-table thead th.text-center {
+      text-align: center;
+    }
+
+    .line-items-table thead th.text-right {
+      text-align: right;
+    }
+
+    .line-items-table tbody tr {
+      border-bottom: 1px solid #f1f5f9;
+    }
+
+    .line-items-table tbody td {
+      padding: 10px 8px;
+      font-size: 12px;
+      color: #0f172a;
+      vertical-align: top;
+    }
+
+    .line-items-table tbody td.text-center {
+      text-align: center;
+    }
+
+    .line-items-table tbody td.text-right {
+      text-align: right;
+    }
+
+    .line-item-name {
+      font-weight: 500;
+    }
+
+    .line-item-description {
+      color: #64748b;
+      margin-top: 2px;
+    }
+
+    .line-item-date {
+      color: #64748b;
+    }
+
+    /* Totals */
+    .totals-section {
+      margin-bottom: 24px;
+      display: flex;
+      justify-content: flex-end;
+    }
+
+    .totals-box {
+      width: 260px;
+    }
+
+    .totals-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 6px 0;
+      font-size: 12px;
+    }
+
+    .totals-row-label {
+      color: #64748b;
+    }
+
+    .totals-row-value {
+      font-weight: 500;
+      color: #0f172a;
+    }
+
+    .totals-row-discount {
+      color: #dc2626;
+      font-weight: 500;
+    }
+
+    .totals-divider {
+      border: none;
+      border-top: 1px solid #e2e8f0;
+      margin: 4px 0;
+    }
+
+    .totals-grand-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 0;
+    }
+
+    .totals-grand-label {
+      font-size: 14px;
+      font-weight: 600;
+      color: #0f172a;
+    }
+
+    .totals-grand-value {
+      font-size: 18px;
+      font-weight: 700;
+      color: #0f172a;
+    }
+
+    /* Payment Details */
+    .payment-section {
+      border-top: 1px solid #e2e8f0;
+      padding-top: 20px;
+      margin-bottom: 24px;
+    }
+
+    .payment-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px 24px;
+      font-size: 12px;
+      color: #64748b;
+    }
+
+    .payment-grid p {
+      margin: 0;
+    }
+
+    /* Footer */
+    .invoice-footer {
+      border-top: 1px solid #e2e8f0;
+      padding-top: 20px;
+      text-align: center;
+      font-size: 12px;
+      color: #64748b;
+    }
+  </style>
+</head>
+<body>
+  <%
+    reference = invoice.reference.presence
+    billed_to_address = client.formatted_address.presence
+    client_ein = client.ein.presence
+    client_email = client.email.presence
+    client_phone = client.phone.presence
+
+    payment_info = [
+      [t("pdfs.invoices.payment_rows.bank_name"), invoice.company.bank_name],
+      [t("pdfs.invoices.payment_rows.account_number"), invoice.company.bank_account_number],
+      [t("pdfs.invoices.payment_rows.routing_number"), invoice.company.bank_routing_number],
+      [t("pdfs.invoices.payment_rows.swift_code"), invoice.company.bank_swift_code],
+    ].select { |_, value| value.present? }
+
+    has_payment_info = payment_info.any?
+  %>
+
+  <div class="invoice-page">
+    <!-- Company Header -->
+    <div class="company-header">
+      <% if company_logo.present? %>
+        <%= image_tag company_logo, class: "company-logo" %>
+      <% else %>
+        <p class="company-name"><%= invoice.company.name %></p>
+      <% end %>
+      <% if invoice.company.current_address&.formatted_address.present? %>
+        <p style="margin: 0 0 4px; color: #64748b; font-size: 12px;"><%= invoice.company.current_address.formatted_address %></p>
+      <% end %>
+      <div class="company-details">
+        <% if invoice.company.business_phone.present? %>
+          <p><%= invoice.company.business_phone %></p>
+        <% end %>
+        <% if invoice.company.tax_id.present? %>
+          <p><%= t("pdfs.invoices.payment_rows.tax_id") %>: <%= invoice.company.tax_id %></p>
+        <% end %>
+        <% if invoice.company.vat_number.present? %>
+          <p><%= t("pdfs.invoices.payment_rows.vat_number") %>: <%= invoice.company.vat_number %></p>
+        <% end %>
+        <% if invoice.company.gst_number.present? %>
+          <p><%= t("pdfs.invoices.payment_rows.gst_number") %>: <%= invoice.company.gst_number %></p>
+        <% end %>
+        <% if invoice.company.ein.present? %>
+          <p><%= t("pdfs.invoices.payment_rows.ein") %>: <%= invoice.company.ein %></p>
+        <% end %>
+        <% if invoice.company.us_taxpayer_id.present? %>
+          <p><%= t("pdfs.invoices.payment_rows.us_taxpayer_id") %>: <%= invoice.company.us_taxpayer_id %></p>
+        <% end %>
+      </div>
+    </div>
+
+    <!-- Invoice Title & Meta -->
+    <div class="invoice-title-section">
+      <h1 class="invoice-title"><%= t("pdfs.invoices.title") %></h1>
+      <p class="invoice-number-label"><%= t("pdfs.invoices.invoice_number") %></p>
+      <p class="invoice-number-value">#<%= invoice.invoice_number %></p>
+
+      <div class="invoice-meta">
+        <div class="invoice-meta-row">
+          <span class="invoice-meta-label"><%= t("pdfs.invoices.issue_date") %>:</span>
+          <span class="invoice-meta-value"><%= invoice.formatted_issue_date %></span>
+        </div>
+        <div class="invoice-meta-row">
+          <span class="invoice-meta-label"><%= t("pdfs.invoices.due_date") %>:</span>
+          <span class="invoice-meta-value"><%= invoice.formatted_due_date %></span>
+        </div>
+        <% if reference %>
+          <div class="invoice-meta-row">
+            <span class="invoice-meta-label"><%= t("pdfs.invoices.reference_label") %>:</span>
+            <span class="invoice-meta-value"><%= reference %></span>
+          </div>
+        <% end %>
+      </div>
+    </div>
+
+    <!-- Billed To -->
+    <div class="billed-to-section">
+      <p class="section-heading"><%= t("pdfs.invoices.billed_to") %></p>
+      <p class="client-name"><%= client.name %></p>
+      <div class="client-details">
+        <% if billed_to_address %>
+          <p><%= billed_to_address %></p>
+        <% end %>
+        <% if client_ein %>
+          <p><%= t("pdfs.invoices.payment_rows.ein") %>: <%= client_ein %></p>
+        <% end %>
+        <% if client_email %>
+          <p><%= client_email %></p>
+        <% end %>
+        <% if client_phone %>
+          <p><%= client_phone %></p>
+        <% end %>
+      </div>
+    </div>
+
+    <!-- Line Items -->
+    <div class="line-items-section">
+      <table class="line-items-table">
+        <thead>
+          <tr>
+            <th style="width: 42%;"><%= t("pdfs.invoices.table.description") %></th>
+            <th class="text-center" style="width: 16%;"><%= t("pdfs.invoices.table.date") %></th>
+            <th class="text-center" style="width: 12%;"><%= t("pdfs.invoices.table.qty") %></th>
+            <th class="text-right" style="width: 15%;"><%= t("pdfs.invoices.table.rate") %></th>
+            <th class="text-right" style="width: 15%;"><%= t("pdfs.invoices.table.amount") %></th>
+          </tr>
+        </thead>
+        <tbody>
+          <% invoice_line_items.each do |item| %>
+            <tr>
+              <td>
+                <% if item[:name].present? %>
+                  <div class="line-item-name"><%= item[:name] %></div>
+                <% end %>
+                <% if item[:description].present? %>
+                  <div class="line-item-description"><%= item[:description] %></div>
+                <% end %>
+              </td>
+              <td class="text-center line-item-date"><%= item[:date] %></td>
+              <td class="text-center"><%= item[:quantity] %></td>
+              <td class="text-right"><%= item[:rate] %></td>
+              <td class="text-right" style="font-weight: 500;"><%= item[:line_total] %></td>
+            </tr>
+          <% end %>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Totals -->
+    <div class="totals-section">
+      <div class="totals-box">
+        <div class="totals-row">
+          <span class="totals-row-label"><%= t("pdfs.invoices.sub_total") %></span>
+          <span class="totals-row-value"><%= sub_total %></span>
+        </div>
+        <% if invoice.discount.present? && invoice.discount > 0 %>
+          <div class="totals-row">
+            <span class="totals-row-label"><%= t("pdfs.invoices.discount") %></span>
+            <span class="totals-row-discount">-<%= invoice_discount %></span>
+          </div>
+        <% end %>
+        <% if invoice_taxes.present? %>
+          <% invoice_taxes.each do |invoice_tax| %>
+            <div class="totals-row">
+              <span class="totals-row-label"><%= invoice_tax[:name] %></span>
+              <span class="totals-row-value"><%= invoice_tax[:amount] %></span>
+            </div>
+          <% end %>
+        <% elsif invoice.tax.present? && invoice.tax > 0 %>
+          <div class="totals-row">
+            <span class="totals-row-label"><%= t("pdfs.invoices.tax") %></span>
+            <span class="totals-row-value"><%= invoice_tax %></span>
+          </div>
+        <% end %>
+        <hr class="totals-divider">
+        <div class="totals-grand-row">
+          <span class="totals-grand-label"><%= t("pdfs.invoices.total_due") %></span>
+          <span class="totals-grand-value"><%= total %></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Signature -->
+    <% if signature_url.present? %>
+      <div style="margin-top: 20px; margin-bottom: 24px;">
+        <img src="<%= signature_url %>" style="max-height: 80px; width: auto;" alt="Signature" />
+      </div>
+    <% end %>
+
+    <!-- Payment Details -->
+    <% if has_payment_info %>
+      <div class="payment-section">
+        <p class="section-heading"><%= t("pdfs.invoices.payment_details") %></p>
+        <div class="payment-grid">
+          <% payment_info.each do |label, value| %>
+            <p><%= label %>: <%= value %></p>
+          <% end %>
+        </div>
+      </div>
+    <% end %>
+
+    <!-- Footer -->
+    <div class="invoice-footer">
+      <p><%= t("pdfs.invoices.thank_you") %></p>
+    </div>
+  </div>
+</body>
+</html>

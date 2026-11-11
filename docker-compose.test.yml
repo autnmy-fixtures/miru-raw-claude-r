@@ -1,0 +1,85 @@
+version: '3.8'
+
+services:
+  # PostgreSQL database for testing
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: miru_web_test
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Test runner - uses the test stage
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+      cache_from:
+        - ghcr.io/saeloun/miru-web:base
+        - ghcr.io/saeloun/miru-web:test-latest
+    working_dir: /app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/miru_web_test
+      RAILS_ENV: test
+      CI: "true"
+      PARALLEL_WORKERS: 4
+    volumes:
+      - .:/app:cached
+      - bundle_cache:/usr/local/bundle
+      - node_modules:/app/node_modules
+    command: |
+      bash -c "
+        bundle exec rails db:test:prepare &&
+        bundle exec rails db:migrate &&
+        bundle exec rspec --format progress
+      "
+
+  # Playwright test runner
+  playwright:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+      cache_from:
+        - ghcr.io/saeloun/miru-web:base
+        - ghcr.io/saeloun/miru-web:test-latest
+    working_dir: /app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/miru_web_test
+      RAILS_ENV: test
+      CI: "true"
+      PLAYWRIGHT_HEADLESS: "true"
+    volumes:
+      - .:/app:cached
+      - bundle_cache:/usr/local/bundle
+      - node_modules:/app/node_modules
+      - playwright_cache:/ms-playwright
+    command: |
+      bash -c "
+        bundle exec rails db:test:prepare &&
+        bundle exec rails server -b 0.0.0.0 -p 3000 &
+        sleep 10 &&
+        pnpm exec playwright test --project=chromium
+      "
+
+volumes:
+  postgres_test_data:
+  bundle_cache:
+  node_modules:
+  playwright_cache:

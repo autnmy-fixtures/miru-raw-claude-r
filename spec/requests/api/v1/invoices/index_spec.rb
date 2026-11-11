@@ -1,0 +1,414 @@
+# frozen_string_literal: true
+
+require "rails_helper"
+
+RSpec.describe "Api::V1::Invoices#index", type: :request do
+  let(:company) do
+    create(:company_with_invoices, length: 10)
+  end
+
+  let(:book_keeper) { create(:user, current_workspace_id: company.id) }
+  let(:admin) { create(:user, current_workspace_id: company.id) }
+  let(:employee) { create(:user, current_workspace_id: company.id) }
+
+  before do
+    create(:employment, company:, user: book_keeper)
+    book_keeper.add_role :book_keeper, company
+
+    create(:employment, company:, user: admin)
+    admin.add_role :admin, company
+
+    create(:employment, company:, user: employee)
+    employee.add_role :employee, company
+
+    # No search index refresh needed with PG search
+  end
+
+  context "when user is a book keeper" do
+    before do
+      sign_in book_keeper
+    end
+
+    describe "invoices_per_page param" do
+      it "returns the number the invoices specified by invoices_per_page" do
+        invoices_per_page = 10
+        send_request :get, api_v1_invoices_path(invoices_per_page:), headers: auth_headers(book_keeper)
+        expect(response).to have_http_status(:ok)
+        expect(json_response["invoices"].size).to eq(10)
+      end
+
+      it "return total invoices if invoices_per_page is less than or equal to zero" do
+        invoices_per_page = 0
+        send_request :get, api_v1_invoices_path(invoices_per_page:), headers: auth_headers(book_keeper)
+        expect(response).to have_http_status(:ok)
+        expect(json_response["invoices"].size).to eq(company.invoices.kept.count)
+      end
+
+      it "clamps invoices_per_page to a maximum of 100" do
+        invoices_per_page = 999
+        send_request :get, api_v1_invoices_path(invoices_per_page:), headers: auth_headers(book_keeper)
+        expect(response).to have_http_status(:ok)
+        # Should not crash or return unbounded results
+        expect(json_response["invoices"].size).to be <= 100
+      end
+    end
+
+    describe "page param" do
+      it "returns invoices offset by page" do
+        page, invoices_per_page = 1, 5
+        send_request :get, api_v1_invoices_path(page:, invoices_per_page:), headers: auth_headers(book_keeper)
+        expect(response).to have_http_status(:ok)
+        expect(json_response["invoices"].size).to eq(5)
+      end
+
+      it "returns newest invoices first" do
+        client = company.clients.first || create(:client, company:)
+        oldest_invoice = create(:invoice, company:, client:, invoice_number: "INV-OLD-001", issue_date: 3.days.ago.to_date)
+        newer_invoice = create(:invoice, company:, client:, invoice_number: "INV-NEW-002", issue_date: 1.day.ago.to_date)
+        newest_invoice = create(:invoice, company:, client:, invoice_number: "INV-NEWEST-003", issue_date: Date.current)
+
+        send_request :get, api_v1_invoices_path(page: 1, invoices_per_page: 10), headers: auth_headers(book_keeper)
+
+        returned_ids = json_response["invoices"].pluck("id")
+
+        expect(returned_ids.index(newest_invoice.id)).to be < returned_ids.index(newer_invoice.id)
+        expect(returned_ids.index(newer_invoice.id)).to be < returned_ids.index(oldest_invoice.id)
+      end
+
+      it "uses updated_at and id as tie-breakers for the same issue date" do
+        client = company.clients.first || create(:client, company:)
+        same_issue_date = Date.current
+        same_updated_at = 45.minutes.ago.change(usec: 0)
+
+        newer_updated_invoice = create(
+          :invoice,
+          company:,
+          client:,
+          invoice_number: "INV-TIE-API-001",
+          issue_date: same_issue_date,
+          updated_at: 10.minutes.ago.change(usec: 0)
+        )
+        lower_id_invoice = create(
+          :invoice,
+          company:,
+          client:,
+          invoice_number: "INV-TIE-API-002",
+          issue_date: same_issue_date,
+          updated_at: same_updated_at
+        )
+        higher_id_invoice = create(
+          :invoice,
+          company:,
+          client:,
+          invoice_number: "INV-TIE-API-003",
+          issue_date: same_issue_date,
+          updated_at: same_updated_at
+        )
+
+        send_request :get, api_v1_invoices_path(page: 1, invoices_per_page: 20), headers: auth_headers(book_keeper)
+
+        returned_ids = json_response["invoices"].pluck("id")
+
+        expect(returned_ids.index(newer_updated_invoice.id)).to be < returned_ids.index(higher_id_invoice.id)
+        expect(returned_ids.index(higher_id_invoice.id)).to be < returned_ids.index(lower_id_invoice.id)
+      end
+
+      it "return invoices offset by page one if page is less than or equal to zero" do
+        page, invoices_per_page = -1, 5
+        send_request :get, api_v1_invoices_path(page:, invoices_per_page:), headers: auth_headers(book_keeper)
+        expect(response).to have_http_status(:ok)
+        expect(json_response["invoices"].size).to eq(5)
+      end
+
+      it "return zero invoices if page overflows the total number of invoices" do
+        page, invoices_per_page = 10, 5
+        send_request :get, api_v1_invoices_path(page:, invoices_per_page:), headers: auth_headers(book_keeper)
+        expect(response).to have_http_status(:ok)
+        expect(json_response["invoices"].size).to eq(0)
+      end
+    end
+
+    describe "date_range" do
+      invoices_per_page = 10
+      it "returns all invoices issued if nothing is provided" do
+        send_request :get, api_v1_invoices_path(date_range: nil, invoices_per_page:),
+          headers: auth_headers(book_keeper)
+        expect(response).to have_http_status(:ok)
+        expect(json_response["invoices"].size).to eq(10)
+      end
+    end
+
+    describe "client_ids[] param" do
+      it "returns invoices generated for clients specified by client_ids[]" do
+        client = [9, 15, 29]
+        send_request :get, api_v1_invoices_path(client:), headers: auth_headers(book_keeper)
+        expected_invoices = company.invoices.select { |inv| client.include?(inv.client_id) }
+        expect(response).to have_http_status(:ok)
+        expect(
+          json_response["invoices"].pluck("id")
+        ).to match_array(
+          expected_invoices.pluck("id")
+        )
+        expect(
+          json_response["invoices"].map { |invoice| invoice["client"]["logo"] }
+        ).to match_array(
+          expected_invoices.map { |invoice| invoice.client.logo }
+        )
+      end
+    end
+
+    describe "statuses[] param" do
+      it "returns invoices with statuses specified by statuses[]" do
+        statuses = [:draft, :overdue, :paid]
+        send_request :get, api_v1_invoices_path(statuses:), headers: auth_headers(book_keeper)
+        expect(response).to have_http_status(:ok)
+      end
+    end
+
+    describe "draft invoice currency" do
+      it "returns the current client currency for draft invoices" do
+        client = create(:client, company:, currency: "USD")
+        draft_invoice = create(
+          :invoice,
+          company:,
+          client:,
+          status: :draft,
+          currency: "USD"
+        )
+
+        client.update!(currency: "EUR")
+
+        send_request :get,
+          api_v1_invoices_path(status: :draft, client_id: client.id, invoices_per_page: 50),
+          headers: auth_headers(book_keeper)
+
+        expect(response).to have_http_status(:ok)
+
+        response_invoice = json_response["invoices"].find { |invoice| invoice["id"] == draft_invoice.id }
+        expect(response_invoice).to be_present
+        expect(response_invoice["currency"]).to eq("EUR")
+      end
+    end
+
+    describe "client member emails" do
+      it "returns only kept client member emails in both invoice lists" do
+        client = create(:client, company:)
+        invoice = create(:invoice, company:, client:, issue_date: Date.current)
+        kept_member = create(:client_member, client:, company:)
+        discarded_member = create(:client_member, client:, company:)
+        discarded_member.discard!
+
+        send_request :get,
+          api_v1_invoices_path(client_id: client.id, invoices_per_page: 50),
+          headers: auth_headers(book_keeper)
+
+        invoice_payload = json_response["invoices"].find { |item| item["id"] == invoice.id }
+        recently_updated_payload = json_response["recentlyUpdatedInvoices"].find { |item| item["id"] == invoice.id }
+
+        expect(invoice_payload.dig("client", "clientMembersEmails")).to eq([kept_member.user.email])
+        expect(recently_updated_payload.dig("client", "clientMembersEmails")).to eq([kept_member.user.email])
+      end
+    end
+
+    describe "search query" do
+      it "returns invoices when query partially matches client name" do
+        query = company.clients.first.name[0..2]
+        send_request :get, api_v1_invoices_path(query:), headers: auth_headers(book_keeper)
+        expected_invoices = company.invoices.kept.select { |inv|
+          inv.client.name.include?(query) || inv.invoice_number.include?(query)
+        }
+
+        expect(response).to have_http_status(:ok)
+        expect(json_response["invoices"].length) .to be_positive
+        expect(
+          json_response["invoices"].pluck("id")
+        ).to match_array(
+          expected_invoices.pluck("id")
+        )
+      end
+
+      it "returns invoices when query partially matches invoice number" do
+        query = company.invoices.first.invoice_number[0..2]
+        send_request :get, api_v1_invoices_path(query:), headers: auth_headers(book_keeper)
+        expected_invoices = company.invoices.kept.select { |inv|
+          inv.client.name.include?(query) || inv.invoice_number.include?(query)
+        }
+
+        expect(response).to have_http_status(:ok)
+        expect(json_response["invoices"].length).to be_positive
+        expect(
+          json_response["invoices"].pluck("id")
+        ).to match_array(
+          expected_invoices.pluck("id")
+        )
+      end
+    end
+  end
+
+  context "when user is an admin" do
+    before do
+      sign_in admin
+    end
+
+    describe "search for wildcard" do
+      it "returns the only kept invoices" do
+        company.invoices.first.discard!
+
+        invoices_per_page = 10
+        send_request :get, api_v1_invoices_path(invoices_per_page:), headers: auth_headers(admin)
+        expect(response).to have_http_status(:ok)
+        expect(json_response["invoices"].size).to eq(9)
+      end
+    end
+
+    describe "invoices_per_page param" do
+      it "returns the number the invoices specified by invoices_per_page" do
+        invoices_per_page = 10
+        send_request :get, api_v1_invoices_path(invoices_per_page:), headers: auth_headers(admin)
+        expect(response).to have_http_status(:ok)
+        expect(json_response["invoices"].size).to eq(10)
+      end
+
+      it "return total invoices if invoices_per_page is less than or equal to zero" do
+        invoices_per_page = 0
+        send_request :get, api_v1_invoices_path(invoices_per_page:), headers: auth_headers(admin)
+        expect(response).to have_http_status(:ok)
+        expect(json_response["invoices"].size).to eq(company.invoices.kept.count)
+      end
+
+      it "clamps invoices_per_page to a maximum of 100" do
+        invoices_per_page = 500
+        send_request :get, api_v1_invoices_path(invoices_per_page:), headers: auth_headers(admin)
+        expect(response).to have_http_status(:ok)
+        expect(json_response["invoices"].size).to be <= 100
+      end
+    end
+
+    describe "page param" do
+      it "returns invoices offset by page" do
+        page, invoices_per_page = 1, 5
+        send_request :get, api_v1_invoices_path(page:, invoices_per_page:), headers: auth_headers(admin)
+        expect(response).to have_http_status(:ok)
+        expect(json_response["invoices"].size).to eq(5)
+      end
+
+      it "return invoices offset by page one if page is less than or equal to zero" do
+        page, invoices_per_page = -1, 5
+        send_request :get, api_v1_invoices_path(page:, invoices_per_page:), headers: auth_headers(admin)
+        expect(response).to have_http_status(:ok)
+        expect(json_response["invoices"].size).to eq(5)
+      end
+
+      it "return zero invoices if page overflows the total number of invoices" do
+        page, invoices_per_page = 10, 5
+        send_request :get, api_v1_invoices_path(page:, invoices_per_page:), headers: auth_headers(admin)
+        expect(response).to have_http_status(:ok)
+        expect(json_response["invoices"].size).to eq(0)
+      end
+    end
+
+    describe "from_to with date_range" do
+      it "returns invoices with in the custom date range" do
+        from_date_range = Date.parse("2022-01-01")
+        to_date_range = Date.today
+        send_request :get,
+          api_v1_invoices_path(date_range: "custom", from_date_range:, to_date_range:),
+          headers: auth_headers(admin)
+        expected_invoices = company.invoices.during(from_date_range..to_date_range)
+
+        expect(response).to have_http_status(:ok)
+        expect(
+          json_response["invoices"].pluck("id")
+        ).to match_array(
+          expected_invoices.pluck("id")
+        )
+      end
+    end
+
+    describe "client[] param" do
+      it "returns invoices generated for clients specified by client_ids[]" do
+        client = [9, 15, 29]
+        send_request :get, api_v1_invoices_path(client:), headers: auth_headers(admin)
+        expected_invoices = company.invoices.select { |inv| client.include?(inv.client_id) }
+        expect(response).to have_http_status(:ok)
+        expect(
+          json_response["invoices"].pluck("id")
+        ).to match_array(
+          expected_invoices.pluck("id")
+        )
+      end
+    end
+
+    describe "statuses[] param" do
+      it "returns invoices with statuses specified by statuses[]" do
+        statuses = [:draft, :overdue, :paid]
+        send_request :get, api_v1_invoices_path(statuses:), headers: auth_headers(admin)
+        expect(response).to have_http_status(:ok)
+      end
+    end
+
+    describe "summary of invoices" do
+      before do
+        Invoice.overdue.first&.discard!
+        Invoice.sent.first&.discard!
+        Invoice.draft.first&.discard!
+        status_and_amount = Invoice.all.kept.group_by(&:status).transform_values { |invoices|
+          invoices.sum { |invoice|
+            invoice.base_currency_amount.to_f > 0.00 ? invoice.base_currency_amount : invoice.amount
+          }
+        }
+        status_and_amount.default = 0
+        @outstanding_amount = status_and_amount["sent"] + status_and_amount["viewed"] + status_and_amount["overdue"]
+        @draft_amount = status_and_amount["draft"]
+        @overdue_amount = status_and_amount["overdue"]
+      end
+
+      it "returns correct summary" do
+        send_request :get, api_v1_invoices_path(), headers: auth_headers(admin)
+        open_count = company.invoices.kept.where(status: [:sent, :viewed]).count
+        overdue_count = company.invoices.kept.overdue.count
+        draft_count = company.invoices.kept.draft.count
+        expected_data = {
+          overdueAmount: @overdue_amount.to_f,
+          openAmount: (@outstanding_amount - @overdue_amount).to_f,
+          outstandingAmount: @outstanding_amount.to_f,
+          draftAmount: @draft_amount.to_f,
+          draftCount: draft_count,
+          openCount: open_count,
+          outstandingCount: open_count + overdue_count,
+          overdueCount: overdue_count,
+          paidCount: company.invoices.kept.paid.count,
+          totalCount: company.invoices.kept.count,
+          totalAmount: (@outstanding_amount + @draft_amount).to_f,
+          currency: company.base_currency
+        }
+        expect(json_response["summary"]).to eq(JSON.parse(expected_data.to_json))
+        expect(
+          json_response["summary"]["draftCount"] +
+            json_response["summary"]["openCount"] +
+            json_response["summary"]["overdueCount"]
+        ).to eq(draft_count + open_count + overdue_count)
+        expect(json_response.dig("meta", "i18n", "locale")).to be_present
+      end
+    end
+  end
+
+  context "when user is an employee" do
+    before do
+      sign_in employee
+      send_request :get, api_v1_invoices_path, headers: auth_headers(employee)
+    end
+
+    it "is not be permitted to view invoices" do
+      expect(response).to have_http_status(:forbidden)
+    end
+  end
+
+  context "when unauthenticated" do
+    it "is not be permitted to view invoices" do
+      send_request :get, api_v1_invoices_path
+      expect(response).to have_http_status(:unauthorized)
+      expect(json_response["error"]).to eq(I18n.t("devise.failure.unauthenticated"))
+    end
+  end
+end

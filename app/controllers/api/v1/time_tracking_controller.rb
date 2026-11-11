@@ -1,0 +1,44 @@
+# frozen_string_literal: true
+
+# TODO: Refactoring -> can be merge with time entries controller
+class Api::V1::TimeTrackingController < Api::V1::ApplicationController
+  include DateRangeParamParsing
+
+  skip_after_action :verify_authorized
+  before_action :set_user, only: [:index]
+
+  def index
+    authorize :index, policy_class: TimeTrackingPolicy
+    data = TimeTrackingIndexService.new(
+      current_user: current_user,
+      user: @user,
+      company: current_company,
+      from: parsed_date_param(:from) || 1.month.ago.beginning_of_month,
+      to: parsed_date_param(:to) || 1.month.since.end_of_month,
+      year: params[:year] || Date.today.year
+    ).process
+
+    render :index, locals: {
+      clients: data[:clients],
+      employees: data[:employees],
+      entries: data[:entries],
+      holiday_infos: data[:holiday_infos],
+      leave_types: data[:leave_types],
+      projects: data[:projects],
+      company: current_company
+    }, status: 200
+  end
+
+  private
+
+    def set_user
+      company = current_company || raise(ActiveRecord::RecordNotFound, "Company not found")
+      user_id =
+        if current_user.has_role?(:owner, company) || current_user.has_role?(:admin, company)
+          params[:user_id] || current_user.id
+        else
+          current_user.id
+        end
+      @user = company.users.find(user_id)
+    end
+end

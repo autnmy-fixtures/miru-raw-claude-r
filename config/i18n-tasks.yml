@@ -1,0 +1,54 @@
+base_locale: en
+locales:
+  - en
+  - en-GB
+  - en-US
+  - hi
+  - mr
+  - bn
+  - gu
+  - kn
+  - ml
+  - pa
+  - ta
+  - te
+  - ur
+  - es
+  - fr
+  - de
+  - it
+  - nl
+  - id
+  - pt-BR
+  - tr
+  # ar (Arabic) currently kept for content coverage; FE RTL support is separate
+  - ar
+  - ja
+  - ko
+  - zh-CN
+
+data:
+  read:
+    - config/locales/%{locale}.yml
+    - config/locales/*.%{locale}.yml
+  router: conservative_router
+  write:
+    - ['devise.*', 'config/locales/devise.%{locale}.yml']
+    - ['activerecord.*', 'config/locales/activerecord.%{locale}.yml']
+    - ['errors.*', 'config/locales/errors.%{locale}.yml']
+    - 'config/locales/%{locale}.yml'
+
+search:
+  paths:
+    - app/
+    - config/
+    - lib/
+  exclude:
+    - app/assets
+    - app/javascript/src
+    - app/javascript/src/i18n/index.ts
+  prism: rails
+  strict: false
+
+translation:
+  backend: google

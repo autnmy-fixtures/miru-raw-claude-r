@@ -1,0 +1,48 @@
+# frozen_string_literal: true
+
+class Api::V1::Users::PasswordsController < Devise::PasswordsController
+  include SsoEnforcementConcern
+
+  respond_to :json
+
+  def create
+    self.resource = resource_class.send_reset_password_instructions(resource_params)
+    if successfully_sent?(resource)
+      render json: { notice: I18n.t("password.create.success") }, status: 200
+    else
+      respond_with_error(resource)
+    end
+  end
+
+  def update
+    user = User.reset_password_by_token(password_params)
+    if user.errors.empty?
+      unless user.active_for_authentication?
+        return render json: {
+          error: I18n.t("devise.failure.inactive"),
+          errors: [I18n.t("devise.failure.inactive")]
+        }, status: 422
+      end
+
+      if Devise.sign_in_after_reset_password && sso_sign_in_error(user).nil?
+        sign_in(user)
+        Rails.event.notify(Users::SignedIn.new(user, sign_in_method: :password_reset))
+      end
+      safe_user = user.as_json(only: %i[id email first_name last_name current_workspace_id])
+      render json: { notice: I18n.t("password.update.success"), user: safe_user }, status: 200
+    else
+      respond_with_error(user)
+    end
+  end
+
+  private
+
+    def password_params
+      params.require(:user).permit(:reset_password_token, :password, :password_confirmation)
+    end
+
+    def respond_with_error(resource)
+      error_message = resource.errors.full_messages.first || "An error occurred"
+      render json: { error: error_message }, status: 422
+    end
+end

@@ -1,0 +1,126 @@
+# Miru CLI
+
+Miru CLI is the command-line interface for Miru.
+
+It works for:
+
+- humans in a terminal
+- shell scripts
+- AI agents acting as a user
+
+Full documentation lives in [docs/miru-cli.md](/Users/sward/saeloun/miru-web/docs/miru-cli.md).
+
+## Install
+
+```bash
+mise exec go@1.25.12 -- env GOBIN="$HOME/.local/bin" go install github.com/saeloun/miru-web/tools/miru-cli/cmd/miru@b45dee47c3aa58d6312dabfad3b40012b04071fd
+```
+
+For local development:
+
+```bash
+cd tools/miru-cli
+mise exec -- env GOBIN="$HOME/.local/bin" go install ./cmd/miru
+```
+
+## Quick Start
+
+Hosted Miru:
+
+```bash
+miru login --email user@example.com
+```
+
+Local or self-hosted Miru:
+
+```bash
+miru login --base-url http://127.0.0.1:9000 --email user@example.com
+```
+
+Find a project id, then create time:
+
+```bash
+miru project list --search solar
+miru time create --project-id 2 --duration 30 --date 2026-03-09 --note "CLI entry"
+```
+
+Example prompt for daily Jira-to-Miru drafting:
+
+```text
+Pull all work I did in Jira today, summarize it hour by hour when the issue history supports that, or collapse it into one full-day summary when it does not. Find the best matching Miru project with `miru project list`, then draft the exact `miru time create` commands I should run. Do not submit anything until I approve the draft.
+```
+
+## Commands
+
+```bash
+miru help
+miru version
+miru login --email <email>
+miru login --base-url <url> --email <email>
+miru logout
+miru whoami
+miru config show
+miru config token [--format <raw|shell>]
+miru config set-base-url --url <url>
+miru capabilities
+miru client list [--query <term>]
+miru project list [--search <term>]
+miru expense list [--query <term>]
+miru expense create --amount <amount> --date <YYYY-MM-DD> --category <name> [--vendor <name>] [--description <text>] [--type <business|personal>]
+miru invoice list [--query <term>] [--page <page>] [--per <count>] [--status <status>]
+miru invoice create --client-id <id> --invoice-number <number> --issue-date <YYYY-MM-DD> --due-date <YYYY-MM-DD> --line-item <name|description|YYYY-MM-DD|rate|minutes>
+miru invoice show --id <id>
+miru invoice send --id <id> --recipients <email1,email2> [--subject <text>] [--message <text>]
+miru payment list [--query <term>]
+miru payment show --id <id>
+miru import --file <path> --format harvest [--type time] [--dry-run] [--map "First Last=email"]... [--assign-unmatched-to <email>]
+miru import status --id <id>
+miru time list --from <YYYY-MM-DD> --to <YYYY-MM-DD>
+miru time create --project-id <id> --duration <minutes> --date <YYYY-MM-DD> [--note <text>] [--bill-status <status>]
+miru time update --id <id> --project-id <id> --duration <minutes> --date <YYYY-MM-DD> [--note <text>] [--bill-status <status>]
+miru time delete --id <id>
+```
+
+## Harvest Import
+
+In Harvest, open **Reports > Detailed Time**, set the range to **All Time**, and choose **Export > CSV**. Preview the import before writing anything:
+
+```bash
+miru import --file harvest-detailed-time.csv --format harvest --dry-run
+```
+
+Map Harvest names that do not exactly match Miru team members by repeating `--map`:
+
+```bash
+miru import --file harvest-detailed-time.csv --format harvest --dry-run \
+  --map "Paul Connors=paul@example.com" \
+  --map "Jane Doe=jane@example.com"
+```
+
+The dry run runs in the background and the CLI waits for it to finish. When the preview is clean, run the same command without `--dry-run`. Use `miru import status --id <id>` to inspect an existing import.
+
+## Session Behavior
+
+- credentials live in `~/.config/miru/config.json`
+- the CLI uses a dedicated server-issued CLI token
+- sessions last 7 days
+- each successful request refreshes the session for another 7 days
+
+Token helpers:
+
+```bash
+miru config token
+miru config token --format shell
+```
+
+## Current Scope
+
+Version `0.3.0` supports:
+
+- client listing
+- expense list/create
+- project listing
+- time list/create/update/delete
+- invoice list/create/show/send
+- payment list/show
+- Harvest time import/status

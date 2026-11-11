@@ -1,0 +1,111 @@
+# Changelog
+
+## Unreleased
+
+### Added
+
+- UPI payment settings with free Miru-branded QR generation for INR invoices, including public invoice and PDF invoice display
+- Razorpay webhook handling for cancelled and expired Payment Links, plus `payout.updated` status refreshes
+- Razorpay onboarding docs with exact Payment Links and RazorpayX webhook setup steps
+- Miru CLI `invoice create` and matching MCP `miru.invoice.create` support for draft invoice creation from terminal or agent workflows
+- Miru CLI installs and upgrades now resolve the latest tagged CLI release instead of the moving `main` branch
+- Falcon server support and a parallel system-spec runner with schema-aware database prep skipping
+- CRUD-focused system coverage for invoice editing and time-tracking flows
+
+### Changed
+
+- Invoice creation and editing now guard against duplicate draft line items, preserve zero-value amounts, and clamp totals to zero when the last line item is removed
+- Invoice line-item rows now prefer employee first/last names over description-backed fallback text so selected employee names render correctly on new invoices (rendering-only change, no DB impact)
+- Invoice line-item rate lookups now resolve project-member hourly rates per project consistently, preventing missing rates when generating invoices across multiple projects or after member-removal workflows
+- Time-tracking entry creation no longer shows a duplicate saved entry before refresh when the visible list rehydrates
+- Draft invoice line-item inputs now stay visually aligned with the standard invoice row layout while typing a new manual entry
+- Client creation forms now mark all required fields consistently and show a live "Missing required fields" summary when the submit button is disabled
+- Time-tracking entry flows now rehydrate saved state reliably on the same page and use more stable system-spec selectors
+- System-spec support code was consolidated by removing dead helper modules and stabilizing auth/request-capture teardown
+- Weekly reminder processing now better distinguishes legacy hour-based timesheet data from minute-based entries to avoid false reminder emails for users who met weekly hour targets
+- Mailer layout branding now uses asset helper URLs with production `action_mailer.asset_host` to keep email logo assets resolvable in production mail clients
+- Razorpay Payment Settings now copies the production webhook URLs with the required event names for faster dashboard setup
+
+## 3.0.7 - 2026-10-01
+
+### Added
+
+- Confirmed allowlisted accounts can access full business event details, analytics, and request/import groups at `/events`; database and growth administration remain superadmin-only
+
+### Changed
+
+- Upgrade Rails Event Viewer to 0.2.1 so synchronous capture failures reach Rails error reporting while the existing savepoint preserves business writes
+- Upgrade Axios from 1.18.0 to 1.20.0
+
+## 3.0.6 - 2026-10-01
+
+### Added
+
+- Super-admin business event history at `/events`, grouped by request or Harvest import with source attribution
+
+### Fixed
+
+- Event rows now follow business transaction and savepoint rollbacks, while storage failures remain isolated from business operations
+- Viewer group pages now load correctly on PostgreSQL; Rack dependency security patches include matching Vite plugins
+
+## 3.0.5 - 2026-09-17
+
+### Added
+
+- PayPal invoice payments: connect a PayPal REST app in Payment Settings, accept payments on public and client invoices, and reconcile captures through verified webhooks
+
+### Fixed
+
+- PayPal capture now serializes concurrent checkout returns, rejects stale balances before charging, and safely records already-completed captures for reconciliation
+- PayPal connection setup now preserves working credentials through transient API failures and requires a verified webhook before checkout
+- Payment settings now enforce CSRF protection, validate PayPal ownership with an immutable reference, and keep payment QR codes readable in dark mode
+
+## 3.0.4 - 2026-09-09
+
+### Fixed
+
+- Malformed multipart uploads no longer crash the request; the reports PDF throttle stops parsing request bodies and `EncodingSanitizer` answers 400 for every `Rack::Multipart` error
+- Unverified form posts now fail with 422 instead of a `NoMethodError`, because `ApplicationController` explicitly enables exception-based CSRF protection
+- Unknown `bill_status` or `review_status` values from the API return 422 instead of raising
+- Database backups retry transient R2 errors with backoff and close their upload file handles
+
+## 3.0.3 - 2026-09-07
+
+### Fixed
+
+- Harvest imports now keep long client and project names distinct when their 30-character prefixes collide
+
+## 3.0.2 - 2026-09-07
+
+### Fixed
+
+- Time-tracking now shows permitted edit and delete actions for PTO and holiday entries, with server-enforced weekly cutoffs for employees
+
+## 3.0.0 - 2026-03-29
+
+Release owner: `Vipul A M`
+
+### Added
+
+- Render-first production deployment flow, with the `production` branch as the deploy branch for `app.miru.so`
+- Render Blueprint support via [`render.yaml`](render.yaml) for one-click infrastructure setup
+- Responsive mailer layout and local Rails mailer previews for core outbound emails
+- Gravatar and uploaded-avatar fallbacks across the app shell and team surfaces
+
+### Changed
+
+- Dashboard defaults now emphasize year-to-date revenue trends
+- Recently updated invoices now sort by `updated_at` descending instead of surfacing stale entries first
+- Team listing loads the full production dataset instead of stopping at the first 10 rows
+- Payments listing now supports infinite scrolling on larger datasets
+- Release docs and repository metadata now reflect the Miru 3.0 release line and Render deployment path
+
+### Removed
+
+- Fly.io deployment configs, review-app scripts, and Fly-specific build hooks from the repository
+
+### Verified
+
+- Focused Rails and frontend test batches
+- Vite production build
+- Browser verification on the live app at `https://app.miru.so`

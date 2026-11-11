@@ -1,0 +1,29 @@
+<% content_for :email_preheader, t("mailers.devise.confirmation.preheader") %>
+<% content_for :email_eyebrow, t("mailers.devise.confirmation.eyebrow") %>
+<% content_for :email_title, t("mailers.devise.confirmation.title") %>
+<% content_for :email_subtitle do %>
+  <%= t("mailers.devise.confirmation.subtitle") %>
+<% end %>
+
+<p><%= t("mailers.devise.confirmation.greeting_html", name: "#{@resource.first_name.titleize} #{@resource.last_name.titleize}") %></p>
+
+<p><%= t("mailers.devise.confirmation.body_intro") %></p>
+
+<div class="email-panel email-panel-soft">
+  <ul class="email-list">
+    <li><%= t("mailers.devise.confirmation.feature_1") %></li>
+    <li><%= t("mailers.devise.confirmation.feature_2") %></li>
+    <li><%= t("mailers.devise.confirmation.feature_3") %></li>
+    <li><%= t("mailers.devise.confirmation.feature_4") %></li>
+  </ul>
+</div>
+
+<p><%= t("mailers.devise.confirmation.cta_body") %></p>
+
+<%= render "shared/mailer/button", href: confirmation_url(@resource, confirmation_token: @token), label: t("mailers.devise.confirmation.cta") %>
+
+<div class="email-divider"></div>
+
+<p class="email-muted"><%= t("mailers.devise.confirmation.footer_note") %></p>
+
+<p><%= t("mailers.devise.shared.signature_html") %></p>

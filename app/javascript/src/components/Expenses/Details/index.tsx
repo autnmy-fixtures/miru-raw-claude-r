@@ -1,0 +1,140 @@
+import React, { Fragment, useEffect, useState } from "react";
+
+import { expensesApi } from "apis/api";
+import Loader from "common/Loader/index";
+import { useUserContext } from "context/UserContext";
+import Logger from "js-logger";
+import { useNavigate, useParams } from "react-router-dom";
+
+import Expense from "./Expense";
+import Header from "./Header";
+
+import DeleteExpenseModal from "../Modals/DeleteExpenseModal";
+import EditExpenseModal from "../Modals/EditExpenseModal";
+import EditExpense from "../Modals/Mobile/EditExpense";
+import { setCategoryData } from "../utils";
+
+const ExpenseDetails = () => {
+  const [showDeleteExpenseModal, setShowDeleteExpenseModal] =
+    useState<boolean>(false);
+
+  const [showEditExpenseModal, setShowEditExpenseModal] =
+    useState<boolean>(false);
+  const [expense, setExpense] = useState<any>();
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [expenseData, setExpenseData] = useState<any>();
+
+  const params = useParams();
+  const navigate = useNavigate();
+  const { company, isDesktop } = useUserContext();
+
+  const headers = {
+    "Content-Type": "multipart/form-data",
+  };
+
+  const fetchExpense = async () => {
+    try {
+      const [resData, res] = await Promise.all([
+        expensesApi.show(params.expenseId),
+        expensesApi.index(),
+      ]);
+      const data = setCategoryData(res.data.categories);
+      res.data.categories = data;
+      setExpenseData(res.data);
+      setExpense(resData.data);
+      setIsLoading(false);
+    } catch (e) {
+      Logger.error(e);
+      navigate("/expenses");
+    }
+  };
+
+  const getExpenseData = async () => {
+    try {
+      const res = await expensesApi.index();
+      const data = setCategoryData(res.data.categories);
+      res.data.categories = data;
+      setExpenseData(res.data);
+    } catch (e) {
+      Logger.error(e);
+      setShowEditExpenseModal(false);
+    }
+  };
+
+  const handleEditExpense = async payload => {
+    const res = await expensesApi.update(expense.id, payload, { headers });
+    setShowEditExpenseModal(false);
+    setIsLoading(true);
+    if (res.status === 200) {
+      fetchExpense();
+    }
+  };
+
+  const handleDelete = () => {
+    setShowDeleteExpenseModal(true);
+  };
+
+  const handleEdit = () => {
+    setShowEditExpenseModal(true);
+  };
+
+  useEffect(() => {
+    fetchExpense();
+    getExpenseData();
+  }, []);
+
+  if (isLoading) {
+    return (
+      <div className="flex h-80v w-full flex-col justify-center">
+        <Loader />
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-full">
+      {!isDesktop && showEditExpenseModal ? null : (
+        <Fragment>
+          <Header
+            expense={expense}
+            handleDelete={handleDelete}
+            handleEdit={handleEdit}
+          />
+          <Expense
+            currency={
+              expense.currency || company.base_currency || company.baseCurrency
+            }
+            expense={expense}
+          />
+        </Fragment>
+      )}
+      {showEditExpenseModal &&
+        (isDesktop ? (
+          <EditExpenseModal
+            expense={expense}
+            expenseData={expenseData}
+            handleEditExpense={handleEditExpense}
+            setShowEditExpenseModal={setShowEditExpenseModal}
+            showEditExpenseModal={showEditExpenseModal}
+          />
+        ) : (
+          <EditExpense
+            expense={expense}
+            expenseData={expenseData}
+            handleEditExpense={handleEditExpense}
+            setShowEditExpenseModal={setShowEditExpenseModal}
+          />
+        ))}
+      {showDeleteExpenseModal && (
+        <DeleteExpenseModal
+          expense={expense}
+          fetchExpenses={fetchExpense}
+          setShowDeleteExpenseModal={setShowDeleteExpenseModal}
+          showDeleteExpenseModal={showDeleteExpenseModal}
+        />
+      )}
+    </div>
+  );
+};
+
+export default ExpenseDetails;

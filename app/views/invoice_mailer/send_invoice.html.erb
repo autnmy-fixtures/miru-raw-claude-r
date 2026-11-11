@@ -1,0 +1,34 @@
+<% content_for :email_preheader, t("mailers.invoice_mailer.send_invoice.preheader", invoice_number: @invoice.invoice_number, company_name: @invoice.company.name) %>
+<% content_for :email_eyebrow, t("mailers.invoice_mailer.send_invoice.eyebrow") %>
+<% content_for :email_title, t("mailers.invoice_mailer.send_invoice.title") %>
+<% content_for :email_subtitle do %>
+  <%= t("mailers.invoice_mailer.send_invoice.subtitle_html", company_name: @invoice.company.name, invoice_number: @invoice.invoice_number).html_safe %>
+<% end %>
+
+<%
+  rows = [{ label: t("mailers.labels.attachment"), value: t("mailers.invoice_mailer.send_invoice.attachment_value") }]
+  rows << { label: t("mailers.labels.reference"), value: @invoice.reference } if @invoice.reference.present?
+%>
+
+<% if @message.present? %>
+  <div class="email-panel email-panel-soft">
+    <p class="email-panel-title"><%= t("mailers.invoice_mailer.send_invoice.note_title", company_name: @invoice.company.name) %></p>
+    <%= simple_format(@message, {}, wrapper_tag: "div") %>
+  </div>
+<% end %>
+
+<%= render "shared/mailer/invoice_snapshot",
+  invoice: @invoice,
+  amount: @amount,
+  amount_label: t("mailers.labels.total_amount") %>
+
+<%= render "shared/mailer/fact_rows", rows: rows %>
+
+<div class="email-panel email-panel-accent">
+  <p class="email-panel-title"><%= t("mailers.invoice_mailer.send_invoice.next_steps_title") %></p>
+  <p style="margin: 0;"><%= t("mailers.invoice_mailer.send_invoice.next_steps_body") %></p>
+</div>
+
+<%= render "shared/mailer/button", href: @invoice_url, label: t("mailers.actions.open_invoice") %>
+
+<p class="email-muted" style="margin-top: 18px;"><%= t("mailers.invoice_mailer.send_invoice.support_html", support_email: t("mailers.layout.footer_contact")).html_safe %></p>

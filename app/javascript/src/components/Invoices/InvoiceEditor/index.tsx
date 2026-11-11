@@ -1,0 +1,1125 @@
+import React, { useState, useMemo, useEffect, useRef } from "react";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+} from "../../ui/card";
+import { Button } from "../../ui/button";
+import { Input } from "../../ui/input";
+import { Label } from "../../ui/label";
+import { Textarea } from "../../ui/textarea";
+import { Checkbox } from "../../ui/checkbox";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../../ui/select";
+import { Popover, PopoverContent, PopoverTrigger } from "../../ui/popover";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "../../ui/dialog";
+
+import { cn } from "../../../lib/utils";
+import { format } from "date-fns";
+import { Calendar } from "../../ui/calendar";
+import {
+  CalendarBlank as CalendarIcon,
+  FloppyDisk,
+  PaperPlaneTilt,
+  Eye,
+  PencilSimple,
+} from "phosphor-react";
+import InvoiceTable from "../common/InvoiceTable";
+import InvoicePreview from "../InvoicePreview";
+import { fetchNewLineItems } from "../common/utils";
+import { currencyFormat, lineTotalCalc } from "../../../helpers";
+import { i18n } from "../../../i18n";
+import { InvoiceTax, TaxConfiguration } from "../../../services/invoiceApi";
+
+interface InvoiceEditorProps {
+  invoice?: any;
+  clients: any[];
+  company?: any;
+  taxConfigurations?: TaxConfiguration[];
+  initialClientId?: string;
+  onSave?: (invoice: any) => void;
+  onSend?: (invoice: any) => void;
+  onPreview?: (invoice: any) => void;
+  onCancel: () => void;
+  isLoading?: boolean;
+}
+
+const InvoiceEditor: React.FC<InvoiceEditorProps> = ({
+  invoice,
+  clients,
+  company = {
+    name: "Miru Time Tracking",
+    email: "support@getmiru.com",
+    baseCurrency: "USD",
+    dateFormat: "MM/dd/yyyy",
+    address: "",
+    phone: "",
+    taxId: "",
+    vatNumber: "",
+    gstNumber: "",
+    ein: "",
+    usTaxpayerId: "",
+    bankName: "",
+    bankAccountNumber: "",
+    bankRoutingNumber: "",
+    bankSwiftCode: "",
+  },
+  taxConfigurations = [],
+  initialClientId = "",
+  onSave,
+  onSend,
+  onPreview,
+  onCancel,
+  isLoading = false,
+}) => {
+  const getFirstInvoiceNumber = (clientId?: string) => {
+    const numericClientId = String(clientId || "")
+      .replace(/\D/g, "")
+      .slice(-3)
+      .padStart(3, "0");
+
+    return `INV-${numericClientId}-001`;
+  };
+
+  const getNextInvoiceNumber = (
+    previousInvoiceNumber?: string,
+    clientId?: string
+  ) => {
+    if (!previousInvoiceNumber || previousInvoiceNumber === "0") {
+      return getFirstInvoiceNumber(clientId);
+    }
+
+    const lastDigitIndex = previousInvoiceNumber.search(/\d+$/);
+    if (lastDigitIndex === -1) return previousInvoiceNumber;
+
+    const prefix = previousInvoiceNumber.slice(0, lastDigitIndex);
+    const trailingDigits = previousInvoiceNumber.slice(lastDigitIndex);
+    const incrementedDigits = (parseInt(trailingDigits, 10) + 1).toString();
+    const paddedDigits = incrementedDigits.padStart(trailingDigits.length, "0");
+
+    return `${prefix}${paddedDigits}`;
+  };
+
+  const [isPreviewMode, setIsPreviewMode] = useState(false);
+  const [submitIntent, setSubmitIntent] = useState<"save" | "send" | null>(
+    null
+  );
+
+  const [showZeroRateConfirmation, setShowZeroRateConfirmation] =
+    useState(false);
+
+  const sendRequestedRef = useRef(false);
+
+  const parseDate = (date: any): Date | undefined => {
+    if (!date) return undefined;
+
+    if (date instanceof Date && !isNaN(date.getTime())) return date;
+    const parsed = new Date(date);
+
+    return isNaN(parsed.getTime()) ? undefined : parsed;
+  };
+
+  const [formData, setFormData] = useState({
+    id: invoice?.id,
+    invoiceNumber: invoice?.invoiceNumber || "",
+    status: invoice?.status || "draft",
+    clientId:
+      invoice?.clientId !== undefined && invoice?.clientId !== null
+        ? String(invoice.clientId)
+        : initialClientId || "",
+    issueDate: parseDate(invoice?.issueDate) || new Date(),
+    dueDate:
+      parseDate(invoice?.dueDate) ||
+      new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    reference: invoice?.reference || "",
+    notes: invoice?.notes || "",
+    discount: invoice?.discount || 0,
+    tax: invoice?.tax || 0,
+    invoiceTaxes: invoice?.invoiceTaxes || [],
+    currency:
+      invoice?.currency ||
+      clients.find(
+        c => String(c.id) === String(invoice?.clientId || initialClientId)
+      )?.currency ||
+      company?.baseCurrency ||
+      company?.base_currency ||
+      "USD",
+  });
+
+  const [lineItems, setLineItems] = useState([]);
+  const [selectedLineItems, setSelectedLineItems] = useState(
+    invoice?.invoiceLineItems || invoice?.lineItems || []
+  );
+  const [manualEntryArr, setManualEntryArr] = useState([]);
+  const [pendingManualEntry, setPendingManualEntry] = useState(null);
+
+  const [hasChanges, setHasChanges] = useState(false);
+  const initialStateRef = useRef<string | null>(null);
+  const invoiceNumberTouchedRef = useRef(Boolean(invoice?.invoiceNumber));
+  const lastAutoGeneratedInvoiceNumberRef = useRef(
+    invoice?.invoiceNumber || ""
+  );
+  const lastClientIdRef = useRef(formData.clientId);
+
+  const selectedClient = useMemo(() => {
+    const client = clients.find(
+      c => String(c.id) === String(formData.clientId)
+    );
+    if (!client) {
+      return {
+        name: "Select a client",
+        email: "",
+        address: "",
+        phone: "",
+        taxId: "",
+      };
+    }
+
+    const formattedClient = { ...client };
+    if (
+      formattedClient.address &&
+      typeof formattedClient.address === "object"
+    ) {
+      const addr = formattedClient.address;
+      formattedClient.address = [
+        addr.address_line_1,
+        addr.address_line_2,
+        addr.city,
+        addr.state,
+        addr.country,
+        addr.pin,
+      ]
+        .filter(Boolean)
+        .join(", ");
+    }
+
+    return formattedClient;
+  }, [formData.clientId, clients]);
+
+  useEffect(() => {
+    if (invoice?.id || !selectedClient?.id) return;
+
+    const nextInvoiceNumber = getNextInvoiceNumber(
+      selectedClient.previousInvoiceNumber,
+      selectedClient.id
+    );
+
+    const clientChanged = lastClientIdRef.current !== formData.clientId;
+
+    if (clientChanged) {
+      // Reset the touched flag when client changes
+      invoiceNumberTouchedRef.current = false;
+      lastClientIdRef.current = formData.clientId;
+    }
+
+    // Auto-generate invoice number unless the user manually edited or cleared it
+    // for the current client.
+    if (
+      clientChanged ||
+      (!invoiceNumberTouchedRef.current &&
+        (!formData.invoiceNumber ||
+          formData.invoiceNumber === lastAutoGeneratedInvoiceNumberRef.current))
+    ) {
+      setFormData(currentFormData => ({
+        ...currentFormData,
+        invoiceNumber: nextInvoiceNumber,
+      }));
+      lastAutoGeneratedInvoiceNumberRef.current = nextInvoiceNumber;
+    }
+  }, [
+    invoice?.id,
+    selectedClient?.id,
+    selectedClient?.previousInvoiceNumber,
+    formData.invoiceNumber,
+    formData.clientId,
+  ]);
+
+  useEffect(() => {
+    if (!selectedClient?.id) return;
+
+    if (invoice?.id && formData.status !== "draft") return;
+
+    const nextCurrency =
+      selectedClient.currency ||
+      selectedClient.clientCurrency ||
+      company?.baseCurrency ||
+      company?.base_currency ||
+      "USD";
+
+    setFormData(currentFormData =>
+      currentFormData.currency === nextCurrency
+        ? currentFormData
+        : {
+            ...currentFormData,
+            currency: nextCurrency,
+          }
+    );
+  }, [
+    invoice?.id,
+    formData.status,
+    selectedClient?.id,
+    selectedClient?.currency,
+    selectedClient?.clientCurrency,
+    company?.baseCurrency,
+    company?.base_currency,
+  ]);
+
+  const committedLineItems = useMemo(
+    () => [...selectedLineItems, ...manualEntryArr].filter(Boolean),
+    [selectedLineItems, manualEntryArr]
+  );
+
+  const hasPendingManualEntry = useMemo(
+    () =>
+      Boolean(
+        pendingManualEntry &&
+          (pendingManualEntry.name ||
+            pendingManualEntry.description ||
+            Number(pendingManualEntry.quantity) > 0 ||
+            Number(pendingManualEntry.rate) > 0)
+      ),
+    [pendingManualEntry]
+  );
+
+  const submissionLineItems = useMemo(() => {
+    if (!hasPendingManualEntry) return committedLineItems;
+
+    const pendingDraftAlreadyCommitted =
+      pendingManualEntry?.id &&
+      committedLineItems.some(item => item?.id === pendingManualEntry.id);
+
+    return pendingDraftAlreadyCommitted
+      ? committedLineItems
+      : [...committedLineItems, pendingManualEntry];
+  }, [committedLineItems, hasPendingManualEntry, pendingManualEntry]);
+
+  const activeLineItems = useMemo(
+    () => submissionLineItems.filter(item => !item._destroy),
+    [submissionLineItems]
+  );
+
+  const hasInvalidLineItems = useMemo(
+    () =>
+      activeLineItems.some(item => {
+        const rate = item?.rate;
+
+        return (
+          Number(item?.quantity || 0) <= 0 ||
+          rate === "" ||
+          rate === null ||
+          rate === undefined ||
+          !Number.isFinite(Number(rate)) ||
+          Number(rate) < 0
+        );
+      }),
+    [activeLineItems]
+  );
+
+  const hasZeroRateLineItems = useMemo(
+    () =>
+      activeLineItems.some(
+        item =>
+          item?.rate !== "" &&
+          item?.rate !== null &&
+          item?.rate !== undefined &&
+          Number(item.rate) === 0
+      ),
+    [activeLineItems]
+  );
+
+  const canSubmitInvoice =
+    Boolean(formData.clientId) &&
+    activeLineItems.length > 0 &&
+    !hasInvalidLineItems;
+
+  const isSentInvoice = ["sent", "viewed", "overdue", "paid"].includes(
+    formData.status
+  );
+
+  useEffect(() => {
+    const snapshot = JSON.stringify({
+      ...formData,
+      issueDate: formData.issueDate.toISOString(),
+      dueDate: formData.dueDate.toISOString(),
+      lineItems: submissionLineItems,
+    });
+
+    if (initialStateRef.current === null) {
+      initialStateRef.current = snapshot;
+      setHasChanges(hasPendingManualEntry);
+
+      return;
+    }
+
+    setHasChanges(
+      hasPendingManualEntry || snapshot !== initialStateRef.current
+    );
+  }, [formData, submissionLineItems, hasPendingManualEntry]);
+
+  useEffect(() => {
+    if (selectedClient && selectedClient.id) {
+      fetchNewLineItems(selectedClient, setLineItems, selectedLineItems);
+    }
+  }, [selectedClient?.id]);
+
+  useEffect(() => {
+    if (!isLoading) {
+      setSubmitIntent(null);
+      sendRequestedRef.current = false;
+    }
+  }, [isLoading]);
+
+  const committedSubtotal = useMemo(
+    () =>
+      committedLineItems
+        .filter(item => !item._destroy)
+        .reduce(
+          (sum, item) =>
+            sum +
+            Number(
+              item.lineTotal ??
+                item.amount ??
+                lineTotalCalc(item.quantity, item.rate)
+            ),
+          0
+        ),
+    [committedLineItems]
+  );
+
+  const pendingManualSubtotal = useMemo(() => {
+    if (!hasPendingManualEntry) return 0;
+
+    return Number(
+      pendingManualEntry.lineTotal ??
+        pendingManualEntry.amount ??
+        lineTotalCalc(pendingManualEntry.quantity, pendingManualEntry.rate)
+    );
+  }, [hasPendingManualEntry, pendingManualEntry]);
+
+  const subtotal = useMemo(
+    () => committedSubtotal + pendingManualSubtotal,
+    [committedSubtotal, pendingManualSubtotal]
+  );
+
+  const calculateTaxAmount = (
+    calculationMethod: "percentage" | "flat",
+    value: number
+  ) => {
+    if (calculationMethod === "percentage") {
+      return Number(((subtotal * Number(value || 0)) / 100).toFixed(2));
+    }
+
+    return Number(Number(value || 0).toFixed(2));
+  };
+
+  const activeInvoiceTaxes = useMemo<InvoiceTax[]>(
+    () =>
+      (formData.invoiceTaxes || [])
+        .filter(tax => !tax._destroy)
+        .map(tax => {
+          const calculationMethod =
+            tax.calculationMethod || tax.calculation_method || "percentage";
+          const frozenAmount = Number(tax.amount || 0);
+
+          return {
+            ...tax,
+            calculationMethod,
+            amount: isSentInvoice
+              ? frozenAmount
+              : calculateTaxAmount(calculationMethod, Number(tax.value || 0)),
+          };
+        }),
+    [formData.invoiceTaxes, isSentInvoice, subtotal]
+  );
+
+  const submissionInvoiceTaxes = useMemo<InvoiceTax[]>(
+    () =>
+      (formData.invoiceTaxes || []).map(tax => {
+        const calculationMethod =
+          tax.calculationMethod || tax.calculation_method || "percentage";
+        const frozenAmount = Number(tax.amount || 0);
+
+        return {
+          ...tax,
+          calculationMethod,
+          amount:
+            isSentInvoice || tax._destroy
+              ? frozenAmount
+              : calculateTaxAmount(calculationMethod, Number(tax.value || 0)),
+        };
+      }),
+    [formData.invoiceTaxes, isSentInvoice, subtotal]
+  );
+
+  const taxTotal = useMemo(
+    () =>
+      activeInvoiceTaxes.length > 0
+        ? activeInvoiceTaxes.reduce((sum, tax) => sum + Number(tax.amount), 0)
+        : Number(formData.tax || 0),
+    [activeInvoiceTaxes, formData.tax]
+  );
+
+  const sendInvoice = () => {
+    if (!onSend || sendRequestedRef.current) return;
+
+    sendRequestedRef.current = true;
+    setShowZeroRateConfirmation(false);
+    setSubmitIntent("send");
+    onSend({
+      ...formData,
+      status: "sent",
+      tax: taxTotal,
+      invoiceTaxes: submissionInvoiceTaxes,
+      invoiceLineItems: submissionLineItems,
+    });
+  };
+
+  const total = useMemo(
+    () => subtotal - formData.discount + taxTotal,
+    [subtotal, formData.discount, taxTotal]
+  );
+
+  const taxConfigurationSelected = (taxConfiguration: TaxConfiguration) =>
+    activeInvoiceTaxes.some(
+      tax => String(tax.taxConfigurationId) === String(taxConfiguration.id)
+    );
+
+  const toggleTaxConfiguration = (
+    taxConfiguration: TaxConfiguration,
+    checked: boolean
+  ) => {
+    if (checked) {
+      if (taxConfigurationSelected(taxConfiguration)) return;
+
+      const amount = calculateTaxAmount(
+        taxConfiguration.calculationMethod,
+        taxConfiguration.value
+      );
+
+      setFormData(current => {
+        const existingActiveTaxes = (current.invoiceTaxes || []).filter(
+          tax => !tax._destroy
+        );
+
+        return {
+          ...current,
+          invoiceTaxes: [
+            ...(current.invoiceTaxes || []),
+            {
+              id: `draft-${taxConfiguration.id}`,
+              taxConfigurationId: taxConfiguration.id,
+              name: taxConfiguration.name,
+              calculationMethod: taxConfiguration.calculationMethod,
+              value: taxConfiguration.value,
+              amount,
+            },
+          ],
+          tax:
+            amount +
+            existingActiveTaxes.reduce(
+              (sum, tax) => sum + Number(tax.amount || 0),
+              0
+            ),
+        };
+      });
+
+      return;
+    }
+
+    setFormData(current => {
+      const invoiceTaxes = (current.invoiceTaxes || []).map(tax =>
+        String(tax.taxConfigurationId) === String(taxConfiguration.id)
+          ? { ...tax, _destroy: true }
+          : tax
+      );
+      const activeTaxes = invoiceTaxes.filter(tax => !tax._destroy);
+
+      return {
+        ...current,
+        invoiceTaxes,
+        tax: activeTaxes.length > 0 ? current.tax : 0,
+      };
+    });
+  };
+
+  const formatAddress = (address: any) => {
+    if (!address) return "";
+
+    if (typeof address === "string") return address;
+
+    if (typeof address === "object") {
+      return [
+        address.address_line_1 || address.addressLine1,
+        address.address_line_2 || address.addressLine2,
+        address.city,
+        address.state,
+        address.country,
+        address.pin || address.postalCode || address.zipCode,
+      ]
+        .filter(Boolean)
+        .join(", ");
+    }
+
+    return "";
+  };
+
+  const previewInvoice = {
+    ...formData,
+    amount: total,
+    subtotal,
+    tax: taxTotal,
+    invoiceTaxes: activeInvoiceTaxes,
+    currency: formData.currency,
+    client: selectedClient,
+    lineItems: activeLineItems,
+    company: company
+      ? {
+          name: company.name || "Company Name",
+          email: company.email || "",
+          phone:
+            company.phone ||
+            company.businessPhone ||
+            company.business_phone ||
+            "",
+          taxId: company.taxId || company.tax_id || "",
+          vatNumber: company.vatNumber || company.vat_number || "",
+          gstNumber: company.gstNumber || company.gst_number || "",
+          ein: company.ein || "",
+          usTaxpayerId: company.usTaxpayerId || company.us_taxpayer_id || "",
+          bankName: company.bankName || company.bank_name || "",
+          bankAccountNumber:
+            company.bankAccountNumber || company.bank_account_number || "",
+          bankRoutingNumber:
+            company.bankRoutingNumber || company.bank_routing_number || "",
+          bankSwiftCode: company.bankSwiftCode || company.bank_swift_code || "",
+          baseCurrency: company.baseCurrency || company.base_currency || "USD",
+          address: formatAddress(company.address),
+          logo: company.logo || "",
+        }
+      : {
+          name: "Company Name",
+          email: "",
+          phone: "",
+          taxId: "",
+          vatNumber: "",
+          gstNumber: "",
+          ein: "",
+          usTaxpayerId: "",
+          bankName: "",
+          bankAccountNumber: "",
+          bankRoutingNumber: "",
+          bankSwiftCode: "",
+          baseCurrency: "USD",
+          address: "",
+          logo: "",
+        },
+  };
+
+  return (
+    <div className="min-h-screen min-w-0 bg-background/60">
+      {/* Header */}
+      <div className="sticky top-0 z-30 border-b bg-background/95 backdrop-blur">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+            <div>
+              <h1 className="text-2xl font-semibold text-foreground">
+                {invoice
+                  ? i18n.t("invoices.editInvoicePage")
+                  : i18n.t("invoices.newInvoicePage")}
+              </h1>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {i18n.t("invoices.editorSubtitle")}
+              </p>
+            </div>
+            <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:flex-wrap sm:gap-3">
+              <div
+                aria-label="Invoice editor view mode"
+                className="flex rounded-md border border-input bg-background p-0.5 min-[1800px]:hidden"
+                role="group"
+              >
+                <Button
+                  aria-label={i18n.t("edit")}
+                  aria-pressed={!isPreviewMode}
+                  className={cn(
+                    "h-8 gap-1.5 px-3",
+                    !isPreviewMode && "bg-accent text-accent-foreground"
+                  )}
+                  size="sm"
+                  type="button"
+                  variant="ghost"
+                  onClick={() => setIsPreviewMode(false)}
+                >
+                  <PencilSimple className="h-4 w-4" />
+                  <span className="hidden sm:inline">{i18n.t("edit")}</span>
+                </Button>
+                <Button
+                  aria-label={i18n.t("preview")}
+                  aria-pressed={isPreviewMode}
+                  className={cn(
+                    "h-8 gap-1.5 px-3",
+                    isPreviewMode && "bg-accent text-accent-foreground"
+                  )}
+                  size="sm"
+                  type="button"
+                  variant="ghost"
+                  onClick={() => setIsPreviewMode(true)}
+                >
+                  <Eye className="h-4 w-4" />
+                  <span className="hidden sm:inline">{i18n.t("preview")}</span>
+                </Button>
+              </div>
+              <Button variant="outline" size="sm" onClick={onCancel}>
+                {i18n.t("cancel")}
+              </Button>
+              <Button
+                onClick={() => {
+                  setSubmitIntent("save");
+                  onSave &&
+                    onSave({
+                      ...formData,
+                      tax: taxTotal,
+                      invoiceTaxes: submissionInvoiceTaxes,
+                      invoiceLineItems: submissionLineItems,
+                    });
+                }}
+                variant="outline"
+                size="sm"
+                disabled={isLoading || !hasChanges || !canSubmitInvoice}
+              >
+                <FloppyDisk className="mr-1.5 h-4 w-4" />
+                <span className="hidden sm:inline">
+                  {submitIntent === "save" && isLoading
+                    ? i18n.t("invoices.saving")
+                    : i18n.t("save")}
+                </span>
+                <span className="sm:hidden">
+                  {submitIntent === "save" && isLoading
+                    ? i18n.t("invoices.saving")
+                    : i18n.t("save")}
+                </span>
+              </Button>
+              <Button
+                onClick={() => {
+                  if (hasZeroRateLineItems) {
+                    setShowZeroRateConfirmation(true);
+                  } else {
+                    sendInvoice();
+                  }
+                }}
+                size="sm"
+                disabled={isLoading || !canSubmitInvoice || isSentInvoice}
+              >
+                <PaperPlaneTilt className="mr-1.5 h-4 w-4" />
+                <span className="hidden sm:inline">
+                  {submitIntent === "send" && isLoading
+                    ? i18n.t("invoices.sending")
+                    : isSentInvoice
+                    ? i18n.t("invoices.alreadySent")
+                    : i18n.t("invoices.sendInvoice")}
+                </span>
+                <span className="sm:hidden">
+                  {submitIntent === "send" && isLoading
+                    ? i18n.t("invoices.sending")
+                    : isSentInvoice
+                    ? i18n.t("invoices.sent")
+                    : i18n.t("invoices.send")}
+                </span>
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Content */}
+      <div className="mx-auto max-w-[110rem]">
+        <div className="grid grid-cols-1 gap-8 p-4 sm:p-6 min-[1800px]:grid-cols-2">
+          {/* Form Section */}
+          <div
+            className={cn(
+              "min-w-0 space-y-6",
+              isPreviewMode && "hidden min-[1800px]:block"
+            )}
+          >
+            {/* Basic Details */}
+            <Card>
+              <CardHeader>
+                <CardTitle>{i18n.t("invoices.basicDetails")}</CardTitle>
+                <CardDescription>
+                  {i18n.t("invoices.basicDetailsDescription")}
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <Label htmlFor="invoiceNumber">
+                      {i18n.t("invoices.invoiceNumber")}
+                    </Label>
+                    <Input
+                      id="invoiceNumber"
+                      value={formData.invoiceNumber}
+                      onChange={e => {
+                        invoiceNumberTouchedRef.current = true;
+                        setFormData({
+                          ...formData,
+                          invoiceNumber: e.target.value,
+                        });
+                      }}
+                    />
+                  </div>
+                  <div>
+                    <Label htmlFor="reference">
+                      {i18n.t("invoices.referenceOptional")}
+                    </Label>
+                    <Input
+                      id="reference"
+                      value={formData.reference}
+                      onChange={e =>
+                        setFormData({ ...formData, reference: e.target.value })
+                      }
+                      placeholder={i18n.t("invoices.referencePlaceholder")}
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <Label htmlFor="client">{i18n.t("client")}</Label>
+                  <Select
+                    value={formData.clientId}
+                    onValueChange={value =>
+                      setFormData({ ...formData, clientId: value })
+                    }
+                  >
+                    <SelectTrigger data-testid="invoice-client-select">
+                      <SelectValue
+                        placeholder={i18n.t("timeTracking.selectClient")}
+                      />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {clients.map(client => (
+                        <SelectItem key={client.id} value={String(client.id)}>
+                          {client.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <Label>{i18n.t("invoices.issueDate")}</Label>
+                    <Popover>
+                      <PopoverTrigger asChild>
+                        <Button
+                          variant="outline"
+                          className={cn(
+                            "w-full justify-start text-left font-normal",
+                            !formData.issueDate && "text-muted-foreground"
+                          )}
+                        >
+                          <CalendarIcon className="mr-2 h-4 w-4" />
+                          {formData.issueDate ? (
+                            format(formData.issueDate, "PPP")
+                          ) : (
+                            <span>{i18n.t("pickADate")}</span>
+                          )}
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent className="w-auto p-0">
+                        <Calendar
+                          mode="single"
+                          selected={formData.issueDate}
+                          defaultMonth={formData.issueDate}
+                          onSelect={date => {
+                            if (!date) return;
+                            setFormData(current => ({
+                              ...current,
+                              issueDate: date,
+                            }));
+                          }}
+                          initialFocus
+                        />
+                      </PopoverContent>
+                    </Popover>
+                  </div>
+
+                  <div>
+                    <Label>{i18n.t("invoices.dueDate")}</Label>
+                    <Popover>
+                      <PopoverTrigger asChild>
+                        <Button
+                          variant="outline"
+                          className={cn(
+                            "w-full justify-start text-left font-normal",
+                            !formData.dueDate && "text-muted-foreground"
+                          )}
+                        >
+                          <CalendarIcon className="mr-2 h-4 w-4" />
+                          {formData.dueDate ? (
+                            format(formData.dueDate, "PPP")
+                          ) : (
+                            <span>{i18n.t("pickADate")}</span>
+                          )}
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent className="w-auto p-0">
+                        <Calendar
+                          mode="single"
+                          selected={formData.dueDate}
+                          defaultMonth={formData.dueDate}
+                          onSelect={date => {
+                            if (!date) return;
+                            setFormData(current => ({
+                              ...current,
+                              dueDate: date,
+                            }));
+                          }}
+                          initialFocus
+                        />
+                      </PopoverContent>
+                    </Popover>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Line Items */}
+            <Card className="min-w-0 overflow-hidden">
+              <CardHeader>
+                <CardTitle>{i18n.t("invoices.lineItems")}</CardTitle>
+                <CardDescription>
+                  {i18n.t("invoices.lineItemsDescription")}
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="p-0">
+                <div className="px-4 py-4 sm:px-6">
+                  <InvoiceTable
+                    clientCurrency={formData.currency}
+                    dateFormat={company?.dateFormat || "MM/dd/yyyy"}
+                    selectedClient={selectedClient}
+                    lineItems={lineItems}
+                    setLineItems={setLineItems}
+                    selectedLineItems={selectedLineItems}
+                    setSelectedLineItems={setSelectedLineItems}
+                    manualEntryArr={manualEntryArr}
+                    setManualEntryArr={setManualEntryArr}
+                    onDraftChange={setPendingManualEntry}
+                  />
+                </div>
+                <div className="border-t border-border px-4 py-4 sm:px-6">
+                  <dl className="ml-auto w-full space-y-2 sm:max-w-sm">
+                    <div className="flex items-center justify-between gap-4">
+                      <dt className="text-sm text-muted-foreground">
+                        {i18n.t("invoices.subtotal")}
+                      </dt>
+                      <dd className="font-medium tabular-nums">
+                        {currencyFormat(formData.currency, subtotal)}
+                      </dd>
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <dt className="text-sm text-muted-foreground">
+                        {i18n.t("invoices.discount")}
+                      </dt>
+                      <dd className="font-medium tabular-nums">
+                        {currencyFormat(formData.currency, formData.discount)}
+                      </dd>
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <dt className="text-sm text-muted-foreground">
+                        {i18n.t("invoices.tax")}
+                      </dt>
+                      <dd className="font-medium tabular-nums">
+                        {currencyFormat(formData.currency, taxTotal)}
+                      </dd>
+                    </div>
+                    <div className="flex items-center justify-between gap-4 border-t border-border pt-2">
+                      <dt className="font-semibold">{i18n.t("total")}</dt>
+                      <dd className="font-semibold tabular-nums">
+                        {currencyFormat(formData.currency, total)}
+                      </dd>
+                    </div>
+                  </dl>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Additional Details */}
+            <Card>
+              <CardHeader>
+                <CardTitle>{i18n.t("invoices.additionalDetails")}</CardTitle>
+                <CardDescription>
+                  {i18n.t("invoices.additionalDetailsDescription")}
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <Label htmlFor="discount">
+                      {i18n.t("invoices.discount")}
+                    </Label>
+                    <Input
+                      id="discount"
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      value={formData.discount}
+                      onChange={e =>
+                        setFormData({
+                          ...formData,
+                          discount: Math.max(0, Number(e.target.value || 0)),
+                        })
+                      }
+                    />
+                  </div>
+                  <div>
+                    <Label htmlFor="tax">{i18n.t("invoices.tax")}</Label>
+                    <Input
+                      id="tax"
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      disabled={activeInvoiceTaxes.length > 0}
+                      value={
+                        activeInvoiceTaxes.length > 0 ? taxTotal : formData.tax
+                      }
+                      onChange={e =>
+                        setFormData({
+                          ...formData,
+                          tax: Math.max(0, Number(e.target.value || 0)),
+                        })
+                      }
+                    />
+                  </div>
+                </div>
+
+                {taxConfigurations.length > 0 && (
+                  <div className="space-y-3">
+                    <Label>{i18n.t("invoices.taxConfigurations")}</Label>
+                    <div className="space-y-2 rounded-md border border-border p-3">
+                      {taxConfigurations.map(taxConfiguration => {
+                        const checked =
+                          taxConfigurationSelected(taxConfiguration);
+
+                        const amount = checked
+                          ? activeInvoiceTaxes.find(
+                              tax =>
+                                String(tax.taxConfigurationId) ===
+                                String(taxConfiguration.id)
+                            )?.amount || 0
+                          : calculateTaxAmount(
+                              taxConfiguration.calculationMethod,
+                              taxConfiguration.value
+                            );
+
+                        return (
+                          <label
+                            key={taxConfiguration.id}
+                            className="flex items-center justify-between gap-3 text-sm"
+                          >
+                            <span className="flex min-w-0 items-center gap-2">
+                              <Checkbox
+                                checked={checked}
+                                disabled={isSentInvoice}
+                                onCheckedChange={value =>
+                                  toggleTaxConfiguration(
+                                    taxConfiguration,
+                                    value === true
+                                  )
+                                }
+                              />
+                              <span className="truncate">
+                                {taxConfiguration.name}
+                                {taxConfiguration.calculationMethod ===
+                                "percentage"
+                                  ? ` (${taxConfiguration.value}%)`
+                                  : ""}
+                              </span>
+                            </span>
+                            <span className="shrink-0 tabular-nums">
+                              {formData.currency} {amount.toFixed(2)}
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                <div>
+                  <Label htmlFor="notes">{i18n.t("notes")}</Label>
+                  <Textarea
+                    id="notes"
+                    value={formData.notes}
+                    onChange={e =>
+                      setFormData({ ...formData, notes: e.target.value })
+                    }
+                    placeholder={i18n.t("invoices.notesPlaceholder")}
+                    rows={4}
+                  />
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Preview Section */}
+          <div
+            className={cn(
+              "min-w-0 min-[1800px]:sticky min-[1800px]:top-24 min-[1800px]:h-fit",
+              !isPreviewMode && "hidden min-[1800px]:block"
+            )}
+          >
+            <InvoicePreview invoice={previewInvoice} isEditing={true} />
+          </div>
+        </div>
+      </div>
+
+      <Dialog
+        open={showZeroRateConfirmation}
+        onOpenChange={setShowZeroRateConfirmation}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {i18n.t("invoices.zeroRateConfirmationTitle")}
+            </DialogTitle>
+            <DialogDescription>
+              {i18n.t("invoices.zeroRateConfirmationDescription")}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setShowZeroRateConfirmation(false)}
+            >
+              {i18n.t("invoices.zeroRateConfirmationCancel")}
+            </Button>
+            <Button
+              data-testid="confirm-zero-rate-send"
+              disabled={isLoading}
+              type="button"
+              onClick={sendInvoice}
+            >
+              {i18n.t("invoices.zeroRateConfirmationSend")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+};
+
+export default InvoiceEditor;

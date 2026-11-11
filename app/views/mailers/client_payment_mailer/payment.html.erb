@@ -1,0 +1,30 @@
+<% content_for :email_preheader, t("mailers.client_payment_mailer.payment.preheader", invoice_number: @invoice.invoice_number) %>
+<% content_for :email_eyebrow, t("mailers.client_payment_mailer.payment.eyebrow") %>
+<% content_for :email_title, t("mailers.client_payment_mailer.payment.title") %>
+<% content_for :email_subtitle do %>
+  <%= t("mailers.client_payment_mailer.payment.subtitle_html", invoice_number: @invoice.invoice_number).html_safe %>
+<% end %>
+
+<div class="email-highlight">
+  <p class="email-highlight-label"><%= t("mailers.labels.amount_paid") %></p>
+  <p class="email-highlight-value"><%= @amount %></p>
+</div>
+
+<div class="email-panel email-panel-success">
+  <p class="email-panel-title"><%= t("mailers.client_payment_mailer.payment.receipt_title") %></p>
+  <p style="margin: 0;"><%= sanitize(@message) %></p>
+</div>
+
+<%= render "shared/mailer/fact_rows", rows: [
+  { label: t("mailers.labels.invoice"), value: @invoice.invoice_number },
+  { label: t("mailers.labels.paid_on"), value: l(@invoice.updated_at.to_date, format: :long) },
+  { label: t("mailers.labels.payment_method"), value: @invoice.payments.order(created_at: :desc).first&.transaction_type&.humanize&.upcase || "STRIPE" },
+  { label: t("mailers.labels.issued_to"), value: @invoice.client.name }
+] %>
+
+<%= render "shared/mailer/button", href: @invoice_url, label: t("mailers.actions.open_invoice") %>
+
+<div class="email-panel email-panel-soft">
+  <p class="email-panel-title"><%= t("mailers.client_payment_mailer.payment.records_title") %></p>
+  <p style="margin: 0;"><%= t("mailers.client_payment_mailer.payment.records_body") %></p>
+</div>

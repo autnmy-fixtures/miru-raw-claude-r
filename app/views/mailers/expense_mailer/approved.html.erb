@@ -1,0 +1,20 @@
+<% content_for :email_preheader, t("mailers.expense_mailer.approved.preheader") %>
+<% content_for :email_eyebrow, t("mailers.expense_mailer.approved.eyebrow") %>
+<% content_for :email_title, t("mailers.expense_mailer.approved.title") %>
+<% content_for :email_subtitle do %>
+  <%= t("mailers.expense_mailer.approved.subtitle") %>
+<% end %>
+
+<div class="email-highlight">
+  <p class="email-highlight-label"><%= t("mailers.labels.amount") %></p>
+  <p class="email-highlight-value"><%= FormatAmountService.new(@expense.display_currency, @expense.amount).process %></p>
+  <p class="email-highlight-caption"><%= @expense.display_category_name.presence || "-" %></p>
+</div>
+
+<%= render "shared/mailer/fact_rows", rows: [
+  { label: t("mailers.labels.date"), value: @expense.formatted_date },
+  { label: t("mailers.labels.category"), value: @expense.display_category_name.presence || "-" },
+  { label: t("mailers.labels.description"), value: @expense.description.presence || "-" }
+] %>
+
+<%= render "shared/mailer/button", href: @expense_url, label: t("mailers.actions.open_expense") %>

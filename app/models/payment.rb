@@ -1,0 +1,121 @@
+# frozen_string_literal: true
+
+class Payment < ApplicationRecord
+  # Audit all payment and currency conversion details
+  audited associated_with: :company,
+    only: [:amount, :base_currency_amount, :exchange_rate, :exchange_rate_date, :payment_currency, :transaction_date, :status]
+
+  scope :for_kept_invoices, -> { joins(:invoice).merge(Invoice.kept).distinct }
+
+  enum :status, [
+    :paid,
+    :partially_paid,
+    :failed,
+    :cancelled
+  ]
+
+  enum :transaction_type, [
+    :visa,
+    :mastercard,
+    :bank_transfer,
+    :ach,
+    :amex,
+    :cash,
+    :cheque,
+    :credit_card,
+    :debit_card,
+    :paypal,
+    :stripe,
+    :upi,
+    :razorpay
+  ]
+
+  belongs_to :invoice
+  has_many :razorpay_payouts, dependent: :destroy
+
+  delegate :company, to: :invoice
+
+  before_validation :set_status, if: :new_record?
+  before_validation :calculate_base_currency_amount
+  after_create { Rails.event.notify(Payments::Recorded.new(self)) }
+
+  validates :invoice, :transaction_date, :transaction_type, :amount, :status, presence: true
+  validates :amount, numericality: { greater_than: 0 }
+
+  def settles?(invoice)
+    return false if invoice.blank? || amount.blank?
+    return false unless (payment_currency.presence || invoice.currency).casecmp?(invoice.currency)
+
+    invoice.amount_due <= amount
+  end
+
+  def same_currency?
+    payment_currency == company&.base_currency
+  end
+
+  private
+
+    def set_status
+      return if status.present? || invoice.blank? || amount.blank?
+
+      if settles?(invoice)
+        self.status = :paid
+      else
+        self.status = :partially_paid
+      end
+    end
+
+    def calculate_base_currency_amount
+      return if invoice.blank? || amount.blank?
+      return unless new_record? || amount_changed? || payment_currency_changed? || transaction_date_changed?
+
+      self.payment_currency ||= invoice&.currency
+
+      # If same currency, base_currency_amount equals amount
+      if same_currency?
+        self.base_currency_amount = amount
+        self.exchange_rate = 1.0
+        return
+      end
+
+      payment_date = transaction_date || Date.current
+      rate = CurrencyConversionService.get_exchange_rate(
+        payment_currency,
+        company&.base_currency,
+        payment_date
+      )
+
+      if rate
+        self.exchange_rate = rate
+        self.exchange_rate_date = payment_date
+        self.base_currency_amount = (amount * rate).round(2)
+      else
+        # If we can't get a rate, use invoice's exchange rate as fallback
+        if invoice&.exchange_rate.present?
+          self.exchange_rate = invoice.exchange_rate
+          self.exchange_rate_date = payment_date
+          self.base_currency_amount = (amount * invoice.exchange_rate).round(2)
+        else
+          # Last resort: assume 1:1 conversion
+          self.exchange_rate = 1.0
+          self.exchange_rate_date = payment_date
+          self.base_currency_amount = amount
+          report_missing_exchange_rate(payment_date)
+        end
+      end
+    end
+
+    def report_missing_exchange_rate(payment_date)
+      Sentry.capture_message(
+        "Payment recorded with 1:1 fallback exchange rate",
+        level: :warning,
+        extra: {
+          invoice_id: invoice&.id,
+          payment_currency:,
+          base_currency: company&.base_currency,
+          amount:,
+          payment_date:
+        }
+      )
+    end
+end

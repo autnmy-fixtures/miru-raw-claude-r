@@ -1,0 +1,201 @@
+import React, { useState, useEffect } from "react";
+import { cn } from "@/lib/utils";
+import { Palette, X, CaretRight, Desktop, Sparkles } from "phosphor-react";
+import { i18n } from "../../../i18n";
+
+interface ThemeToggleProps {
+  currentTheme: "classic" | "admin";
+  onThemeChange: (theme: "classic" | "admin") => void;
+}
+
+const ThemeToggle: React.FC<ThemeToggleProps> = ({
+  currentTheme,
+  onThemeChange,
+}) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [isMinimized, setIsMinimized] = useState(false);
+
+  // Auto-hide after selection
+  useEffect(() => {
+    if (isOpen) {
+      const timer = setTimeout(() => {
+        setIsMinimized(true);
+      }, 10000); // Auto-minimize after 10 seconds
+
+      return () => clearTimeout(timer);
+    }
+  }, [isOpen]);
+
+  const themes = [
+    {
+      id: "classic",
+      name: i18n.t("themeSelector.classic"),
+      description: i18n.t("themeSelector.classicDescription"),
+      icon: Desktop,
+      preview: "bg-gradient-to-br from-blue-50 to-indigo-100",
+    },
+    {
+      id: "admin",
+      name: i18n.t("themeSelector.admin"),
+      description: i18n.t("themeSelector.adminDescription"),
+      icon: Sparkles,
+      preview: "bg-gradient-to-br from-purple-50 to-pink-100",
+    },
+  ];
+
+  if (isMinimized) {
+    return (
+      <div className="fixed bottom-6 right-6 z-50">
+        <button
+          onClick={() => {
+            setIsMinimized(false);
+            setIsOpen(true);
+          }}
+          className="group bg-card border border-border rounded-full p-3 shadow-lg hover:shadow-xl transition-all duration-200 hover:scale-110"
+          aria-label={i18n.t("themeSelector.open")}
+        >
+          <Palette className="h-5 w-5 text-muted-foreground group-hover:text-[hsl(var(--primary))]" />
+        </button>
+      </div>
+    );
+  }
+
+  if (!isOpen) {
+    return (
+      <div className="fixed bottom-6 right-6 z-50">
+        <button
+          onClick={() => setIsOpen(true)}
+          className="group flex items-center gap-2 bg-card border border-border rounded-full px-4 py-2.5 shadow-lg hover:shadow-xl transition-all duration-200"
+        >
+          <Palette className="h-5 w-5 text-muted-foreground group-hover:text-[hsl(var(--primary))]" />
+          <span className="text-sm font-medium text-muted-foreground">
+            {i18n.t("theme")}
+          </span>
+          <CaretRight className="h-4 w-4 text-muted-foreground group-hover:translate-x-0.5 transition-transform" />
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {/* Backdrop */}
+      <div
+        className="fixed inset-0 bg-black/20 z-40 animate-in fade-in duration-200"
+        onClick={() => setIsOpen(false)}
+      />
+
+      {/* Theme Selector Panel */}
+      <div className="fixed bottom-6 right-6 z-50 animate-in slide-in-from-bottom-4 duration-300">
+        <div className="bg-card rounded-2xl shadow-2xl border border-border p-6 w-80 max-w-[calc(100vw-3rem)]">
+          {/* Header */}
+          <div className="flex items-center justify-between mb-5">
+            <div>
+              <h3 className="text-lg font-semibold text-foreground">
+                {i18n.t("themeSelector.choose")}
+              </h3>
+              <p className="text-sm text-muted-foreground mt-1">
+                {i18n.t("themeSelector.description")}
+              </p>
+            </div>
+            <button
+              onClick={() => setIsOpen(false)}
+              className="p-1.5 hover:bg-muted rounded-lg transition-colors"
+              aria-label={i18n.t("themeSelector.close")}
+            >
+              <X className="h-4 w-4 text-muted-foreground" />
+            </button>
+          </div>
+
+          {/* Theme Options */}
+          <div className="space-y-3">
+            {themes.map(theme => {
+              const Icon = theme.icon;
+              const isActive = currentTheme === theme.id;
+
+              return (
+                <button
+                  key={theme.id}
+                  onClick={() => {
+                    onThemeChange(theme.id as "classic" | "admin");
+                    setTimeout(() => {
+                      setIsOpen(false);
+                      setIsMinimized(true);
+                    }, 300);
+                  }}
+                  className={cn(
+                    "w-full flex items-start gap-3 p-3 rounded-xl border-2 transition-all duration-200",
+                    isActive
+                      ? "border-[hsl(var(--primary))] bg-purple-50/50"
+                      : "border-border hover:border-border hover:bg-muted/50"
+                  )}
+                >
+                  {/* Preview */}
+                  <div
+                    className={cn(
+                      "w-12 h-12 rounded-lg flex items-center justify-center",
+                      theme.preview
+                    )}
+                  >
+                    <Icon
+                      className={cn(
+                        "h-6 w-6",
+                        isActive
+                          ? "text-[hsl(var(--primary))]"
+                          : "text-muted-foreground"
+                      )}
+                    />
+                  </div>
+
+                  {/* Details */}
+                  <div className="flex-1 text-left">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={cn(
+                          "font-medium",
+                          isActive
+                            ? "text-[hsl(var(--primary))]"
+                            : "text-foreground"
+                        )}
+                      >
+                        {theme.name}
+                      </span>
+                      {isActive && (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-[hsl(var(--primary))] text-white">
+                          {i18n.t("active")}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-sm text-muted-foreground mt-0.5">
+                      {theme.description}
+                    </p>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Footer */}
+          <div className="mt-5 pt-4 border-t border-border">
+            <div className="flex items-center justify-between">
+              <button
+                onClick={() => setIsMinimized(true)}
+                className="text-sm text-muted-foreground hover:text-muted-foreground transition-colors"
+              >
+                {i18n.t("themeSelector.minimize")}
+              </button>
+              <div className="flex items-center gap-2">
+                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+                <span className="text-xs text-muted-foreground">
+                  {i18n.t("themeSelector.previewActive")}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+};
+
+export default ThemeToggle;

@@ -1,0 +1,247 @@
+name: CI Test Suite
+on:
+  push:
+    branches: [develop, main, stable-3-0, production]
+  pull_request:
+    branches: [develop, main, production]
+    types: [labeled, opened, synchronize, reopened]
+  workflow_dispatch:
+
+# Cancel in-progress runs on same branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Running tests
+    runs-on: ubuntu-latest  # Standard 2-core runner
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, 'skip ci')
+    env:
+      RAILS_ENV: test
+      DB_HOST: localhost
+      DB_USER: root
+      DB_PASS: password
+      CI: true
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: miru_web_test
+          POSTGRES_USER: root
+          POSTGRES_PASSWORD: password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U root -d miru_web_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: '4.0.1'
+          bundler-cache: true
+          bundler: latest
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
+        with:
+          run_install: false
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_OUTPUT
+
+      - name: Setup pnpm cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+            node_modules/.cache
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+
+      - name: Restore parallel runtime log cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: tmp/parallel_runtime_rspec.log
+          key: ${{ runner.os }}-parallel-rspec-runtime-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-parallel-rspec-runtime-${{ github.ref_name }}-
+            ${{ runner.os }}-parallel-rspec-runtime-
+
+      - name: Install pnpm packages
+        run: |
+          PUPPETEER_SKIP_DOWNLOAD=true pnpm install --frozen-lockfile
+
+      - name: Build Vite assets (sanity)
+        env:
+          SECRET_KEY_BASE: dummy
+        run: |
+          timeout 180 bin/vite build
+
+      - name: Run Rubocop
+        run: bundle exec rubocop
+
+      - name: Run ESLint
+        run: pnpm lint
+
+      - name: Setup test database
+        run: |
+          bundle exec rake "parallel:create[2]" "parallel:load_schema[2]"
+
+      - name: Run CLI request specs
+        run: |
+          bundle exec rspec spec/requests/api/v1/cli
+
+      - name: Run parallel tests (excluding system specs)
+        env:
+          PARALLEL_TEST_PROCESSORS: 2  # Optimal for standard runners
+          PARALLEL_RUNTIME_LOG: tmp/parallel_runtime_rspec.log
+          PARALLEL_FAILURES_LOG: tmp/failing_specs.txt
+        run: |
+          mkdir -p tmp
+          bin/parallel_test -n 2 --exclude-system
+
+          # Save failed specs list for debugging
+          if [ -f tmp/failing_specs.txt ]; then
+            echo "Failed specs:"
+            cat tmp/failing_specs.txt
+          fi
+
+      - name: Save parallel runtime log cache
+        if: ${{ always() && hashFiles('tmp/parallel_runtime_rspec.log') != '' }}
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: tmp/parallel_runtime_rspec.log
+          key: ${{ runner.os }}-parallel-rspec-runtime-${{ github.ref_name }}-${{ github.sha }}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: test-results
+          path: |
+            tmp/rspec_*.xml
+            tmp/rspec*.xml
+            tmp/capybara/*.png
+            tmp/failing_specs.txt
+            tmp/parallel_runtime_rspec.log
+            log/test.log
+          if-no-files-found: warn
+
+  responsive-system-specs:
+    name: Responsive system specs
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, 'skip ci')
+    env:
+      RAILS_ENV: test
+      DB_HOST: localhost
+      DB_USER: root
+      DB_PASS: password
+      CI: true
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: miru_web_test
+          POSTGRES_USER: root
+          POSTGRES_PASSWORD: password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U root -d miru_web_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: '4.0.1'
+          bundler-cache: true
+          bundler: latest
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
+        with:
+          run_install: false
+
+      - name: Install web packages
+        run: PUPPETEER_SKIP_DOWNLOAD=true pnpm install --frozen-lockfile
+
+      - name: Install mobile packages
+        run: pnpm --dir apps/mobile install --frozen-lockfile
+
+      - name: Typecheck mobile app
+        run: pnpm mobile:typecheck
+
+      - name: Build Vite assets
+        env:
+          SECRET_KEY_BASE: dummy
+        run: timeout 180 bin/vite build
+
+      - name: Install Chrome for Cuprite
+        uses: browser-actions/setup-chrome@b94431e051d1c52dcbe9a7092a4f10f827795416 # v2
+        id: setup-chrome
+
+      - name: Setup test database
+        run: bundle exec rails db:test:prepare
+
+      - name: Run responsive system specs
+        env:
+          FERRUM_BROWSER_PATH: ${{ steps.setup-chrome.outputs.chrome-path }}
+        run: bundle exec rspec spec/system/responsive
+
+  security-audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: '4.0.1'
+          bundler-cache: true
+          bundler: latest
+
+      - name: Run bundler-audit
+        run: |
+          gem install bundler-audit --no-document
+          bundler-audit check --update
+
+      - name: Run brakeman
+        run: |
+          bundle exec brakeman -q -w2

@@ -1,0 +1,89 @@
+import { useState, useEffect } from "react";
+
+import { getSessionRequestHeaders } from "utils/authHeaders";
+
+interface User {
+  id: number;
+  first_name: string;
+  last_name: string;
+  email: string;
+  date_of_birth?: string | null;
+  phone?: string | null;
+  personal_email_id?: string | null;
+  social_accounts?: {
+    github_url?: string | null;
+    linkedin_url?: string | null;
+  } | null;
+  date_format?: string | null;
+  avatar_url?: string;
+  password_changed_at?: string | null;
+  confirmed?: boolean;
+  calendar_enabled?: boolean;
+  calendar_connected?: boolean;
+  current_workspace_id?: number;
+}
+
+interface UseCurrentUserReturn {
+  currentUser: User | null;
+  loading: boolean;
+  error: string | null;
+  refetch: () => Promise<void>;
+}
+
+export const useCurrentUser = (): UseCurrentUserReturn => {
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchCurrentUser = async (): Promise<User | null> => {
+    try {
+      setLoading(true);
+      setError(null);
+
+      const response = await fetch("/api/v1/users/_me", {
+        method: "GET",
+        headers: getSessionRequestHeaders(),
+        credentials: "include",
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setCurrentUser(data.user);
+
+        return data.user;
+      } else if (response.status === 401) {
+        // User not authenticated
+        setCurrentUser(null);
+
+        return null;
+      }
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    } catch (err) {
+      const errorMessage =
+        err instanceof Error ? err.message : "Failed to fetch user data";
+      setError(errorMessage);
+      setCurrentUser(null);
+
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const refetch = async (): Promise<void> => {
+    await fetchCurrentUser();
+  };
+
+  useEffect(() => {
+    fetchCurrentUser();
+  }, []);
+
+  return {
+    currentUser,
+    loading,
+    error,
+    refetch,
+  };
+};
+
+export default useCurrentUser;

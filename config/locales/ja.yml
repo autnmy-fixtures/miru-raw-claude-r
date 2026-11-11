@@ -1,0 +1,716 @@
+---
+ja:
+  analytics:
+    activity:
+      amount_collected: 徴収金額
+      bank_transfers_month: 銀行振込件数（月間）
+      created: 作成済み
+      downloaded: ダウンロード済み
+      invoice_activity_today: 本日の請求書関連活動
+      payment_activity: 支払い活動
+      payments_today: 本日のお支払い
+      sent: 送信済み
+      stripe_payments_month: Stripe決済件数（月間）
+      viewed: 閲覧済み
+    currency:
+      conversion_impact: コンバージョンへの影響
+      currencies_in_use: 使用されている通貨
+      invoices_with_conversion: 変換機能付き請求書
+      recent_exchange_rates: 最近の為替レート
+      table:
+        date: 日付
+        from: から
+        rate: レート
+        source: ソース
+        to: に
+      title: 通貨換算に関する考察
+    overview:
+      active_clients: アクティブなクライアント
+      outstanding: 並外れた
+      overdue: 期限切れ
+      total_revenue: 総収益
+    recent_activity:
+      ago: "%{time}年前"
+      invoice_reference: 請求書
+      system: システム
+      title: 最近の活動
+    super_admin: スーパー管理者
+    tabs:
+      activity: 活動
+      clients: クライアント
+      currency_exchange: 通貨と為替
+      overview: 概要
+      revenue: 収益
+      users: ユーザー
+    title: 分析ダッシュボード
+    welcome: ようこそ、%{name}
+  app:
+    name: ミルエージェンシーOS
+    tagline: 組織の業務を1つの司令センターから運営する。
+  application_controller:
+    not_found: ルートが見つかりません
+  avatar:
+    destroy:
+      success: アバターは正常に削除されました
+    update:
+      success: アバターの更新に成功しました
+    validation:
+      file_too_large: must be smaller than %{size_mb}MB
+      invalid_content_type: must be a PNG, JPG, JPEG, or WEBP image
+  client:
+    add: クライアントを追加
+    address:
+      label: 住所
+      placeholder: 住所を入力してください
+    create:
+      failure: クライアントの作成に失敗しました
+      success: クライアントが正常に追加されました
+    delete:
+      success:
+        message: クライアントは正常に削除されました
+    email:
+      label: メール
+      placeholder: メールアドレスを入力してください
+    name:
+      label: 名前
+      placeholder: 名前を入力してください
+    phone:
+      label: 電話番号
+      placeholder: 電話番号を入力してください
+    update:
+      failure:
+        message: 変更の保存に失敗しました
+        unauthorized: ユーザーはこのクライアントの詳細を変更する権限がありません
+      success:
+        message: 変更は正常に保存されました
+  clients:
+    add_client_contact:
+      success: 招待状が正常に送信されました。
+    send_payment_reminder:
+      success: 支払い催促状が送信されました
+  companies:
+    create:
+      failure: 会社設立に失敗した
+      success: 会社設立に成功
+    purge_logo:
+      destroy:
+        success: 会社ロゴは正常に削除されました
+    update:
+      success: 変更は正常に保存されました
+  company:
+    address: 住所
+    base_currency: 基本通貨
+    business_phone: ビジネス用電話
+    cancel: キャンセル
+    company: 会社
+    country: 国
+    date_format: 日付形式
+    fiscal_year: 会計年度
+    logo: ロゴ
+    save: 保存
+    save_org: 組織の詳細を保存する
+    setup: セットアップ組織
+    standard_price: 標準価格
+    timezone: タイムゾーン
+  confirmation:
+    send_instructions: "%{email}宛に確認メールが送信されました。"
+  currency_pairs:
+    from_to_required: 開始と終了は必須です
+    rate_not_found: 評価が見つかりません
+  custom_leaves:
+    update:
+      success: カスタムリーフの更新に成功しました
+  employment:
+    update:
+      success: 雇用情報が正常に更新されました
+  expenses:
+    approve: 経費の承認は正常に完了しました。
+    create: 経費の提出は正常に完了しました。
+    destroy: 経費は正常に削除されました
+    mark_paid: 支払い済みとしてマークされた費用
+    must_be_approved: 経費は、支払い済みとしてマークする前に承認を受ける必要があります。
+    reject: 経費申請は正常に却下されました
+    update: 経費の更新に成功しました
+  holidays:
+    update:
+      success: 祝日情報が正常に更新されました
+  invitation:
+    create:
+      success:
+        message: 招待状が正常に送信されました
+    delete:
+      success:
+        message: 招待状は正常に削除されました
+    resent:
+      success:
+        message: 招待状の再送信に成功しました
+    update:
+      success:
+        message: 変更は正常に保存されました
+  invitations:
+    accept:
+      index:
+        success: 招待を受け入れました
+      show:
+        success: 招待を受け入れました
+      success: 招待を受け入れました
+    create:
+      failure: 変更の保存に失敗しました
+      success: 招待状が送付されます
+    destroy:
+      failure: 招待状の削除に失敗しました
+      success: 招待状が削除されました
+    update:
+      failure: 変更の保存に失敗しました
+      success: 招待状が更新されました
+  invoices:
+    payments:
+      success:
+        failure: 問題が発生しました。サポートにお問い合わせください。
+        success: 支払いが完了しました
+  invoices_controller:
+    download:
+      pdf_failed: PDFの生成に失敗しました
+    send_invoice:
+      already_paid: 請求書は既に支払われています
+      pdf_failed: PDFの生成に失敗しました
+      recipient_limit: メールは最大5名までしか送信できません。
+      recipients_required: 受給者は
+      success: 請求書が正常に送信されました
+    send_reminder:
+      overdue_only: 督促状は、支払期限を過ぎた請求書に対してのみ送信できます。
+      success: リマインダーが送信されました
+  invoices_view:
+    not_found: 請求書が見つかりませんでした
+  leave_types:
+    create:
+      success: 休暇タイプを正常に追加しました
+    update:
+      success: 休暇タイプの更新に成功しました
+  leave_with_leave_types:
+    update:
+      success: 葉の更新が正常に完了しました
+  leaves:
+    create:
+      success: 休暇が正常に作成されました
+    update:
+      success: 更新が完了しました
+  mailers:
+    actions:
+      join_miru: ミルに参加する
+      open_expense: オープンエクスペクト
+      open_invoice: 請求書を開く
+      open_time_tracking: 開封時間追跡
+      view_reports: Miruでレポートを見る
+    client_payment_mailer:
+      payment:
+        eyebrow: 支払い
+        preheader: 請求書%{invoice_number}の支払領収書。
+        receipt_title: お支払いを受け取りました
+        records_body: この領収書は、お支払いの確認となります。詳細を再度確認する必要がある場合は、いつでも請求書を再度開くことができます。
+        records_title: これは記録のために保管してください。
+        subject: 請求書%{invoice_number}の支払い領収書
+        subtitle_html: 請求書<strong>%{invoice_number}</strong>のお支払いを受け取りました。
+        summary_html: 請求書<strong>%{invoice_number}</strong>に対して、 <strong>%{paid_on}</strong>に<strong>%{amount}を</strong>受け取りました。
+        title: 支払い領収書
+    devise:
+      confirmation:
+        body_intro: 準備はほぼ完了です。Miruを使い始めた初日からできることをいくつかご紹介します。
+        cta: メールアドレスを確認
+        cta_body: 下記のボタンをクリックして、メールアドレスを確認してください。
+        eyebrow: アカウント設定
+        feature_1: ホスティング型決済リンク付きのプロフェッショナルな請求書を送信します。
+        feature_2: 時間、経費、利用状況を一つのワークフローで追跡します。
+        feature_3: チーム、顧客、請求業務を単一のワークスペースで管理できます。
+        feature_4: 収益、未払い請求書、および支払い状況を常に把握しておきましょう。
+        footer_note: Miruアカウントを作成していない場合は、このメッセージは無視していただいて構いません。
+        greeting_html: こんにちは<strong>%{name} さん</strong>、
+        preheader: Miruの設定を完了するには、メールアドレスを確認してください。
+        subtitle: メールアドレスを確認して、時間管理、請求書の送信、チーム管理をすべて一元的に行えるようにしましょう。
+        title: ミルへようこそ
+      email_changed:
+        changed_html: アカウントのメールアドレスが<strong>%{email}</strong>に変更されました。
+        eyebrow: アカウントのセキュリティ
+        greeting_html: こんにちは<strong>%{email} さん</strong>、
+        pending_html: お客様のアカウントのメールアドレスは<strong>%{email}</strong>に変更されます。
+        preheader: Miruのメールアドレスが変更されました。
+        subtitle: このメッセージは、お客様のMiruアカウントに登録されているメールアドレスが変更されたことを確認するものです。
+        title: メールアドレスが更新されました
+        warning_body_html: <a href="mailto:%{email}">%{email}</a>まですぐにサポートチームにご連絡ください。
+        warning_title: この変更を依頼していませんか？
+      password_change:
+        eyebrow: アカウントのセキュリティ
+        greeting_html: こんにちは<strong>%{name} さん</strong>、
+        preheader: Miruのパスワードが変更されました。
+        subtitle: Miruアカウントのパスワードが正常に更新されました。
+        success_body: 新しいパスワードを使用して、引き続きMiruにログインできます。
+        success_title: パスワードが更新されました。
+        title: パスワードが正常に変更されました
+        warning_body_html: アカウントのセキュリティ確保のため、すぐに<a href="mailto:%{email}">%{email}</a>にご連絡ください。
+        warning_title: この変更は行っていませんか？
+      reset_password:
+        cta: パスワードをリセット
+        cta_body: 下のボタンをクリックして新しいパスワードを設定してください。このパスワードリセットリンクは24時間後に期限切れとなります。
+        eyebrow: アカウントのセキュリティ
+        footer_note: パスワードのリセットをリクエストしていない場合は、このメッセージを無視してください。パスワードは変更されません。
+        greeting: こんにちは、
+        preheader: Miruアカウントのパスワードをリセットしてください。
+        request_html: "<strong>%{email}</strong>に関連付けられたパスワードの変更依頼を受け取りました。"
+        subtitle: お客様のMiruアカウントのパスワードリセットのご依頼をいただきました。
+        title: パスワードをリセット
+      shared:
+        signature_html: ありがとう、<br><strong>チーム・ミル</strong>
+      unlock:
+        cta: パスワードをリセット
+        eyebrow: アカウントのセキュリティ
+        footer_note: ログインを試みていない場合は、ロックが解除されるまで待ってから、すぐにパスワードを変更してください。
+        greeting_html: こんにちは<strong>%{email} さん</strong>、
+        preheader: ログイン試行回数が多すぎる場合、Miruアカウントのロックを解除してください。
+        subtitle: ログイン試行回数が多すぎたため、お客様のMiruアカウントをロックしました。
+        title: アカウントは一時的にロックされています
+        warning_body: Miruは30分後にアカウントを自動的にロック解除します。これらのロック解除試行に心当たりがない場合は、ロック解除後にアカウントが安全になるよう、パスワードをリセットしてください。
+        warning_title: ログイン試行回数が上限を超えました。
+    expense_mailer:
+      approved:
+        eyebrow: 費用
+        preheader: 払い戻し請求が承認されました。
+        subject: 払い戻しが承認されました
+        subtitle: お客様の払い戻し請求は審査され、承認されました。
+        title: 払い戻しが承認されました
+      paid:
+        eyebrow: 費用
+        preheader: お客様の払い戻し請求は支払い済みとして処理されました。
+        subject: 払い戻しは支払い済みとして処理されました。
+        subtitle: 払い戻し請求に対するお支払いが完了しました。
+        title: 払い戻し金が支払われました
+      rejected:
+        eyebrow: 費用
+        next_step_body: 経費明細を開き、更新を行い、再度提出してください。
+        next_step_title: 次のステップ
+        preheader: 払い戻し請求情報の更新が必要です。
+        subject: 払い戻しの承認には更新が必要です
+        subtitle: リクエストの詳細を確認し、必要な変更を加えて再送信してください。
+        title: 払い戻しに関する最新情報が必要
+      submitted:
+        eyebrow: 費用
+        preheader: 新たな払い戻し請求について審査が必要です。
+        subject: "%{submitter_name} が払い戻し請求を提出しました"
+        subtitle_html: "<strong>%{submitter_name}</strong>は払い戻し請求を提出しました。審査準備は完了しています。"
+        title: 新規払い戻し請求
+    invoice_mailer:
+      invoice:
+        eyebrow: 請求書
+        payment_link_subvalue: 明細項目を確認し、オンラインで支払いを行ってください。
+        payment_link_value: 安全な請求書ページ
+        preheader: "%{company_name}からの請求書%{invoice_number}。"
+        ready_body: 安全な請求書ページを開いて、明細を確認し、合計金額を確定して、オンラインで支払いを行ってください。
+        ready_title: お支払い前にご確認ください
+        subject: 請求書 %{invoice_number}
+        subtitle_html: "<strong>%{company_name}から</strong><strong>%{invoice_number}</strong>へ請求書が送信されました。内容をご確認の上、準備が整い次第オンラインでお支払いいただけます。"
+        support_html: この請求書についてご質問がある場合は、このメールに返信するか、 <a href="mailto:%{support_email}">%{support_email}</a>までご連絡ください。
+        title: 請求書の確認準備完了
+      send_invoice:
+        attachment_subvalue: 保管するか、転送するか、ファイルに保存するか。
+        attachment_value: PDFファイルを添付
+        eyebrow: 請求書
+        next_steps_body: 請求書を開いて金額を確認し、明細項目を精査し、準備ができたらお支払いください。
+        next_steps_title: 期待できること
+        note_title: "%{company_name}からのメッセージ"
+        preheader: "%{company_name}からの請求書%{invoice_number}の準備ができました。"
+        subject: "%{company_name}からの請求書%{invoice_number}"
+        subtitle_html: "<strong>%{company_name} から</strong><strong>%{invoice_number}</strong>へ請求書が送信されました。詳細を確認するには、請求書を開いて
+          PDF をダウンロードし、安全に支払いを行ってください。"
+        support_html: お手伝いが必要ですか？このメールに返信するか、 <a href="mailto:%{support_email}">%{support_email}</a>までご連絡ください。
+        title: 請求書の確認準備完了
+    labels:
+      amount: 額
+      amount_due: 支払金額
+      amount_paid: 支払金額
+      attachment: 添付ファイル
+      category: カテゴリ
+      client: クライアント
+      date: 日付
+      description: 説明
+      due_date: 期日
+      invited_by: 招待された
+      invoice: 請求書
+      invoice_number: 請求書番号
+      issue_date: 発行日
+      issued_to: 発行先
+      members: メンバー
+      outstanding_amount: 未払い金額
+      paid_on: 支払日
+      payment_link: 支払いリンク
+      payment_method: 支払方法
+      reference: 参照
+      status: 状態
+      total_amount: 合計金額
+      workspace: ワークスペース
+    layout:
+      brand: ミル
+      footer_body: Miruは、時間管理、請求書、支払い、業務運営をすべて一つの落ち着いたワークスペースで管理します。
+      footer_contact: support@getmiru.com
+      footer_copyright: "© Miru. All rights reserved."
+      footer_site: app.miru.so
+      preheader: Miruからの明確なアップデート。
+    monthly_reports_mailer:
+      cash_flow_digest:
+        average_daily_net_change_html: 1日平均純変化<strong>%{amount}</strong>
+        compare_to_previous: "%{month_label} における %{amount} との比較"
+        eyebrow: 月刊ダイジェスト
+        money_in: お金
+        money_out: お金の出金
+        net_change: "%{month_label}の正味変化"
+        no_money_in: "%{month_year_label}に対する支払いはMiruに記録されていません。"
+        no_money_out: "%{month_year_label}については、Miruに支払い済みの経費は記録されていません。"
+        preheader: "%{company_name}の%{month_label}キャッシュフローダイジェスト"
+        subject: "%{company_name}の%{month_label}キャッシュフローダイジェスト"
+        subtitle: 以下は、%{month_year_label} に関して Miru を介して資金が移動する様子を簡潔に示したものです。
+        title: "%{company_name}の%{month_label}キャッシュフローダイジェスト"
+        top_money_in_sources: 資金流入の主要情報源
+        top_money_out_sources: 資金流出上位項目
+    payment_mailer:
+      payment:
+        eyebrow: 支払い
+        follow_up_body: 請求書を開いて支払い内容を確認するか、領収書を保管するか、次のステップに進んでください。
+        follow_up_title: 次にすべきこと
+        preheader: 請求書%{invoice_number}の支払い確認。
+        received_title: お支払いを受け取りました
+        subject: 請求書%{invoice_number}の支払い詳細
+        subtitle_html: "<strong>%{client_name} が</strong>請求書<strong>%{invoice_number}</strong>を支払いました。"
+        summary_html: "<strong>%{client_name}は</strong><strong>%{amount}</strong>に対し、請求書<strong>%{invoice_number}</strong>の代金を支払いました。この請求書は全額支払い済みです。"
+        title: 支払い確認
+    send_payment_reminder_mailer:
+      send_payment_reminder:
+        eyebrow: 請求書
+        preheader: "%{company_name}請求書の支払い催促。"
+        subject: "%{company_name}様へのお支払い催促"
+        subtitle: まだ対応が必要な請求書は以下のとおりです。
+        title: 支払い催促
+    send_reminder_mailer:
+      send_reminder:
+        eyebrow: 請求書
+        preheader: "%{company_name}からの請求書%{invoice_number}に関するリマインダー。"
+        subject: "%{company_name}からの請求書%{invoice_number}に関するリマインダー"
+        subtitle_html: "<strong>%{company_name}</strong>からの請求書<strong>%{invoice_number}</strong>はまだ支払いがされていません。"
+        title: 支払い催促
+    send_weekly_reminder_to_user_mailer:
+      notify_user_about_missed_entries:
+        body_html: "<strong>%{starting_date}</strong>と<strong>%{ending_date}</strong>の間に、あなたは40時間未満しかログを記録していません。"
+        eyebrow: 時間追跡
+        follow_up: Miruを開き、不足している項目を追加して、週を締め切ります。
+        greeting_html: こんにちは<strong>%{name} さん</strong>、
+        preheader: 欠落している週分のMiruタイムシートを更新してください。
+        signoff_html: ありがとう、<br><strong>ミル</strong>
+        subject: 先週分のMiruタイムシートを記入してください。
+        subtitle: "%{company_name}の勤務時間入力は、予想される週合計を下回っています。"
+        title: タイムシートを記入してください
+    subscription:
+      plan_purchased:
+        badge: チャリンチャリン
+        billing_interval: 請求間隔
+        billing_settings_html: '請求設定: <a href="%{url}" style="color: #111827;">%{url}</a>'
+        company: 会社
+        cta: 請求設定を開く
+        image_label: 新しい有料プラン
+        image_text: 新しい有料ワークスペース
+        plan: プラン
+        stripe_subscription: Stripeのサブスクリプション
+        subtitle: Miruに新しい有料ワークスペースが登場しました。課金が開始されました。
+        team_seats: チームシート
+        title: "%{company} が %{plan} を購入しました"
+      plan_purchased_text:
+        billing_interval: '請求間隔: %{interval}'
+        billing_settings: '請求設定を開く: %{url}'
+        company: '会社: %{company}'
+        plan: 'プラン: %{plan}'
+        stripe_subscription: 'Stripeのサブスクリプション: %{id}'
+        team_seats: チーム席数：%{seats}
+      trial_started:
+        body_html: "<strong>%{company}</strong>用の Miru Pro 14 日間無料トライアルが有効になりました。"
+        cta: オープン請求
+        eyebrow: 請求する
+        footer_body: 請求設定から、いつでも請求内容の確認、プランの比較、アップグレードを行うことができます。
+        greeting_html: こんにちは<strong>%{name} さん</strong>、
+        preheader: Miru Proの無料トライアルが有効になりました。
+        subtitle: 14日間の無料トライアル期間中に、請求、レポート、その他のProワークフローを体験してください。
+        title: Miru Proの無料トライアルが開始されました。
+        trial_ends: 裁判終了
+      trial_started_text:
+        body: "%{company} 用の Miru Pro 14 日間無料トライアルが有効になりました。"
+        greeting: こんにちは %{name}、
+        review_billing: "%{url}で請求内容を確認してください。"
+        trial_ends: 試行は%{date}で終了します。
+    user_invitation_mailer:
+      send_user_invitation:
+        about_body: Miruは、時間管理、請求書、支払い、そして日々の業務を一つのワークスペースに統合します。
+        about_title: Miruについて
+        eyebrow: 招待
+        get_started_body: 招待を受け入れ、パスワードを作成すれば、ログインできます。
+        get_started_title: さあ始めましょう
+        preheader: Miruのチームへの参加にご招待されました。
+        subject: Miruへの参加にご招待します
+        subtitle_html: "<strong>%{sender_name}さん</strong>があなたをMiruの<strong>%{company_name}</strong>に招待しました。"
+        support_html: この招待状を予期していなかった場合は、 <a href="mailto:%{support_email}">%{support_email}
+          の</a>チームにご連絡ください。
+        title: Miruワークスペースに参加する
+        workspace_members:
+          one: メンバー1名
+          other: "%{count} メンバー"
+  navbar:
+    clients: クライアント
+    help: ヘルプ
+    invoices: 請求書
+    logout: ログアウト
+    payments: 支払い
+    profile: プロフィール
+    projects: プロジェクト
+    reports: 報告書
+    settings: 設定
+    team: チーム
+    time_tracking: 時間追跡
+    view_notifications: 通知を表示する
+  passkeys:
+    add_passkey_first: サインイン時にパスキーを要求する前に、パスキーを追加してください。
+    added: Passkeyが追加されました
+    disable_totp_first: パスキーによるサインインを要求する前に、認証アプリの2段階認証を無効にしてください。
+    not_found: パスキーが見つかりません。
+    removed: パスキーが削除されました
+    requirement_disabled: パスキー要件は無効になっています
+    requirement_enabled: パスキー要件が有効になっています
+    session_expired: パスキーセッションの有効期限が切れました。もう一度お試しください。
+    verification_failed: パスキー認証に失敗しました。
+  password:
+    create:
+      success: パスワードのリセット方法に関する手順をメールでお送りしました。
+    update:
+      success: パスワードが更新されました。
+  pdfs:
+    accounts_aging:
+      client: クライアント
+      title: 売掛金年齢別レポート
+      total: 合計
+    client_revenues:
+      client: クライアント
+      outstanding_amount: 未払い金額
+      overdue_amount: 延滞金額
+      paid_amount: 支払金額
+      title: 顧客収益レポート
+      total_revenue: 総収益
+    invoices:
+      amount_due: 支払金額
+      amount_paid: 支払金額
+      billed_to: 請求先
+      client_invoice: 顧客請求書
+      discount: 割引
+      due: 期限：%{due_date}
+      invoice_number: 請求書番号
+      issue_date: 発行日
+      paid: '支払い済み: %{amount}'
+      payment_details: 支払い詳細
+      payment_rows:
+        account_number: 口座番号
+        bank_name: 銀行名
+        ein: EIN
+        gst_number: GST番号
+        routing_number: ルーティング番号
+        swift_code: スウィフトコード
+        tax_id: 納税者番号
+        us_taxpayer_id: U.S. Taxpayer ID
+        vat_number: VAT番号
+      prepared_by: 作成者：%{company_name}、発行者：%{issue_date}、支払期限：%{due_date}。
+      reference: '参照: %{reference}'
+      sub_total: 小計
+      table:
+        date: 日付
+        description: 説明
+        line_total: 行合計
+        name: 名前
+        qty: 数量
+        rate: レート
+      tax: 税
+      title: 請求書
+      total: 合計
+      total_invoice_amount: 請求合計金額
+      work_summary: 業務概要
+    outstanding_overdue_invoices:
+      amount: 額
+      client: クライアント
+      due_date: 期日
+      invoice_number: 請求書番号
+      issue_date: 発行日
+      no_clients_found: クライアントが見つかりませんでした
+      outstanding_amount: 未払い金額
+      overdue_amount: 延滞金額
+      status: 状態
+      title: 未払いおよび延滞請求書レポート
+      total_amounts: 合計金額
+      total_invoice_amount: 請求合計金額
+    time_entries:
+      client: クライアント
+      date: 日付
+      hours_logged: 記録された時間数
+      note: 注記
+      project: プロジェクト
+      team_member: チームメンバー
+      title: タイムエントリーレポート
+  projects:
+    add_new_project: 新しいプロジェクトを追加する
+    add_project: プロジェクトを追加
+    billable: 請求可能
+    client: クライアント
+    create:
+      failure: プロジェクトの作成に失敗しました。
+      success: プロジェクトが正常に追加されました。
+    delete:
+      success:
+        message: プロジェクトは正常に削除されました。
+    edit: 編集
+    hours_logged: 記録された時間
+    new_project: 新プロジェクト
+    non_billable: 請求対象外
+    project: プロジェクト
+    project_name: プロジェクト名
+    projects: プロジェクト
+    update:
+      success: 変更は正常に保存されました。
+    update_members:
+      failure:
+        message: 変更の保存に失敗しました
+        unauthorized: ユーザーはこのプロジェクトの詳細を変更する権限がありません
+      success:
+        message: 変更は正常に保存されました
+  pundit:
+    client_policy:
+      create?: クライアントを作成する権限がありません。
+      show?: このページへのアクセス権限がありません。管理者にお問い合わせください。
+      update?: クライアントをアップデートする権限がありません。
+    company_policy:
+      create?: あなたには会社を設立する権限がありません。
+      new?: あなたは新しい会社を設立する権限を持っていません。
+      show?: あなたは会社情報を閲覧する権限がありません。
+      update?: あなたには会社情報を更新する権限がありません。
+    current_company_policy:
+      company_not_present: 会社関係者は不在です。
+    default: あなたにはこの操作を行う権限がありません。
+    different_workspace: あなたは、現在のワークスペース外の記録にアクセスする権限がありません。
+    project_policy:
+      create?: プロジェクトを作成する権限がありません。
+      show?: このページへのアクセス権限がありません。管理者にお問い合わせください。
+    team_policy:
+      destroy?: あなたはチームを破壊する権限を持っていません。
+      edit?: あなたはチームを編集する権限がありません。
+      update?: チームを更新する権限がありません。
+  registration:
+    confirm_password: パスワードを認証する
+    email_id: メール
+    first_name: ファーストネーム
+    last_name: 苗字
+    name: 名前
+    or: または
+    password: パスワード
+    remember_me: 私を覚えてますか
+    sign_in: サインイン
+    sign_up: サインアップ
+    signin_with_github: GitHubでサインイン
+    signin_with_google: Googleでログイン
+    signup_with_apple: Appleでサインアップ
+    signup_with_github: GitHubにサインアップする
+    signup_with_google: Googleでサインアップする
+  reports:
+    heading: タイムエントリーレポート
+  sessions:
+    failure:
+      invalid: メールアドレスまたはパスワードが無効です。
+  settings:
+    cancel: キャンセル
+    change_password: パスワードを変更する
+    confirm_password: パスワードを認証する
+    current_password: 現在のパスワード
+    email: メール
+    name: 名前
+    organization_setting: 組織設定
+    password: パスワード
+    payment_setting: 支払い設定
+    profile_picture: プロフィール写真
+    profile_setting: プロフィール設定
+    save: 保存
+    settings: 設定
+  shared_links:
+    already_have_an_account: 既にアカウントをお持ちですか？
+    back_to_login: ログイン画面に戻る
+    confirmation_instruction: 確認の手順が届きませんでしたか？
+    dont_have_an_account: アカウントをお持ちではありませんか？
+    forgot_password: パスワードをお忘れですか ？
+    unlock_instruction: ロック解除の手順を受け取っていませんか？
+  subscriptions:
+    no_billing_customer: この会社には請求先顧客が存在しません。
+    pricing_not_configured: Stripeのサブスクリプション料金が設定されていません
+    trial_not_eligible: お客様のワークスペースはProトライアルの対象外です
+    trial_started: 14日間のProトライアルが開始されました
+  team:
+    changed_email: メールアドレスを変更しました
+    create_new_user: 新規ユーザーを作成する
+    current_email: 現在のメール
+    delete:
+      success:
+        message: チームメンバーの削除に成功しました
+    email: メール
+    email_id: メールアドレス
+    first_name: ファーストネーム
+    form_admin: 管理者
+    form_book_keeper: 経理担当者
+    form_email: メール
+    form_employee: 従業員
+    form_name: 名前
+    form_role: 役割
+    invitation: 招待状待ち
+    last_name: 苗字
+    name: 名前
+    new_user: 新規ユーザー
+    profile_picture: 写真
+    reconfirmation: 再確認待ち
+    role: 役割
+    team: チーム
+    update:
+      error:
+        role: 役割の更新中にエラーが発生しました
+      success:
+        message: 変更は正常に保存されました
+    update_user: ユーザー情報の更新
+  timeoff_entries:
+    create:
+      success: 休暇の追加に成功しました
+    destroy:
+      success: 休暇の削除に成功しました。
+    update:
+      success: 休暇の更新に成功しました
+  timesheet_entry:
+    create:
+      message: タイムシートが作成されました
+    destroy:
+      failure: タイムシートエントリの削除に失敗しました
+      locked: "管理者とオーナーのみ%{days}日より古いエントリを削除できます"
+      message: タイムシートが削除されました
+    update:
+      failure: タイムシートのエントリの更新に失敗しました
+      locked: "管理者とオーナーのみ%{days}日より古いエントリを編集できます"
+      message: タイムシートが更新されました
+  totp:
+    disable_passkey_first: 認証アプリの2要素認証を有効にする前に、パスキーによるサインインを無効にしてください。
+    disabled: 認証アプリが無効になっています
+    enabled: 認証アプリが有効になっています
+    invalid_code: 認証コードが無効です。
+    invalid_verification: 認証コードが無効です。
+    not_enabled: まず、認証アプリの2段階認証を有効にしてください。
+    recovery_codes_regenerated: リカバリーコードが再生成されました
+    session_expired: その認証リクエストは無効です。再度ログインしてください。
+  user:
+    login:
+      failure:
+        disabled: アクセス権限が無効になっています。
+        pending_invitation: アカウントはまだ有効化されていません。
+  workspaces:
+    update:
+      failure: ワークスペースの切り替えに失敗しました
+      success: ワークスペースの切り替えに成功しました

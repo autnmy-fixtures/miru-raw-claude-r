@@ -1,0 +1,92 @@
+default: &default
+  dispatchers:
+    - polling_interval: 1
+      batch_size: 500
+      recurring_tasks:
+        update_invoice_status:
+          class: UpdateInvoiceStatusToOverdueJob
+          schedule: '0 0 * * *'  # Runs every day at 12AM UTC
+        weekly_reminder:
+          class: WeeklyReminderToUserJob
+          schedule: '0 14 * * 1 Asia/Kolkata' # Runs every Monday at 14:00
+        monthly_reports_delivery:
+          class: MonthlyReportsDeliveryJob
+          schedule: '0 14 1 * * Asia/Kolkata'
+        sync_stripe_subscriptions:
+          class: SyncStripeSubscriptionsJob
+          schedule: '0 1 * * *'
+        trial_emails:
+          class: TrialEmailsJob
+          schedule: '0 9 * * *'
+        founder_digest:
+          class: Analytics::FounderDigestJob
+          schedule: '0 8 * * 1'
+        refresh_cached_analytics_reports:
+          class: Analytics::RefreshCachedReportsJob
+          schedule: '0 * * * *'
+        analytics_threshold_notifications:
+          class: Analytics::ThresholdNotificationsJob
+          schedule: '0 1 * * 1 America/New_York'
+        update_exchange_rates:
+          class: UpdateExchangeRatesJob
+          schedule: '0 2 * * *'  # Runs every day at 2AM UTC to warm the FX rate cache
+  workers:
+    - queues: default
+      threads: 5
+      processes: 1
+      polling_interval: 0.1
+    - queues: billing_sync
+      threads: 1
+      processes: 1
+      polling_interval: 0.5
+
+development:
+ <<: *default
+
+test:
+ <<: *default
+
+production:
+  dispatchers:
+    - polling_interval: <%= ENV.fetch("SOLID_QUEUE_DISPATCHER_POLLING_INTERVAL", "5").to_i %>
+      batch_size: <%= ENV.fetch("SOLID_QUEUE_DISPATCHER_BATCH_SIZE", "100").to_i %>
+      recurring_tasks:
+        update_invoice_status:
+          class: UpdateInvoiceStatusToOverdueJob
+          schedule: '0 0 * * *'
+        weekly_reminder:
+          class: WeeklyReminderToUserJob
+          schedule: '0 14 * * 1 Asia/Kolkata'
+        monthly_reports_delivery:
+          class: MonthlyReportsDeliveryJob
+          schedule: '0 14 1 * * Asia/Kolkata'
+        sync_stripe_subscriptions:
+          class: SyncStripeSubscriptionsJob
+          schedule: '0 1 * * *'
+        trial_emails:
+          class: TrialEmailsJob
+          schedule: '<%= ENV.fetch("TRIAL_EMAILS_CRON", "0 9 * * *") %>'
+        founder_digest:
+          class: Analytics::FounderDigestJob
+          schedule: '<%= ENV.fetch("FOUNDER_DIGEST_CRON", "0 8 * * 1") %>'
+        refresh_cached_analytics_reports:
+          class: Analytics::RefreshCachedReportsJob
+          schedule: '0 * * * *'
+        analytics_threshold_notifications:
+          class: Analytics::ThresholdNotificationsJob
+          schedule: '0 1 * * 1 America/New_York'
+        update_exchange_rates:
+          class: UpdateExchangeRatesJob
+          schedule: '0 2 * * *'
+        database_backup:
+          class: DatabaseBackupJob
+          schedule: '<%= ENV.fetch("DATABASE_BACKUP_CRON", "*/30 * * * *") %>'
+  workers:
+    - queues: default
+      threads: <%= ENV.fetch("SOLID_QUEUE_THREADS", "3").to_i %>
+      processes: <%= ENV.fetch("SOLID_QUEUE_PROCESSES", "1").to_i %>
+      polling_interval: <%= ENV.fetch("SOLID_QUEUE_WORKER_POLLING_INTERVAL", "0.5").to_f %>
+    - queues: billing_sync
+      threads: <%= ENV.fetch("SOLID_QUEUE_BILLING_SYNC_THREADS", "1").to_i %>
+      processes: 1
+      polling_interval: <%= ENV.fetch("SOLID_QUEUE_WORKER_POLLING_INTERVAL", "0.5").to_f %>

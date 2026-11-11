@@ -1,0 +1,336 @@
+# frozen_string_literal: true
+
+class Company < ApplicationRecord
+  include MetricsTracking
+  include PhoneNumberValidatable
+
+  attr_accessor :sso_settings_actor
+
+  audited except: [
+    :updated_at,
+    :trial_email_last_sent_on,
+    :trial_expired_email_sent_at,
+    :stripe_customer_id,
+    :stripe_subscription_id,
+    :subscription_status,
+    :subscription_ends_at,
+    :subscription_interval,
+    :cancel_at_period_end,
+    :bank_account_number,
+    :bank_routing_number,
+    :bank_swift_code,
+    :ein,
+    :gst_number,
+    :tax_id,
+    :us_taxpayer_id,
+    :vat_number
+  ]
+
+  MAX_ATTACHMENT_SIZE_MB = 5
+  TRIAL_LENGTH = 14.days
+  ATTACHMENT_CONTENT_TYPES = {
+    logo: %w[image/png image/jpeg image/jpg image/webp],
+    invoice_signature: %w[image/png]
+  }.freeze
+
+  # Associations
+  has_many :employments, dependent: :destroy
+  has_many :users, -> { kept }, through: :employments
+  has_many :clients, dependent: :destroy
+  has_many :projects, through: :clients, dependent: :destroy
+  has_many :current_workspace_users, foreign_key: "current_workspace_id", class_name: "User", dependent: :nullify
+  has_one_attached :logo
+  has_one_attached :invoice_signature
+  has_many :timesheet_entries, through: :clients
+  has_many :invoices
+  has_many :tax_configurations, dependent: :destroy
+  has_many :payments, through: :invoices
+  has_many :razorpay_payouts, through: :payments
+  has_many :agents, dependent: :destroy
+  has_one :stripe_connected_account, dependent: :destroy
+  has_many :payments_providers, dependent: :destroy
+  has_many :quickbooks_connections, dependent: :destroy
+  has_many :quickbooks_references, dependent: :destroy
+  has_many :quickbooks_sync_runs, dependent: :destroy
+  has_many :quickbooks_sync_events, dependent: :destroy
+  has_many :addresses, as: :addressable, dependent: :destroy
+  has_many :devices, dependent: :destroy
+  has_many :invitations, dependent: :destroy
+  has_many :expenses, dependent: :destroy
+  has_many :analytics_reports, dependent: :destroy
+  has_many :client_members, dependent: :destroy
+  has_many :leaves, class_name: "Leave", dependent: :destroy
+  has_many :leave_types, through: :leaves, dependent: :destroy
+  has_many :timeoff_entries, through: :users
+  has_many :holidays, dependent: :destroy
+  has_many :holiday_infos, through: :holidays, dependent: :destroy
+  has_many :carryovers
+  has_many :notification_preferences, dependent: :destroy
+  has_many :data_imports, dependent: :destroy
+
+  resourcify
+
+  accepts_nested_attributes_for :addresses, reject_if: :address_attributes_blank?, allow_destroy: true
+
+  # Validations
+  validates :name, :standard_price, :country, :base_currency, presence: true
+  validates :name, length: { maximum: 30 }
+  validate :business_phone_must_be_valid
+  validate :validate_attachment_constraints
+  validate :allowed_sso_domains_are_valid
+  validate :sso_settings_do_not_lock_out_actor
+  validates :standard_price, numericality: { greater_than_or_equal_to: 0 }
+  validates :timesheet_edit_days, numericality: { only_integer: true, in: 1..365 }
+
+  before_validation :normalize_allowed_sso_domains
+  after_create { Rails.event.notify(Companies::Created.new(self)) }
+
+  # scopes
+  scope :with_kept_employments, -> { merge(Employment.kept) }
+
+  def client_list
+    clients.kept.includes(:invoices, :addresses, client_members: :user).map do |client|
+      {
+        id: client.id, name: client.name, email: client.email, phone: client.phone, address: client.current_address,
+        previousInvoiceNumber: client.invoices&.last&.invoice_number || 0,
+        client_members: client.client_members_emails
+      }
+    end
+  end
+
+  def overdue_and_outstanding_and_draft_amount
+    currency = base_currency
+    amounts = InvoiceAmountsSummary.process(invoices.kept)
+    {
+      overdue_amount: amounts[:overdue_amount],
+      outstanding_amount: amounts[:outstanding_amount],
+      draft_amount: amounts[:draft_amount],
+      currency:
+    }
+  end
+
+  def company_logo
+    return nil if !logo.attached?
+
+    Rails.application.routes.url_helpers.polymorphic_url(logo, only_path: true)
+  end
+
+  def stripe_account_id
+    stripe_connected_account&.account_id
+  end
+
+  def address_attributes_blank?(attributes)
+    attributes.except("id, address_line_2").values.all?(&:blank?)
+  end
+
+  def current_address
+    addresses.first
+  end
+
+  def team_member_limit
+    return Float::INFINITY if billing_exempt?
+
+    pro_access? ? 100 : 3
+  end
+
+  def pending_team_seat_invites
+    invitations.valid_invitations.where.not(role: :client).count
+  end
+
+  def used_team_seats
+    users.with_kept_employments.distinct.count
+  end
+
+  def reserved_team_seats
+    used_team_seats + pending_team_seat_invites
+  end
+
+  def billable_team_seats
+    [employees_without_client_role.count, 1].max
+  end
+
+  def client_portal_users_count
+    User.from(users_with_only_client_role_for_company.select("users.id"), :client_portal_users).count
+  end
+
+  def team_member_limit_reached?
+    return false if team_member_limit.infinite?
+
+    reserved_team_seats >= team_member_limit
+  end
+
+  def can_add_team_member_role?(role)
+    return true if role.to_s == "client"
+
+    !team_member_limit_reached?
+  end
+
+  def trial_active?
+    trial_started_at.present? && trial_ends_at.present? && trial_ends_at.future?
+  end
+
+  def trial_expired?
+    trial_started_at.present? && trial_ends_at.present? && trial_ends_at.past?
+  end
+
+  def trial_available?
+    !billing_exempt? && plan_tier != "paid" && trial_started_at.blank?
+  end
+
+  def pro_access?
+    billing_exempt? || plan_tier == "paid" || trial_active?
+  end
+
+  def stripe_subscription_active?
+    %w[active trialing past_due].include?(subscription_status.to_s)
+  end
+
+  def resolved_time_zone
+    raw_zone = timezone.presence
+    return Time.zone if raw_zone.blank?
+
+    ActiveSupport::TimeZone[raw_zone] ||
+      ActiveSupport::TimeZone[raw_zone.sub(/\A\(GMT[^)]*\)\s*/, "")] ||
+      Time.zone
+  end
+
+  def current_plan_label
+    return "free_pro" if billing_exempt?
+    return "paid" if plan_tier == "paid"
+    return "pro_trial" if trial_active?
+
+    "free"
+  end
+
+  def current_subscription_status
+    return "trialing" if trial_active? && plan_tier != "paid"
+    return "trial_expired" if trial_expired? && plan_tier != "paid"
+
+    subscription_status
+  end
+
+  def start_pro_trial!(starts_at: Time.current)
+    raise ArgumentError, "trial_unavailable" unless trial_available?
+
+    update!(
+      trial_started_at: starts_at,
+      trial_ends_at: starts_at + TRIAL_LENGTH
+    )
+  end
+
+  def apply_stripe_subscription!(
+    stripe_customer_id:,
+    stripe_subscription_id: nil,
+    subscription_status:,
+    subscription_ends_at: nil,
+    subscription_interval: nil,
+    cancel_at_period_end: false
+  )
+    attrs = {
+      stripe_customer_id:,
+      subscription_status:,
+      subscription_ends_at:,
+      plan_tier: stripe_subscription_access?(subscription_status) ? "paid" : "free",
+      cancel_at_period_end:
+    }
+
+    attrs[:stripe_subscription_id] = stripe_subscription_id if has_attribute?(:stripe_subscription_id)
+    attrs[:subscription_interval] = subscription_interval if has_attribute?(:subscription_interval)
+    attrs[:trial_ends_at] = nil if attrs[:plan_tier] == "paid"
+
+    update!(attrs)
+  end
+
+  def revoke_stripe_subscription_access!
+    attrs = {
+      plan_tier: "free",
+      subscription_status: "canceled",
+      subscription_ends_at: nil,
+      cancel_at_period_end: false
+    }
+
+    attrs[:stripe_subscription_id] = nil if has_attribute?(:stripe_subscription_id)
+    attrs[:subscription_interval] = nil if has_attribute?(:subscription_interval)
+
+    update!(attrs)
+  end
+
+  delegate :formatted_address, to: :current_address
+
+  def billable_clients
+    clients
+      .joins(:projects)
+      .where(projects: { billable: true })
+      .kept
+      .select("clients.*")
+      .distinct
+      .order(name: :asc)
+  end
+
+  def employees_without_client_role
+    users.with_kept_employments
+      .where.not(id: users_with_only_client_role_for_company.select("users.id"))
+      .distinct
+  end
+
+  private
+
+    def normalize_allowed_sso_domains
+      self.allowed_sso_domains = Array(allowed_sso_domains).filter_map do |domain|
+        domain.to_s.strip.downcase.presence
+      end.uniq
+    end
+
+    def allowed_sso_domains_are_valid
+      invalid_domains = allowed_sso_domains.reject { |domain| domain.exclude?("@") && domain.include?(".") }
+      errors.add(:allowed_sso_domains, "must be valid domains without @") if invalid_domains.any?
+    end
+
+    def sso_settings_do_not_lock_out_actor
+      return unless sso_enforced? && sso_settings_actor.present?
+
+      if will_save_change_to_sso_enforced?(from: false, to: true) &&
+          !sso_settings_actor.has_role?(:owner, self) &&
+          !sso_settings_actor.identities.where(provider: %w[google_oauth2 github]).exists?
+        errors.add(:sso_enforced, "requires you to connect Google or GitHub first")
+      end
+
+      return if allowed_sso_domains.blank?
+
+      actor_domain = sso_settings_actor.email.to_s.downcase.split("@", 2).last
+      return if allowed_sso_domains.include?(actor_domain)
+
+      errors.add(:allowed_sso_domains, "must include your own email domain when SSO is required")
+    end
+
+    def validate_attachment_constraints
+      ATTACHMENT_CONTENT_TYPES.each do |name, allowed_content_types|
+        attachment = public_send(name)
+        next unless attachment.attached?
+
+        if attachment.blob.byte_size > MAX_ATTACHMENT_SIZE_MB.megabytes
+          errors.add(name, I18n.t("attachment.validation.file_too_large", size_mb: MAX_ATTACHMENT_SIZE_MB))
+        end
+
+        next if allowed_content_types.include?(attachment.blob.content_type)
+
+        errors.add(name, I18n.t("attachment.validation.invalid_content_type"))
+      end
+    end
+
+    def business_phone_must_be_valid
+      validate_phone_number(:business_phone)
+    end
+
+    def users_with_only_client_role_for_company
+      users.with_kept_employments
+        .joins(:roles)
+        .where(roles: { resource_id: id, resource_type: "Company" })
+        .group("users.id")
+        .having("COUNT(roles.id) = 1 AND MAX(roles.name) = ?", "client")
+    end
+
+    def stripe_subscription_access?(status)
+      %w[active trialing past_due].include?(status.to_s)
+    end
+end

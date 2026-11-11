@@ -1,0 +1,263 @@
+/* eslint-disable no-constant-condition */
+import React, { Fragment } from "react";
+
+import ProgressBar from "common/ProgressBar";
+import { bytesToSize } from "helpers";
+import { i18n } from "../../../i18n";
+import { XIcon } from "miruIcons";
+
+import TableHeader from "./TableHeader";
+import TableRow from "./TableRow";
+
+import fileIcon from "../../../../../images/fileIcon.svg";
+import Step from "../../../../../images/Step.svg";
+import xls from "../../../../../images/xls.svg";
+
+const ImportModal = ({
+  handleToggleModal,
+  handleSelectFile,
+  file,
+  handleContinueClick,
+  step,
+  data,
+  columnNames,
+  handleRemoveFile,
+  title,
+  importProgress = 0,
+  totalEntries = 0,
+  importedEntries = 0,
+  failedEntries = 0,
+}) => {
+  const firstStep = () => (
+    <Fragment>
+      {!file ? (
+        <div className="mt-5 h-512 w-352">
+          <label className="" htmlFor="file-input">
+            <div className="dashed-border flex min-h-full min-w-full cursor-pointer flex-col items-center justify-center rounded border-border">
+              <div className="flex flex-row ">
+                <img className="" src={fileIcon} />
+                <p className="ml-4 text-base	font-bold tracking-widest text-muted-foreground">
+                  {i18n.t("importModal.uploadFile").toUpperCase()}
+                </p>
+              </div>
+              <p className="text-xs font-medium text-muted-foreground">
+                {i18n.t("importModal.supportedFormats")}
+              </p>
+            </div>
+          </label>
+          <input
+            accept=".csv, .xls, .xlsx"
+            className="hidden"
+            id="file-input"
+            name="file"
+            type="file"
+            onChange={handleSelectFile}
+          />
+        </div>
+      ) : (
+        <div className=" mt-5 h-512 w-352">
+          <div className="flex h-16 items-center justify-between rounded bg-muted p-2">
+            <div className="flex h-12 w-12 items-center justify-center rounded bg-accent">
+              <img src={xls} />
+            </div>
+            <div className="w-228">
+              <p className="truncate	text-sm  font-medium">{file.name}</p>
+              <p className="text-xs	font-medium text-muted-foreground">
+                {" "}
+                XLS • {bytesToSize(file.size)}
+              </p>
+            </div>
+            <button onClick={handleRemoveFile}>
+              <XIcon
+                className="mr-2 text-primary"
+                color="currentColor"
+                size={15}
+              />
+            </button>
+          </div>
+        </div>
+      )}
+      <button
+        className="mt-5 w-352 rounded bg-primary py-2 text-base font-bold tracking-widest text-primary-foreground transition-colors hover:bg-primary/90"
+        onClick={handleContinueClick}
+      >
+        {i18n.t("continue").toUpperCase()}
+      </button>
+    </Fragment>
+  );
+
+  const secondStep = () => (
+    <Fragment>
+      <div className=" mt-5 w-352">
+        <p className="text-xs	font-medium	">
+          {i18n.t("importModal.reviewMappedFields")}
+        </p>
+        <table className="mt-5 min-w-full divide-y divide-border">
+          <thead>
+            <TableHeader />
+          </thead>
+          <tbody className="min-w-full divide-y divide-border">
+            {data.map((data, id) => (
+              <Fragment key={id}>
+                <TableRow column={columnNames} field={data} id={id} />
+              </Fragment>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <button
+        className="mt-5 w-352 rounded bg-primary py-2 text-base font-bold tracking-widest text-primary-foreground transition-colors hover:bg-primary/90"
+        onClick={handleContinueClick}
+      >
+        {i18n.t("importModal.startImport").toUpperCase()}
+      </button>
+    </Fragment>
+  );
+
+  const thirdStep = () => (
+    <div className=" mt-5 w-352 ">
+      {true ? (
+        <Fragment>
+          <div className=" flex h-304 w-full flex-col items-center justify-around rounded-lg bg-muted">
+            <p className="tracking-wide	text-base	font-bold	">
+              {i18n.t("importModal.importingEntries", {
+                count: totalEntries || 0,
+              })}
+            </p>
+            <div className="flex h-87 items-baseline justify-center text-primary">
+              <p className="text-3xl font-normal">
+                {Math.round(importProgress)}
+              </p>
+              <p className="text-base font-normal">%</p>
+            </div>
+            <div className="relative h-4 w-72 rounded-2xl bg-secondary">
+              <ProgressBar width={`${importProgress}%`} />
+            </div>
+          </div>
+          <div className="mt-11 text-justify text-base	font-normal">
+            {i18n.t("importModal.backgroundImportNotice")}
+          </div>
+          <button
+            className="mt-22 w-352 rounded bg-primary py-2 text-base font-bold tracking-widest text-primary-foreground transition-colors hover:bg-primary/90"
+            onClick={handleToggleModal}
+          >
+            {i18n.t("importModal.closeWindow").toUpperCase()}
+          </button>
+        </Fragment>
+      ) : (
+        <Fragment>
+          <div className="flex h-512 w-full flex-col items-center justify-around rounded-lg bg-muted p-4">
+            <p className="tracking-wide	text-base	font-bold	">
+              {i18n.t("importModal.importComplete")}
+            </p>
+            <div className="flex h-87 items-baseline justify-center text-primary">
+              <p className="text-3xl font-normal">100</p>
+              <p className="text-base font-normal">%</p>
+            </div>
+            <div className="w-full border-t-2 border-border ">
+              <div className="py-5 text-base font-bold">
+                {i18n.t("importModal.importSummary")}
+              </div>
+              <div className="flex justify-between border-b-2 border-border py-2">
+                <p className="text-sm	font-normal">
+                  {i18n.t("importModal.totalTimeEntries")}
+                </p>
+                <p className="text-base font-bold">{totalEntries || 0}</p>
+              </div>
+              <div className="flex justify-between border-b-2 border-border py-2">
+                <p className="text-sm	font-normal">
+                  {i18n.t("importModal.successfullyImported")}
+                </p>
+                <p className="text-base font-bold">{importedEntries || 0}</p>
+              </div>
+              <div className="flex justify-between py-2">
+                <p className="text-sm	font-normal">
+                  {i18n.t("importModal.failedToImport")}
+                </p>
+                <p className="text-base font-bold">{failedEntries || 0}</p>
+              </div>
+            </div>
+            <div className="text-base font-normal	">
+              {i18n.t("importModal.detailedLogSent")}
+            </div>
+          </div>
+          <button
+            className="mt-10 w-352 rounded bg-primary py-2 text-base font-bold tracking-widest text-primary-foreground transition-colors hover:bg-primary/90"
+            onClick={handleContinueClick}
+          >
+            {i18n.t("importModal.importAnotherFile").toUpperCase()}
+          </button>
+        </Fragment>
+      )}
+    </div>
+  );
+
+  return (
+    <div
+      className="modal__modal main-modal"
+      style={{ background: "hsl(var(--foreground) / 0.45)" }}
+    >
+      <div className="modal__container__import__modal modal-container">
+        <div className="modal__content modal-content mt-2">
+          <div className="modal__position w-352">
+            <h6 className="modal__title">
+              {i18n.t("importModal.importTitle", { title })}
+            </h6>
+            <div className="modal__close">
+              <button className="modal__button" onClick={handleToggleModal}>
+                <XIcon color="currentColor" size={15} />
+              </button>
+            </div>
+          </div>
+          <div className="modal__form mt-4 flex-col items-center justify-center">
+            <div className="flex w-352 flex-row items-center justify-between">
+              {step === 1 ? (
+                <div className="import-modal__header-number">1</div>
+              ) : (
+                <img alt="step" height="20px" src={Step} width="20px" />
+              )}
+              <div
+                className={
+                  step === 1 ? "text-primary" : "text-muted-foreground"
+                }
+              >
+                {i18n.t("importModal.uploadFile")}
+              </div>
+              <div className="h-px min-w-24 border border-border bg-secondary" />
+              {step <= 2 ? (
+                <div className="import-modal__header-number">2</div>
+              ) : (
+                <img alt="step" height="20px" src={Step} width="20px" />
+              )}
+              <div
+                className={
+                  step <= 2 ? "text-primary " : "text-muted-foreground"
+                }
+              >
+                {i18n.t("importModal.mapFields")}
+              </div>
+              <div className="h-px min-w-24 border border-border bg-secondary" />
+              {step <= 3 ? (
+                <div className="import-modal__header-number">3</div>
+              ) : (
+                <img alt="step" height="20px" src={Step} width="20px" />
+              )}
+              <div
+                className={
+                  step <= 3 ? "text-primary " : "text-muted-foreground"
+                }
+              >
+                {i18n.t("importModal.import")}
+              </div>
+            </div>
+            {step === 1 && firstStep()}
+            {step === 2 && secondStep()}
+            {step === 3 && thirdStep()}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default ImportModal;

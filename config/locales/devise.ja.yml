@@ -1,0 +1,66 @@
+---
+ja:
+  devise:
+    confirmations:
+      confirmed: お客様のメールアドレスは正常に確認されました。
+      new:
+        description: 確認リンクの有効期限が切れているか、無効です。新しいリンクをリクエストしてください。
+        remember_password: パスワードを覚えていますか？
+        resend: 確認メールを再送信
+        sign_in: サインイン
+        title: メールによる確認が必要です
+      send_instructions: 数分以内に、メールアドレスを確認する方法を記載したメールが届きます。
+      send_paranoid_instructions: お客様のメールアドレスが弊社のデータベースに登録されている場合、数分以内にメールアドレスの確認方法を記載したメールが届きます。
+    failure:
+      already_authenticated: 既にログイン済みです。
+      inactive: アカウントはまだ有効化されていません。
+      invalid: 無効な%{authentication_keys}またはパスワードです。
+      last_attempt: アカウントがロックされる前に、あと1回だけ試行できます。
+      locked: アカウントがロックされました。
+      not_found_in_database: 無効な%{authentication_keys}またはパスワードです。
+      timeout: セッションの有効期限が切れました。続行するには、再度ログインしてください。
+      unauthenticated: 続行するには、ログインまたは新規登録が必要です。
+      unconfirmed: 続行する前に、メールアドレスを確認する必要があります。
+    mailer:
+      confirmation_instructions:
+        subject: 確認手順
+      email_changed:
+        subject: メールアドレスが変更されました
+      password_change:
+        subject: Miruのパスワードリセットに成功しました！
+      reset_password_instructions:
+        subject: Miruのパスワードをリセット
+      unlock_instructions:
+        subject: ロック解除手順
+    omniauth_callbacks:
+      failure: "「%{reason}」のため、%{kind} から認証できませんでした。"
+      success: "%{kind}アカウントからの認証に成功しました。"
+    passwords:
+      no_token: パスワードリセットメールからアクセスしない限り、このページにはアクセスできません。パスワードリセットメールからアクセスする場合は、メールに記載されているURLを正しく入力してください。
+      send_instructions: 数分以内に、パスワードのリセット方法に関する手順を記載したメールが届きます。
+      send_paranoid_instructions: お客様のメールアドレスが弊社のデータベースに登録されている場合、数分以内にパスワード復旧リンクがお客様のメールアドレスに送信されます。
+      updated: パスワードの変更が完了しました。ログインしました。
+      updated_not_active: パスワードの変更が正常に完了しました。
+    registrations:
+      destroyed: さようなら！アカウントは正常にキャンセルされました。またのご利用をお待ちしております。
+      signed_up: ようこそ！登録が完了しました。
+      signed_up_but_inactive: 登録は完了しました。しかし、アカウントがまだ有効化されていないため、ログインできませんでした。
+      signed_up_but_locked: 登録は完了しました。しかし、お客様のアカウントがロックされているため、ログインできませんでした。
+      signed_up_but_unconfirmed: ''
+      update_needs_confirmation: アカウントの更新は完了しましたが、新しいメールアドレスの確認が必要です。メールをご確認いただき、確認リンクをクリックして新しいメールアドレスを認証してください。
+      updated: 変更は正常に保存されました
+      updated_but_not_signed_in: アカウントの更新は正常に完了しましたが、パスワードが変更されたため、再度ログインする必要があります。
+      user:
+        signed_up_but_Your access has been disabled: メールをご確認いただき、確認リンクをクリックしてメールアドレスをご確認ください。
+    sessions:
+      already_signed_out: 正常にログアウトしました。
+      signed_in: ログインに成功しました。
+      signed_out: 正常にログアウトしました。
+      warn_pwned: お客様のパスワードが既知のデータ漏洩事件で使用されていました。直ちにパスワードを変更してください。
+    unlocks:
+      new:
+        submit: ロック解除手順を再送信
+        title: ロック解除手順を再送信
+      send_instructions: 数分以内に、アカウントのロックを解除する方法を記載したメールが届きます。
+      send_paranoid_instructions: アカウントが存在する場合、数分以内にロック解除方法を記載したメールが届きます。
+      unlocked: アカウントのロック解除が完了しました。ログインして続行してください。
