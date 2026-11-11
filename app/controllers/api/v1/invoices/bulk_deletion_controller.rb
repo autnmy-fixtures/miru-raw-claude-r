@@ -5,7 +5,8 @@ class Api::V1::Invoices::BulkDeletionController < Api::V1::ApplicationController
     authorize :create, policy_class: Invoices::BulkDeletionPolicy
 
     invoices = current_company.invoices.where(id: params[:invoices_ids])
-    undeletable_invoice_ids = invoices.reject(&:destroy).map(&:id)
+    writes = Timekeeping::InvoiceWrites.new
+    undeletable_invoice_ids = invoices.reject { |invoice| writes.destroy(invoice) }.map(&:id)
 
     if undeletable_invoice_ids.any?
       render json: {

@@ -185,8 +185,11 @@ RSpec.describe Invoice, type: :model do
 
   describe "callbacks" do
     it { is_expected.to callback(:set_external_view_key).before(:validation).on(:create) }
-    it { is_expected.to callback(:lock_timesheet_entries).after(:save).if(:draft?) }
-    it { is_expected.to callback(:unlock_timesheet_entries).after(:discard).if(:draft?) }
+    # Today's lock callbacks decide reservations only under the legacy owner
+    # (docs/architecture/timekeeping-soa.md §3.1); otherwise the invoice
+    # reservation boundary does.
+    it { is_expected.to callback(:lock_timesheet_entries).after(:save).if(:draft_with_callback_reservations?) }
+    it { is_expected.to callback(:unlock_timesheet_entries).after(:discard).if(:draft_with_callback_reservations?) }
   end
 
   describe ".client_name" do

@@ -76,7 +76,7 @@ class InvoiceLineItem < ApplicationRecord
     end
 
     def unlock_timesheet_entries
-      return unless invoice.draft?
+      return unless invoice.draft? && Timekeeping::Ownership.reservations_by_callbacks?
 
       entries = TimesheetEntry.where(id: associated_timesheet_entry_ids)
       Timekeeping::Gateway.call(Timekeeping::Gateway::SetLocked.new(entries:, locked: false))

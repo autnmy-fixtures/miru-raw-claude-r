@@ -10,7 +10,23 @@ module ErrorHandler
     rescue_from ActiveRecord::RecordInvalid, with: :record_invalid
     rescue_from Pagy::VariableError, with: :invalid_param_value
     rescue_from Timekeeping::Ownership::Moving, with: :ownership_moving
+    rescue_from Timekeeping::InvoiceBoundary::Failed, with: :invoice_reservation_failed
+    rescue_from Timekeeping::InvoiceOperation::Busy, with: :invoice_operation_busy
   end
+
+  # How an invoice write that the reservation boundary failed is answered
+  # (docs/architecture/timekeeping-soa.md §9.3): a refused prepare (F1, L8) is
+  # today's 422 shape with the refused entry named; a write that collided
+  # with another operation of the same invoice is a retryable 409; any other
+  # retryable failure, Timekeeping down included, is a retryable 503, and any
+  # other failure a 422.
+  INVOICE_RESERVATION_STATUS = {
+    reservation_refused: 422,
+    operation_unresolved: 409,
+    desired_set_changed: 409,
+    unreconciled: 409
+  }.freeze
+  INVOICE_RESERVATION_MESSAGE = { 409 => "busy", 503 => "unavailable" }.freeze
 
   private
 
@@ -71,6 +87,24 @@ module ErrorHandler
         format.json { render json: { errors: message }, status: 503 }
         format.html { render plain: message, status: 503 }
       end
+    end
+
+    def invoice_reservation_failed(exception)
+      status = INVOICE_RESERVATION_STATUS.fetch(exception.reason) { exception.retryable ? 503 : 422 }
+      refusal = exception.refused.first
+      message =
+        if refusal
+          I18n.t(refusal.reason, scope: "invoices.reservation.refused", entry_id: refusal.entry_id)
+        else
+          I18n.t(INVOICE_RESERVATION_MESSAGE.fetch(status, "failed"), scope: "invoices.reservation")
+        end
+
+      render json: { errors: message }, status:
+    end
+
+    # Another operation of the same invoice is still pending (§9.1).
+    def invoice_operation_busy(_exception)
+      render json: { errors: I18n.t("invoices.reservation.busy") }, status: 409
     end
 
     def invalid_param_value(exception)

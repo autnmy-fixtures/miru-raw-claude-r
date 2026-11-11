@@ -36,6 +36,16 @@ class Timekeeping::Ownership < ApplicationRecord
     current.handoff_begun?
   end
 
+  # Whether today's invoice lock callbacks still decide an invoice's
+  # reservations (§3.1: `legacy` reservations go to today's callbacks). Under
+  # any other owner they stand down, and the invoice reservation boundary
+  # (Timekeeping::InvoiceWrites) is the only way an invoice changes them.
+  # Read inside a billing write, it sees the record that write's fence
+  # admitted under FOR SHARE.
+  def self.reservations_by_callbacks?
+    current.owner_legacy?
+  end
+
   # Admission for one write (§10.1): the record read under FOR SHARE, which
   # the caller's transaction then holds until it commits or rolls back.
   # Raising the generation takes the row exclusively, so it waits for every
