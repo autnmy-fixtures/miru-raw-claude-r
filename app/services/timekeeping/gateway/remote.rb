@@ -3,12 +3,13 @@
 # The `timekeeping` owner of the gateway (docs/architecture/timekeeping-soa.md
 # §3.1): entry writes go to Timekeeping's entry API (§5.2). So far it forwards
 # the single-entry commands of W1 web and mobile, W3 CLI (and so W3a MCP) and
-# W4 agent, W2's bulk move and bulk discard, and W6's agent detach. The
-# gateway refuses every other command under this owner.
+# W4 agent, W2's bulk move and bulk discard, W5's import batches, and W6's
+# agent detach. The gateway refuses every other command under this owner.
 #
 # Each command becomes one request: the tenant it runs in, the project it
 # names, the agent acting, if any, and the writer. The interpreter adds the
-# caller's claims (§6.1), the admitted generation and one Idempotency-Key;
+# caller's claims (§6.1), the admitted generation and one Idempotency-Key,
+# fresh for each command unless the request names its own;
 # the request answers what Timekeeping wrote as read-only TimesheetEntry
 # records, so the controller renders them with today's code and public JSON
 # does not change. Nothing is written to timesheet_entries here: it is the
@@ -23,8 +24,12 @@ module Timekeeping::Gateway::Remote
   gateway = Timekeeping::Gateway
 
   # What one command asks of the entry API. `forward` makes the call and
-  # answers the command's result.
-  Request = Data.define(:company, :project, :agent, :writer, :forward)
+  # answers the command's result. The Idempotency-Key is shared by the
+  # retries of this one command (§9.4); a command that is idempotent by its
+  # own name, such as an import batch, names it.
+  Request = Data.define(:company, :project, :agent, :writer, :forward, :idempotency_key) do
+    def initialize(idempotency_key: SecureRandom.uuid, **) = super
+  end
 
   # The legacy owner sets the command's project and user after the writer's
   # attributes on create, and the project before them on update; the bodies
@@ -32,7 +37,10 @@ module Timekeeping::Gateway::Remote
   # what the owner's rules reject and still answers it (A9). W6 runs in the
   # agent's company, the only check Timekeeping makes for it (§6.2), and
   # answers the ids it detached; the agent row is deleted only after that
-  # answer, by the destroy that sent it (§3.4).
+  # answer, by the destroy that sent it (§3.4). W5 runs in the importing
+  # company as the import writer, names no one project (each row names its
+  # own), and is idempotent by import_id:batch_no (§3.4); a billed row
+  # travels billed, and the owner applies today's create-then-mark (§1.3).
   REQUESTS = {
     gateway::CreateEntry => ->(command) {
       entry = entry_attributes(command.attributes).compact
@@ -72,6 +80,17 @@ module Timekeeping::Gateway::Remote
         company: command.agent.company, project: nil, agent: nil, writer: "agent_destroy",
         forward: ->(client, write) { client.detach_agent(command.agent.id, write:) }
       )
+    },
+    gateway::ImportBatch => ->(command) {
+      rows = command.rows.map do |row|
+        entry_attributes(row.except(:project, :user)).compact
+          .merge("project_id" => row.fetch(:project).id, "user_id" => row.fetch(:user).id)
+      end
+      Request.new(
+        company: command.company, project: nil, agent: nil, writer: "import",
+        idempotency_key: "#{command.import_id}:#{command.batch_no}",
+        forward: ->(client, write) { import_result(client.import_batch(command.import_id, command.batch_no, rows, write:)) }
+      )
     }
   }.freeze
 
@@ -87,7 +106,7 @@ module Timekeeping::Gateway::Remote
   def self.call(command, ownership)
     request = REQUESTS.fetch(command.class).call(command)
     write = Timekeeping::EntryClient::Write.new(
-      claims: claims(request), generation: ownership.generation, idempotency_key: SecureRandom.uuid
+      claims: claims(request), generation: ownership.generation, idempotency_key: request.idempotency_key
     )
     request.forward.call(Timekeeping::EntryClient.new, write)
   rescue Timekeeping::EntryClient::Invalid => error
@@ -117,6 +136,15 @@ module Timekeeping::Gateway::Remote
   end
   private_class_method :claims
 
+  # What the owner wrote of one import batch, with each rejected row's model
+  # errors as today's message for it: every full message, as one sentence.
+  def self.import_result(answer)
+    row_errors = answer.fetch("failed_rows").sort_by { |row| row.fetch("index") }
+      .to_h { |row| [row.fetch("index"), full_messages(row.fetch("errors")).to_sentence] }
+    Timekeeping::Gateway::ImportBatch::Result.new(created_ids: answer.fetch("created_ids"), row_errors:)
+  end
+  private_class_method :import_result
+
   # The owner's entry, for rendering only: never saved.
   def self.record(entry)
     TimesheetEntry.new(entry.except("company_id")).tap(&:readonly!)
@@ -133,9 +161,15 @@ module Timekeeping::Gateway::Remote
   # Today's message for a model error is its first full message; any other
   # problem says what it is.
   def self.message(problem)
-    errors = ActiveModel::Errors.new(TimesheetEntry.new)
-    problem.errors.each { |attribute, messages| messages.each { |text| errors.add(attribute, text) } }
-    errors.full_messages.first || problem.detail.presence || problem.type.tr("-", " ").capitalize
+    full_messages(problem.errors).first || problem.detail.presence || problem.type.tr("-", " ").capitalize
   end
   private_class_method :message
+
+  # The model's full messages for errors the owner answered by attribute.
+  def self.full_messages(errors_by_attribute)
+    errors = ActiveModel::Errors.new(TimesheetEntry.new)
+    errors_by_attribute.each { |attribute, messages| messages.each { |text| errors.add(attribute, text) } }
+    errors.full_messages
+  end
+  private_class_method :full_messages
 end

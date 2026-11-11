@@ -10,10 +10,10 @@
 # company (§6.1), which scopes it to that tenant (§6.3); who may select
 # candidates was already decided here, by InvoiceLineItemPolicy.
 #
-# Entry writes, single and bulk, and agent detach, for the write gateway
-# (§3.1): each carries the caller's claims (§6.1), the admitted ownership
-# generation and one Idempotency-Key (§5.1). A request the contract cannot
-# carry raises Invalid and is never sent. A transport failure or a 5xx is
+# Entry writes, single and bulk, import batches and agent detach, for the
+# write gateway (§3.1): each carries the caller's claims (§6.1), the admitted
+# ownership generation and one Idempotency-Key (§5.1). A request the contract
+# cannot carry raises Invalid and is never sent. A transport failure or a 5xx is
 # retried at most twice with jitter, with the same key, so a retry after a
 # lost response replays the stored result (§9.4).
 #
@@ -74,6 +74,14 @@ class Timekeeping::EntryClient < Timekeeping::InternalApi
     return [] if ids.empty?
 
     mutate(:bulk_discard, { "ids" => ids }, write:).fetch("discarded_ids")
+  end
+
+  # W5 (§5.2, §3.4): one Harvest batch of at most 500 rows, which the owner
+  # writes in one transaction. The import id and batch number name it in the
+  # path, and its retries share one key. Answers the ids it created and the
+  # rows it rejected, by index in the batch, with the model's errors.
+  def import_batch(import_id, batch_no, rows, write:)
+    mutate(:import_batch, { "rows" => rows }, write:, import_id:, n: batch_no)
   end
 
   # W6 (§5.2): nulls agent_id on the token company's entries that name the

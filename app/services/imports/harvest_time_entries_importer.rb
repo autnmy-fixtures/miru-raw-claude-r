@@ -8,6 +8,9 @@ module Imports
   class HarvestTimeEntriesImporter
     class InvalidFileError < StandardError; end
 
+    # Rows per import batch: one transaction each, the most the owner takes
+    # (docs/architecture/timekeeping-soa.md §3.4).
+    BATCH_SIZE = 500
     REQUIRED_HEADERS = %w[date client project hours first\ name last\ name].freeze
     HEADER_CONVERTER = -> (header) { header.to_s.delete_prefix("\uFEFF").strip.downcase }
     DATE_FORMATS = {
@@ -74,7 +77,7 @@ module Imports
 
       # What the user is told. A Timekeeping handoff that closes admission
       # mid-import (docs/architecture/timekeeping-soa.md §10.1) stops it at a
-      # row boundary: earlier batches are kept, and a re-run skips them as
+      # batch boundary: earlier batches are kept, and a re-run skips them as
       # duplicates, so the failure says to retry rather than "unexpected".
       def failure_message(error)
         case error
@@ -398,19 +401,14 @@ module Imports
         create_clients_and_projects
         create_project_members
 
-        processed_rows = 0
-        @planned_rows.each_slice(500) do |rows|
-          ActiveRecord::Base.transaction do
-            rows.each do |row|
-              begin
-                ActiveRecord::Base.transaction(requires_new: true) { create_entry(row) }
-              rescue ActiveRecord::RecordInvalid => error
-                add_row_error(row, error.record.errors.full_messages.to_sentence)
-              end
-              processed_rows += 1
-              persist_progress if (processed_rows % 200).zero?
-            end
-          end
+        import_id = "#{data_import.id}-#{SecureRandom.uuid}"
+        @planned_rows.each_slice(BATCH_SIZE).with_index(1) do |rows, batch_no|
+          result = Timekeeping::Gateway.call(
+            Timekeeping::Gateway::ImportBatch.new(company:, import_id:, batch_no:, rows: rows.map { |row| entry_attributes(row) })
+          )
+          @imported_rows += result.created_ids.size
+          result.row_errors.each { |index, message| add_row_error(rows.fetch(index), message) }
+          persist_progress
         end
 
         @summary["entries_created"] = @imported_rows
@@ -467,25 +465,17 @@ module Imports
         end
       end
 
-      def create_entry(row)
-        billed = row[:bill_status] == "billed"
-        Timekeeping::Gateway.call(
-          Timekeeping::Gateway::ImportEntry.new(
-            company:,
-            billed:,
-            attributes: {
-              project: row[:project_plan][:record],
-              user: row[:user],
-              duration: row[:duration],
-              work_date: row[:work_date],
-              note: row[:note],
-              bill_status: billed ? "unbilled" : row[:bill_status],
-              source: "import",
-              source_metadata: { tool: "harvest" }
-            }
-          )
-        )
-        @imported_rows += 1
+      def entry_attributes(row)
+        {
+          project: row[:project_plan][:record],
+          user: row[:user],
+          duration: row[:duration],
+          work_date: row[:work_date],
+          note: row[:note],
+          bill_status: row[:bill_status],
+          source: "import",
+          source_metadata: { tool: "harvest" }
+        }
       end
 
       def persist_progress

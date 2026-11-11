@@ -305,6 +305,23 @@ RSpec.describe Imports::HarvestTimeEntriesImporter do
     ])
   end
 
+  # A row the model rejects fails alone, after the plan: its batch keeps the
+  # rows around it, and the row error carries the model's full messages.
+  it "records a row the model rejects and keeps the rest of its batch" do
+    attach_csv_contents(data_import, <<~CSV)
+      Date,Client,Project,Hours,First Name,Last Name,Notes
+      2026-01-01,Acme LLC,Website,1,Paul,Connors,Before
+      2026-01-02,Acme LLC,Website,100001,Paul,Connors,Too long
+      2026-01-03,Acme LLC,Website,2,Paul,Connors,After
+    CSV
+
+    described_class.new(data_import).process
+
+    expect(data_import.reload).to have_attributes(status: "completed", imported_rows: 2, failed_rows: 1)
+    expect(data_import.row_errors).to eq([{ "row" => 3, "message" => "Duration must be less than or equal to 6000000" }])
+    expect(company.timesheet_entries.kept.order(:work_date).pluck(:note, :duration)).to eq([["Before", 60.0], ["After", 120.0]])
+  end
+
   it "skips entries already imported without de-duplicating rows within the file" do
     described_class.new(data_import).process
     second_import = create(:data_import, company:, user: actor)

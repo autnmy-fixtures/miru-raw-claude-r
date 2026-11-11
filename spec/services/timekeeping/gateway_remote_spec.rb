@@ -324,10 +324,71 @@ RSpec.describe Timekeeping::Gateway::Remote, type: :model do
     end
   end
 
+  describe "ImportBatch (W5)" do
+    let(:batch_path) { %r{\A#{Regexp.escape(TimekeepingContracts::FakeTimekeeping::URL)}/internal/v1/imports/41-run/batches/2\z}o }
+
+    before { Current.user = nil }
+
+    def row(**attributes)
+      {
+        project: tenant.project, user: tenant.employee, duration: 75, work_date: Date.new(2026, 1, 2),
+        note: "Imported", bill_status: "unbilled", source: "import", source_metadata: { tool: "harvest" }, **attributes
+      }
+    end
+
+    def batch(*rows) = gateway::ImportBatch.new(company: tenant.company, import_id: "41-run", batch_no: 2, rows:)
+
+    it "writes the batch in the importing company as the system import writer, and answers what it created" do
+      result = forwarded { batch(row, row(note: "Invoiced", bill_status: "billed")) }
+
+      expect(result).to eq(gateway::ImportBatch::Result.new(created_ids: [1, 2], row_errors: {}))
+      expect(fake.entry(1)).to include(
+        "company_id" => tenant.company.id, "project_id" => tenant.project.id, "user_id" => tenant.employee.id,
+        "duration" => 75.0, "work_date" => "2026-01-02", "note" => "Imported", "bill_status" => "unbilled",
+        "source" => "import", "source_metadata" => { "tool" => "harvest" }, "agent_id" => nil
+      )
+      expect(fake.entry(2)).to include("note" => "Invoiced", "bill_status" => "billed")
+      expect(fake.calls.sole.claims).to include(
+        "sub" => "system", "role" => nil, "writer" => "import", "company_id" => tenant.company.id, "project" => nil
+      )
+    end
+
+    it "is idempotent by import_id:batch_no, so a retry after a lost response replays the batch (§3.4, §9.4)" do
+      fake.lose_next_response(:import_batch)
+
+      result = forwarded { batch(row) }
+
+      expect(result.created_ids).to eq([1])
+      expect(fake.calls.map(&:operation)).to eq(%i[import_batch import_batch])
+      expect(fake.entry(2)).to be_nil
+      expect(WebMock).to have_requested(:post, batch_path).with(headers: { "Idempotency-Key" => "41-run:2" }).twice
+    end
+
+    it "answers each row the owner rejected with today's message, by its index in the batch, in row order" do
+      failed_rows = [
+        { "index" => 2, "errors" => { "base" => ["Project is not billable"] } },
+        { "index" => 0, "errors" => { "duration" => ["must be less than or equal to 6000000", "is invalid"] } }
+      ]
+      WebMock::API.stub_request(:post, batch_path).to_return(
+        status: 200, headers: { "Content-Type" => "application/json" },
+        body: JSON.generate("created_ids" => [9], "failed_rows" => failed_rows)
+      )
+
+      result = forwarded { batch(row(duration: 7_000_000), row, row) }
+
+      expect(result.created_ids).to eq([9])
+      expect(result.row_errors.to_a).to eq([
+        [0, "Duration must be less than or equal to 6000000 and Duration is invalid"],
+        [2, "Project is not billable"]
+      ])
+    end
+  end
+
   it "refuses the commands it does not forward yet, and writes nothing" do
+    entry = unbilled_entry(tenant)
     writes = timesheet_entry_writes do
-      expect { gateway.call(gateway::ImportEntry.new(company: tenant.company, attributes: {}, billed: false)) }
-        .to raise_error(gateway::OwnerUnavailable, /owner timekeeping .* ImportEntry refused/)
+      expect { gateway.call(gateway::MarkBilled.new(entries: TimesheetEntry.where(id: entry.id))) }
+        .to raise_error(gateway::OwnerUnavailable, /owner timekeeping .* MarkBilled refused/)
     end
 
     expect(writes).to eq([])
