@@ -52,6 +52,16 @@ class Api::V1::UsersController < Api::V1::BaseController
     target_user = User.find(params[:id])
     authorize target_user, policy_class: SuperAdminUserPolicy
 
+    # Once a Timekeeping handoff has begun, timesheet_entries is a lagging
+    # projection, so its foreign key to users no longer protects an unprojected
+    # entry. The delete is refused before any audit row or dependent effect
+    # (docs/architecture/timekeeping-soa.md §10.1).
+    if Timekeeping::Ownership.handoff_begun?
+      render json: { errors: I18n.t("user.super_admin_delete.timekeeping_handoff") }, status: 422
+
+      return
+    end
+
     sole_owner_companies = sole_owner_companies_for(target_user)
     if sole_owner_companies.exists?
       render json: {

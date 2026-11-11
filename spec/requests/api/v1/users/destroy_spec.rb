@@ -93,6 +93,46 @@ RSpec.describe "Api::V1::Users#destroy", type: :request do
     end
   end
 
+  # docs/architecture/timekeeping-soa.md §10.1: once a handoff has begun,
+  # timesheet_entries is a lagging projection and its key to users no longer
+  # protects an entry that is not yet projected, so the delete is refused.
+  context "when the Timekeeping ownership record" do
+    let(:agent) { create(:agent, company:, user: target_user) }
+
+    before do
+      create(:employment, company:, user: target_user)
+      target_user.add_role :employee, company
+      agent
+      sign_in super_admin
+    end
+
+    it "is still in the initial legacy state, deletes as today" do
+      set_timekeeping_ownership!(TimekeepingOwnershipStates::BEFORE_FIRST_HANDOFF)
+
+      expect { delete_user(target_user) }.to change(User, :count).by(-1)
+
+      expect(response).to have_http_status(:ok)
+      expect(Agent.exists?(agent.id)).to be(false)
+    end
+
+    TimekeepingOwnershipStates::AFTER_HANDOFF_BEGUN.each do |name, attributes|
+      it "says #{name}, refuses before the audit row and any dependent effect" do
+        set_timekeeping_ownership!(attributes)
+
+        expect {
+          delete_user(target_user)
+        }.not_to change { [User.count, Agent.count, Audited::Audit.where(action: "super_admin_delete").count] }
+
+        aggregate_failures do
+          expect(response).to have_http_status(:unprocessable_content)
+          expect(json_response["errors"]).to eq(I18n.t("user.super_admin_delete.timekeeping_handoff"))
+          expect(target_user.reload).to be_persisted
+          expect(agent.reload.user_id).to eq(target_user.id)
+        end
+      end
+    end
+  end
+
   context "when the target user is the sole company owner" do
     before do
       create(:employment, company:, user: target_user)
