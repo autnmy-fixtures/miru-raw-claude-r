@@ -1,0 +1,221 @@
+# frozen_string_literal: true
+
+require "rails_helper"
+
+# Entry writes forwarded to Timekeeping (docs/architecture/timekeeping-soa.md
+# §3.1, §5.2, §6.1), through the real entry points of W1 web and mobile, W3
+# CLI, W3a MCP and W4 agent, against the consumer-side fake of Timekeeping.
+# Under `timekeeping` each write reaches the owner with its writer's claims,
+# answers today's public JSON from the owner's entry, and writes nothing to
+# timesheet_entries, which is the projection with one writer (§3.2, §12.2).
+# Tenant B's entries are never touched (§6.3).
+RSpec.describe "Timekeeping entry forwarding", type: :request do
+  include_context "with two Timekeeping tenants"
+  include TimekeepingSingleWriterGuard
+
+  let!(:fake) { TimekeepingContracts::FakeTimekeeping.new(generation: 1).install! }
+  let(:employee) { tenant_a.employee }
+  let(:cli_token) { CliSession.issue_for(user: employee, company: tenant_a.company).last }
+
+  around do |example|
+    config = Rails.configuration.x.timekeeping
+    url, key = config.url, config.token_key
+    config.url, config.token_key = TimekeepingContracts::FakeTimekeeping::URL, TimekeepingContracts::TEST_TOKEN_KEY
+    example.run
+  ensure
+    config.url, config.token_key = url, key
+  end
+
+  after { expect(fake.violations).to be_empty }
+
+  def cut_over!
+    set_timekeeping_ownership!(TimekeepingOwnershipStates::AFTER_HANDOFF_BEGUN.fetch("cut over to Timekeeping"))
+  end
+
+  # An entry in the projection and in Timekeeping under the same id, as the
+  # first cutover leaves it (§10.3).
+  def owned_entry(tenant, **attributes)
+    unbilled_entry(tenant, **attributes).tap do |entry|
+      fake.seed_entry(
+        company_id: tenant.company.id, id: entry.id, project_id: entry.project_id, user_id: entry.user_id,
+        duration: entry.duration, work_date: entry.work_date.iso8601, note: entry.note
+      )
+    end
+  end
+
+  # Runs the writer and asserts the projection was not written.
+  def without_projection_writes(&writer)
+    writes = timesheet_entry_writes(&writer)
+    expect(writes).to eq([]), "a forwarded write wrote timesheet_entries"
+  end
+
+  def entry_params(**overrides)
+    { duration: 90.7, work_date: "2026-11-02", note: "Forwarded", bill_status: "unbilled", **overrides }
+  end
+
+  def cli_params(**overrides)
+    { timesheet_entry: { project_id: tenant_a.project.id, duration_minutes: 30, work_date: "2026-11-02", **overrides } }
+  end
+
+  def writers = fake.calls.map { |call| call.claims.fetch("writer") }
+
+  # Today's JSON for the owner's entry: the snippet the controllers render.
+  def expect_rendered(entry_json, owned)
+    expect(entry_json).to include(
+      "id" => owned["id"], "project_id" => owned["project_id"], "project" => tenant_a.project.name,
+      "client" => tenant_a.client.name, "duration" => owned["duration"], "note" => owned["note"],
+      "work_date" => owned["work_date"], "bill_status" => owned["bill_status"], "team_member" => employee.full_name,
+      "type" => "timesheet"
+    )
+  end
+
+  describe "under the timekeeping owner" do
+    before { cut_over! }
+
+    describe "W1 web" do
+      before { sign_in employee }
+
+      it "creates in Timekeeping, renders the owner's entry as today, and leaves the projection to the relay" do
+        without_projection_writes do
+          send_request :post, api_v1_timesheet_entry_index_path,
+            params: { project_id: tenant_a.project.id, timesheet_entry: entry_params }, headers: auth_headers(employee)
+        end
+
+        expect(response).to have_http_status(:ok)
+        expect(json_response["notice"]).to eq(I18n.t("timesheet_entry.create.message"))
+        owned = fake.entry(json_response.dig("entry", "id"))
+        expect(owned).to include("company_id" => tenant_a.company.id, "user_id" => employee.id, "duration" => 90.7, "note" => "Forwarded")
+        expect_rendered(json_response["entry"], owned)
+        expect(TimesheetEntry.where(id: owned["id"])).to be_empty
+        expect(fake.calls.sole.claims).to include(
+          "sub" => "user:#{employee.id}", "company_id" => tenant_a.company.id, "role" => "employee", "writer" => "web",
+          "project" => include("id" => tenant_a.project.id, "company_id" => tenant_a.company.id)
+        )
+      end
+
+      it "updates and discards through the owner" do
+        entry = owned_entry(tenant_a, note: "Before")
+
+        without_projection_writes do
+          send_request :patch, api_v1_timesheet_entry_path(entry.id),
+            params: { project_id: tenant_a.project.id, timesheet_entry: entry_params(note: "After") }, headers: auth_headers(employee)
+          expect(response).to have_http_status(:ok)
+          expect_rendered(json_response["entry"], fake.entry(entry.id))
+          expect(json_response.dig("entry", "note")).to eq("After")
+
+          send_request :delete, api_v1_timesheet_entry_path(entry.id), headers: auth_headers(employee)
+          expect(response).to have_http_status(:ok)
+        end
+
+        expect(fake.entry(entry.id)).to include("note" => "After", "discarded_at" => be_present, "version" => 3)
+        expect(entry.reload).to have_attributes(note: "Before", discarded_at: nil)
+        expect(writers).to eq(%w[web web])
+      end
+
+      it "answers what the owner refuses as today's error JSON" do
+        fake.fail_next(:create_entry, status: 422, slug: "validation-failed", retryable: false,
+          errors: { "work_date" => ["can't be blank"] })
+
+        send_request :post, api_v1_timesheet_entry_index_path,
+          params: { project_id: tenant_a.project.id, timesheet_entry: entry_params }, headers: auth_headers(employee)
+
+        expect(response).to have_http_status(:unprocessable_entity)
+        expect(json_response["errors"]).to eq("Work date can't be blank")
+      end
+
+      it "answers a retryable 503 when Timekeeping cannot be reached" do
+        WebMock::API.stub_request(:post, %r{/internal/v1/entries\z}).to_raise(Faraday::ConnectionFailed.new("refused"))
+        allow(Timekeeping::EntryClient).to receive(:new).and_wrap_original { |original| original.call(backoff: ->(_) { }) }
+
+        send_request :post, api_v1_timesheet_entry_index_path,
+          params: { project_id: tenant_a.project.id, timesheet_entry: entry_params }, headers: auth_headers(employee)
+
+        expect(response).to have_http_status(:service_unavailable)
+        expect(json_response["errors"]).to eq(I18n.t("timesheet_entry.unavailable"))
+      end
+
+      it "never reaches tenant B's entry (§6.3)" do
+        foreign = owned_entry(tenant_b)
+
+        send_request :delete, api_v1_timesheet_entry_path(foreign.id), headers: auth_headers(employee)
+
+        expect(response).to have_http_status(:not_found)
+        expect(fake.calls).to be_empty
+        expect(fake.entry(foreign.id)["discarded_at"]).to be_nil
+      end
+    end
+
+    it "W1 mobile creates as the mobile writer" do
+      sign_in employee
+
+      without_projection_writes do
+        post "/api/v1/mobile/timesheet_entries",
+          params: { project_id: tenant_a.project.id, timesheet_entry: entry_params }, headers: auth_headers(employee)
+      end
+
+      expect(response).to have_http_status(:ok)
+      expect_rendered(json_response["entry"], fake.entry(json_response.dig("entry", "id")))
+      expect(writers).to eq(%w[mobile])
+    end
+
+    it "W3 CLI creates, updates and discards as the CLI writer" do
+      entry = owned_entry(tenant_a)
+
+      without_projection_writes do
+        send_request :post, api_v1_cli_timesheet_entries_path, params: cli_params, headers: cli_auth_headers(cli_token)
+        expect(response).to have_http_status(:ok)
+        expect(json_response["entry"]).to include("source" => "cli", "duration" => 30.0)
+
+        send_request :patch, api_v1_cli_timesheet_entry_path(entry.id), params: cli_params(note: "edited"), headers: cli_auth_headers(cli_token)
+        expect(response).to have_http_status(:ok)
+        expect(json_response.dig("entry", "note")).to eq("edited")
+
+        send_request :delete, api_v1_cli_timesheet_entry_path(entry.id), headers: cli_auth_headers(cli_token)
+        expect(response).to have_http_status(:ok)
+      end
+
+      expect(writers).to eq(%w[cli cli cli])
+    end
+
+    it "W3a MCP creates in-process through W3, as the MCP writer" do
+      result = nil
+      without_projection_writes do
+        result = MCP::Miru::Tools::TimeCreateTool.call(
+          project_id: tenant_a.project.id, duration_minutes: 30, work_date: "2026-11-02",
+          server_context: { authorization: cli_token }
+        )
+      end
+
+      expect(result.error?).to be(false)
+      expect(writers).to eq(%w[mcp])
+      expect(fake.calls.sole.claims).to include("sub" => "user:#{employee.id}", "actor" => { "type" => "user", "agent_id" => nil })
+    end
+
+    it "W4 agent creates as the agent, which Timekeeping sets on the entry" do
+      agent = create(:agent, company: tenant_a.company, user: employee, default_project: tenant_a.project)
+      agent_token = AgentKey.issue_for(agent:, name: "Forwarding", created_by: tenant_a.admin).last
+
+      without_projection_writes do
+        send_request :post, api_v1_agent_timesheet_entries_path,
+          params: { timesheet_entry: { duration_minutes: 30, work_date: "2026-11-02", note: "Agent run" } },
+          headers: { "Authorization" => "Bearer #{agent_token}" }
+      end
+
+      expect(response).to have_http_status(:ok)
+      expect(json_response["entry"]).to include("agent_id" => agent.id, "agent_name" => agent.name, "source" => "automation")
+      expect(fake.entry(json_response.dig("entry", "id"))).to include("agent_id" => agent.id, "user_id" => employee.id)
+      expect(fake.calls.sole.claims).to include("writer" => "agent", "actor" => { "type" => "agent", "agent_id" => agent.id })
+    end
+  end
+
+  it "makes no call under the legacy owner, which still writes the table" do
+    sign_in employee
+
+    send_request :post, api_v1_timesheet_entry_index_path,
+      params: { project_id: tenant_a.project.id, timesheet_entry: entry_params }, headers: auth_headers(employee)
+
+    expect(response).to have_http_status(:ok)
+    expect(TimesheetEntry.find(json_response.dig("entry", "id")).note).to eq("Forwarded")
+    expect(fake.calls).to be_empty
+  end
+end

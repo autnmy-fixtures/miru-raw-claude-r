@@ -34,7 +34,10 @@ module Timekeeping::Gateway::Legacy
     gateway::MarkBilled => ->(command) { command.entries.update!(bill_status: :billed) }
   }.freeze
 
-  def self.call(command)
+  def self.handles?(command) = HANDLERS.key?(command.class)
+
+  # Today's code reads no ownership: the fence already admitted the command.
+  def self.call(command, _ownership)
     HANDLERS.fetch(command.class).call(command)
   end
 end

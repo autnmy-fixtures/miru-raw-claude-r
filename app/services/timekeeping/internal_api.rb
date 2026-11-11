@@ -14,14 +14,22 @@ class Timekeeping::InternalApi
   # Timekeeping is not configured here: no URL or no shared token key.
   class NotConfigured < Error; end
 
-  # Timekeeping answered application/problem+json (§5.1).
+  # Timekeeping answered application/problem+json (§5.1), read from the body
+  # the contract's problem definition allows.
   class Problem < Error
-    attr_reader :status, :type, :retryable, :refused
+    attr_reader :status, :type, :retryable, :detail, :refused, :errors
 
-    # `refused` lists, for reservation-refused only, every entry prepare
-    # refused and why (F1, L8), as the shared rule's Refusal.
-    def initialize(status:, type:, retryable:, detail: nil, refused: [])
-      @status, @type, @retryable, @refused = status, type, retryable, refused
+    # `type` is the stable slug, without the problem base URI. `refused`
+    # lists, for reservation-refused only, every entry prepare refused and why
+    # (F1, L8), as the shared rule's Refusal. `errors` is, for
+    # validation-failed only, the model's errors by attribute.
+    def initialize(body)
+      @status, @retryable, @detail = body.fetch("status"), body.fetch("retryable"), body["detail"]
+      @type = body.fetch("type").delete_prefix(Timekeeping::Contracts::PROBLEM_BASE)
+      @errors = body.fetch("errors", {})
+      @refused = body.fetch("refused", []).map do |refusal|
+        TimekeepingReservations::Refusal.new(entry_id: refusal.fetch("entry_id"), reason: refusal.fetch("reason").to_sym)
+      end
       super(["#{status} #{type}", detail].compact.join(": "))
     end
   end
@@ -47,11 +55,14 @@ class Timekeeping::InternalApi
     # The headers every call carries (§5.1): a system-actor token for the
     # company (§6.1) and the request id it names.
     def identity_headers(company:, writer:)
-      request_id = SecureRandom.uuid
-      claims = Timekeeping::UserToken.system_claims(company:, writer:, request_id:)
+      token_headers(Timekeeping::UserToken.system_claims(company:, writer:, request_id: SecureRandom.uuid))
+    end
+
+    # The token for the claims, and the request id they name.
+    def token_headers(claims)
       {
         "Authorization" => "Bearer #{Timekeeping::UserToken.sign(claims, key: @token_key, now: @clock.call)}",
-        "X-Request-Id" => request_id
+        "X-Request-Id" => claims.fetch("request_id")
       }
     end
 
@@ -62,7 +73,7 @@ class Timekeeping::InternalApi
       body = parse(response)
       expected = operation.dig("responses", response.status.to_s)
       return body if expected && conforms?(expected, body)
-      raise problem(body) if response.status >= 400 && conforms?(PROBLEM, body)
+      raise Problem.new(body) if response.status >= 400 && conforms?(PROBLEM, body)
 
       raise ContractViolation, "HTTP #{response.status} is not an answer of the #{self.class::CONTRACT} contract: #{response.body.to_s.truncate(200)}"
     end
@@ -75,14 +86,6 @@ class Timekeeping::InternalApi
 
     def conforms?(pointer, body)
       body.is_a?(Hash) && Timekeeping::Contracts.errors(self.class::CONTRACT, pointer, body).empty?
-    end
-
-    def problem(body)
-      Problem.new(
-        status: body.fetch("status"), type: body.fetch("type").delete_prefix(Timekeeping::Contracts::PROBLEM_BASE),
-        retryable: body.fetch("retryable"), detail: body["detail"],
-        refused: body.fetch("refused", []).map { |refusal| TimekeepingReservations::Refusal.new(entry_id: refusal.fetch("entry_id"), reason: refusal.fetch("reason").to_sym) }
-      )
     end
 
     def http

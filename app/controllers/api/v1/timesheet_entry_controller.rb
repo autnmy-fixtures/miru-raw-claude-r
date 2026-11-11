@@ -29,7 +29,7 @@ class Api::V1::TimesheetEntryController < Api::V1::ApplicationController
   def create
     authorize TimesheetEntry
     timesheet_entry = Timekeeping::Gateway.call(
-      Timekeeping::Gateway::CreateEntry.new(project: current_project, attributes: timesheet_entry_params, user: timesheet_entry_user)
+      Timekeeping::Gateway::CreateEntry.new(project: current_project, attributes: timesheet_entry_params, user: timesheet_entry_user, writer:)
     )
     render json: {
       notice: I18n.t("timesheet_entry.create.message"),
@@ -39,20 +39,26 @@ class Api::V1::TimesheetEntryController < Api::V1::ApplicationController
 
   def update
     authorize current_timesheet_entry
-    Timekeeping::Gateway.call(
-      Timekeeping::Gateway::UpdateEntry.new(entry: current_timesheet_entry, project: current_project, attributes: timesheet_entry_params)
+    timesheet_entry = Timekeeping::Gateway.call(
+      Timekeeping::Gateway::UpdateEntry.new(entry: current_timesheet_entry, project: current_project, attributes: timesheet_entry_params, writer:)
     )
-    render json: { notice: I18n.t("timesheet_entry.update.message"), entry: current_timesheet_entry.snippet },
+    render json: { notice: I18n.t("timesheet_entry.update.message"), entry: timesheet_entry.snippet },
       status: 200
   end
 
   def destroy
     authorize current_timesheet_entry
-    Timekeeping::Gateway.call(Timekeeping::Gateway::DiscardEntry.new(entry: current_timesheet_entry))
+    Timekeeping::Gateway.call(Timekeeping::Gateway::DiscardEntry.new(entry: current_timesheet_entry, writer:))
     render json: { notice: I18n.t("timesheet_entry.destroy.message") }
   end
 
   private
+
+    # This controller serves both W1 routes; the writer claim tells them
+    # apart (docs/architecture/timekeeping-soa.md §6.1).
+    def writer
+      request.path.start_with?("/api/v1/mobile/") ? "mobile" : "web"
+    end
 
     def selected_user_id
       return current_user.id unless current_user.has_role?(:owner, current_company) || current_user.has_role?(:admin, current_company)

@@ -5,7 +5,7 @@ class Api::V1::Cli::TimesheetEntriesController < Api::V1::Cli::BaseController
     authorize TimesheetEntry
 
     timesheet_entry = Timekeeping::Gateway.call(
-      Timekeeping::Gateway::CreateEntry.new(project:, user: current_user, attributes: create_attributes)
+      Timekeeping::Gateway::CreateEntry.new(project:, user: current_user, attributes: create_attributes, writer:)
     )
 
     render json: {
@@ -17,25 +17,32 @@ class Api::V1::Cli::TimesheetEntriesController < Api::V1::Cli::BaseController
   def update
     authorize current_timesheet_entry
 
-    Timekeeping::Gateway.call(
-      Timekeeping::Gateway::UpdateEntry.new(entry: current_timesheet_entry, project:, attributes: update_attributes)
+    timesheet_entry = Timekeeping::Gateway.call(
+      Timekeeping::Gateway::UpdateEntry.new(entry: current_timesheet_entry, project:, attributes: update_attributes, writer:)
     )
 
     render json: {
       notice: I18n.t("timesheet_entry.update.message"),
-      entry: current_timesheet_entry.snippet
+      entry: timesheet_entry.snippet
     }, status: 200
   end
 
   def destroy
     authorize current_timesheet_entry
 
-    Timekeeping::Gateway.call(Timekeeping::Gateway::DiscardEntry.new(entry: current_timesheet_entry))
+    Timekeeping::Gateway.call(Timekeeping::Gateway::DiscardEntry.new(entry: current_timesheet_entry, writer:))
 
     render json: { notice: I18n.t("timesheet_entry.destroy.message") }, status: 200
   end
 
   private
+
+    # MCP reaches this controller in-process (W3a, app/mcp/api_proxy.rb),
+    # and the writer claim tells it from the CLI
+    # (docs/architecture/timekeeping-soa.md §6.1).
+    def writer
+      request.env["miru.event_source"] == "mcp" ? "mcp" : "cli"
+    end
 
     def project
       @_project ||= ProjectPolicy::Scope.new(current_user, current_company).resolve.find(cli_timesheet_entry_params[:project_id])

@@ -92,6 +92,71 @@ RSpec.describe Timekeeping::EntryClient do
     end
   end
 
+  describe "entry writes (§5.1, §5.2, §9.4)" do
+    subject(:client) do
+      described_class.new(
+        url: TimekeepingContracts::FakeTimekeeping::URL, token_key: TimekeepingContracts::TEST_TOKEN_KEY,
+        backoff: ->(seconds) { pauses << seconds }
+      )
+    end
+
+    let(:pauses) { [] }
+    let(:claims) do
+      Timekeeping::UserToken.system_claims(company:, writer: "import", request_id: "req-7")
+        .merge("sub" => "user:3", "role" => "admin", "actor" => { "type" => "user", "agent_id" => nil }, "writer" => "web")
+    end
+    let(:write) { described_class::Write.new(claims:, generation: 1, idempotency_key: "key-1") }
+    let(:new_entry) { { "project_id" => 7, "user_id" => 3, "duration" => 90.7, "work_date" => "2026-11-02" } }
+
+    it "creates, updates and discards, answering the owner's entry with the caller's claims and generation" do
+      created = client.create_entry(new_entry, write:)
+      updated = client.update_entry(created["id"], { "note" => "Edited" }, write: write.with(idempotency_key: "key-2"))
+      discarded = client.discard_entry(created["id"], write: write.with(idempotency_key: "key-3"))
+
+      expect(created).to include("company_id" => company.id, "duration" => 90.7, "version" => 1)
+      expect(updated).to include("note" => "Edited", "version" => 2)
+      expect(discarded["discarded_at"]).to be_present
+      expect(fake.calls.map(&:operation)).to eq(%i[create_entry update_entry discard_entry])
+      expect(fake.calls.map(&:claims)).to all(include("sub" => "user:3", "writer" => "web", "request_id" => "req-7"))
+    end
+
+    it "retries a lost response with the same key, so the owner replays its stored result (§9.4)" do
+      fake.lose_next_response(:create_entry)
+
+      created = client.create_entry(new_entry, write:)
+
+      expect(fake.calls.map(&:operation)).to eq(%i[create_entry create_entry])
+      expect(fake.entry(created["id"])).to eq(created)
+      expect(fake.entry(created["id"] + 1)).to be_nil
+      expect(pauses.size).to eq(1)
+      expect(pauses).to all(be_between(0.05, 0.2))
+    end
+
+    it "makes at most three attempts, then raises Unavailable" do
+      WebMock::API.stub_request(:post, %r{/internal/v1/entries\z}).to_return(status: 503, body: "")
+
+      expect { client.create_entry(new_entry, write:) }.to raise_error(described_class::Unavailable, /create_entry: HTTP 503/)
+      expect(WebMock).to have_requested(:post, %r{/internal/v1/entries\z}).times(3)
+      expect(pauses.size).to eq(2)
+    end
+
+    it "does not retry a problem the owner answered" do
+      fake.fail_next(:update_entry, status: 422, slug: "validation-failed", retryable: false, errors: { "duration" => ["can't be blank"] })
+      entry = seed
+
+      expect { client.update_entry(entry["id"], { "note" => "x" }, write:) }.to raise_error(described_class::Problem) { |problem|
+        expect([problem.status, problem.type, problem.errors]).to eq([422, "validation-failed", { "duration" => ["can't be blank"] }])
+      }
+      expect(fake.calls.size).to eq(1)
+    end
+
+    it "never sends a request the contract cannot carry" do
+      expect { client.create_entry(new_entry.merge("duration" => nil), write:) }
+        .to raise_error(described_class::Invalid, %r{create_entry: .*/entry/duration})
+      expect(fake.calls).to be_empty
+    end
+  end
+
   it "is not configured without a URL or a token key" do
     expect { described_class.new(url: nil, token_key: "key") }.to raise_error(described_class::NotConfigured, /TIMEKEEPING_URL/)
     expect { described_class.new(url: "http://timekeeping.test", token_key: "") }.to raise_error(described_class::NotConfigured, /TIMEKEEPING_TOKEN_KEY/)

@@ -13,6 +13,7 @@ module ErrorHandler
     rescue_from Timekeeping::InvoiceBoundary::Failed, with: :invoice_reservation_failed
     rescue_from Timekeeping::InvoiceOperation::Busy, with: :invoice_operation_busy
     rescue_from Timekeeping::EntryClient::Unavailable, with: :timekeeping_unavailable
+    rescue_from Timekeeping::Gateway::Refused, with: :timekeeping_refused
   end
 
   # How an invoice write that the reservation boundary failed is answered
@@ -113,6 +114,12 @@ module ErrorHandler
     # and the same request may succeed later.
     def timekeeping_unavailable(_exception)
       render json: { errors: I18n.t("timesheet_entry.unavailable") }, status: 503
+    end
+
+    # The owner of the entries refused an entry write, already mapped to
+    # today's status and message (docs/architecture/timekeeping-soa.md §5.1).
+    def timekeeping_refused(exception)
+      render json: { errors: exception.message }, status: exception.status
     end
 
     def invalid_param_value(exception)

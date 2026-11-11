@@ -3,7 +3,7 @@
 class Api::V1::Agent::TimesheetEntriesController < Api::V1::Agent::BaseController
   def create
     timesheet_entry = Timekeeping::Gateway.call(
-      Timekeeping::Gateway::CreateEntry.new(project:, user: current_agent.user, attributes: create_attributes)
+      Timekeeping::Gateway::CreateEntry.new(project:, user: current_agent.user, attributes: create_attributes, writer: "agent")
     )
 
     render json: {
