@@ -1,1238 +1,984 @@
 # Cobb Your Dependencies
 
-**Technical design: separating timekeeping from billing and reporting**
+**Technical design: extracting Timekeeping behind one write gateway, one reservation rule and one read model**
 
 | | |
 |---|---|
-| Status | Proposed — design for review. **Not authorization to implement.** |
-| Tracking issue | #3 ("Design only: Cobb Your Dependencies") |
-| Code baseline | `main` at `7e8ee91` (Miru at `c2f4a01756e`) |
+| Status | Proposed, revision 2. For review. **Not authorization to implement.** |
+| Tracking issues | #3 (original assignment), #5 (this revision) |
+| Code baseline | `main` at `e8cf97b` (Miru at `c2f4a01756e`) |
 | Date | 2026-11-10 |
 | Scope of this change | This document only. No application code, tests, schema, migrations, dependencies, CI, infrastructure or runtime configuration is changed by it. |
 
 ---
 
-## Contents
+## Summary
 
-1. [Summary](#1-summary)
-2. [How to read this document](#2-how-to-read-this-document)
-3. [The existing architecture](#3-the-existing-architecture)
-4. [Behavior: observed, anomalous, assumed, proposed](#4-behavior-observed-anomalous-assumed-proposed)
-5. [Target architecture](#5-target-architecture)
-6. [Alternatives considered](#6-alternatives-considered)
-7. [API and event contracts](#7-api-and-event-contracts)
-8. [Tenant isolation, authorization and identity propagation](#8-tenant-isolation-authorization-and-identity-propagation)
-9. [Review, locking, billing associations and state transitions](#9-review-locking-billing-associations-and-state-transitions)
-10. [Financial precision, rounding and historical invoices](#10-financial-precision-rounding-and-historical-invoices)
-11. [Transactions, consistency, retries, duplicates, concurrency and partial failure](#11-transactions-consistency-retries-duplicates-concurrency-and-partial-failure)
-12. [Migration, backfill, reconciliation, cutover and rollback](#12-migration-backfill-reconciliation-cutover-and-rollback)
-13. [Deployment, configuration and observability](#13-deployment-configuration-and-observability)
-14. [Verification strategy](#14-verification-strategy)
-15. [Acceptance criteria for the completed migration](#15-acceptance-criteria-for-the-completed-migration)
-16. [Implementation sequence and parallel work](#16-implementation-sequence-and-parallel-work)
-17. [Risks, open questions and decisions for review](#17-risks-open-questions-and-decisions-for-review)
-- [Appendix A — Characterization run](#appendix-a--characterization-run)
-- [Appendix B — Table ownership map](#appendix-b--table-ownership-map)
-- [Appendix C — Source index](#appendix-c--source-index)
+Miru is one Rails 8.1 application on one Postgres database. Billing writes timekeeping rows directly:
+saving a draft invoice sets `timesheet_entries.locked` from an `after_save` callback, and line-item and
+invoice callbacks clear it again (`app/models/invoice.rb:62-63`, `app/models/invoice_line_item.rb:10,72-76`).
+Reports read `timesheet_entries` with SQL joins against invoices.
 
----
+This design does **one** extraction and proves it end to end:
 
-## 1. Summary
+1. **One new service, Timekeeping**, deployed on its own with its own database, in this repository. It
+   owns time entries and their billing reservations. Identity, catalogue (clients, projects, members,
+   rates), billing and reporting stay in the existing application.
+2. **Three components replace today's lock callbacks.** Each can be understood on its own:
+   - the **write gateway**, the one module in the existing application through which every entry
+     write and every reservation passes (§3.1);
+   - the **reservation rule**, one decision table in a shared library: an entry has at most one
+     reservation by a kept invoice, provisional or committed, changed only through prepare, commit
+     and abort (§7);
+   - the **read model**, `timesheet_entries` itself, which becomes a read-only projection of
+     Timekeeping written by one consumer (§3.2).
+3. **One cutover** for the whole dataset (both seeded businesses), in one bounded write pause under one
+   global ownership generation. Rollback and re-cutover use the same procedure in the other direction
+   (§10).
+4. **Values do not change.** `duration` stays a float. Migration, rollback and re-cutover never
+   recompute or convert an invoice amount, rate or quantity (§8).
+5. **Two deliberate behaviour fixes**, approved by the repository owner: double allocation is refused,
+   and discarding a draft releases its entries (§2.3). Everything else the code does today is
+   preserved, including the anomalies listed in §2.
 
-Miru today is one Rails 8.1 application on one Postgres database. Timekeeping, invoicing and reporting
-share tables, ActiveRecord callbacks and SQL joins. The tightest knot is that **billing writes directly
-to timekeeping rows**: saving a draft invoice sets `timesheet_entries.locked` from an `after_save`
-callback (`app/models/invoice.rb:62,200-202`), line-item deletion clears it
-(`app/models/invoice_line_item.rb:10,72-76`), and a (now unreachable) mailer path sets `bill_status`
-(`app/mailers/invoice_mailer.rb:4,69-74`). Reporting then joins `invoice_line_items ⋈ invoices ⋈
-timesheet_entries` in single SQL statements (`app/services/analytics/team_productivity_analytics.rb:64-72`,
-`app/models/project.rb:60-79`).
-
-**Recommendation.**
-
-1. Extract **two** independently deployable services, each the sole owner of its data:
-   - **Timekeeping** — time entries, their review status, the user-visible `bill_status` field, the
-     edit lock, and a **billing-claims ledger** that records which invoice references which entry.
-   - **Billing** — invoices, line items, taxes, payments, payment-provider webhooks, PDFs, QuickBooks
-     export, and all invoice money math.
-2. Keep **Reporting in the monolith ("Core") as a read-model module**, fed by durable event feeds from
-   both services. It is separated from timekeeping and billing by data ownership (it may not read their
-   tables), not by a network hop. It is a candidate for later extraction with explicit criteria
-   (§6, A2), not now.
-3. Everything else stays in **Core**: identity and sessions, workspaces/companies, roles, clients,
-   projects, project membership and hourly rates, leave/time-off, expenses, SaaS subscriptions, the MCP
-   server, the React SPA and the public `/api/v1` surface (Core acts as gateway/BFF).
-4. Replace every cross-domain write with one explicit protocol: **Billing declares, per invoice
-   revision, the full set of entries the invoice references; Timekeeping records it as claims and
-   derives eligibility and the edit lock from a declared rule table.** Billing never writes a
-   timekeeping column again.
-5. Migrate in seven phases (P0–P6), each with entry/exit criteria and a rollback, moving **code and
-   ownership first and physical data last**. Until P6 every rollback is a routing flip with no data
-   movement.
-
-Two characterization findings shape the design and need an owner decision before work starts
-(§4.2, §17): the live "send invoice" path never marks entries `billed` (C2, C2b), and discarding a
-draft invoice leaves its entries locked (C4). The design preserves both by default and isolates each
-in a single, switchable rule.
+What this revision removes from revision 1: the Billing service, Core directory feeds and replicas, the
+reporting projections (`rpt_*`), the hold/confirm/cancel claim protocol with TTLs and revisions, the
+`compat`/`corrected` lock-rule sets, per-company routing and waves, seven phases and their soak
+periods, and row-level security. Deferred rollout notes are kept in §15.3.
 
 ---
 
-## 2. How to read this document
-
-Every factual claim carries one of these tags:
+## How to read this document
 
 | Tag | Meaning |
 |---|---|
-| **[O]** | **Observed** — read in the code at the cited `path:line`, or confirmed by the characterization run in Appendix A (`C#`). |
-| **[O-inf]** | Observed structure, but the conclusion is an inference from reading, not executed. |
-| **[A]** | **Assumption** — believed true, not verified; each has an owner question in §17. |
-| **[P]** | **Proposal / requirement** introduced by this design. |
-| **[D-n]** | A **decision** that needs review before the dependent work starts (§17.3). |
+| **[O]** | Observed in the code at the cited `path:line`, or confirmed by the characterization run in Appendix A (`K#`). |
+| **[P]** | Proposed by this design. |
 
-Behavior IDs: `B-n` (must preserve), `X-n` (observed anomaly), `C-n` (characterization case).
+Behaviour IDs: `A#` entry rules and authorization, `L#` locking and billing links, `M#` money.
+`K#` is a characterization case. `D#` is a decision (§15.1).
+
+**Precedence.** The code sets current behaviour. The repository owner's decisions set target
+behaviour. Where revision 1 described today's behaviour differently from the code, this revision
+follows the code.
 
 ---
 
-## 3. The existing architecture
+## 1. The existing system [O]
 
-### 3.1 Runtime topology [O]
+### 1.1 Runtime
 
 | Concern | Today | Source |
 |---|---|---|
-| Web | Falcon (`web: bundle exec falcon host`) | `Procfile`, `Dockerfile:142` |
-| Worker | Solid Queue (`rake solid_queue:start`), queues `default` and `billing_sync` | `Procfile`, `config/solid_queue.yml`, `config/application.rb:85` |
-| Database | One Postgres database per environment; Solid Queue tables live in it | `config/database.yml:1-27`, `db/schema.rb:945-1064` |
-| Cache | Redis optional (analytics cache, Solid Cable) | `app/services/analytics/cache_store.rb:53-57` |
-| Deploy | Render (`render.yaml`: web, worker, Postgres, Redis) and Kamal (`config/deploy.yml`, `deploy_kamal.sh`) | |
-| Health | `GET /health` → DB `SELECT 1` only | `config/routes.rb:11`, `app/controllers/health_controller.rb:8-25` |
-| Errors / tracing | Sentry, prod and staging only, `traces_sample_rate = 1.0` | `config/initializers/sentry.rb:3-14` |
-| Feature flags | None (ENV booleans only, e.g. `MCP_SERVER_ENABLED`) | `app/controllers/api/v1/mcp_controller.rb:49` |
-| Clients | React SPA (`app/javascript`), Expo mobile (`apps/mobile`), CLI, MCP, agent keys | §3.6 |
+| Web | Falcon | `Procfile`, `falcon.rb` |
+| Jobs | Solid Queue. Workers for queues `default` and `billing_sync`; recurring tasks run from the dispatcher | `config/solid_queue.yml`, `config/application.rb:85` |
+| Job retries | `retry_on ActiveRecord::Deadlocked, attempts: 3` and `retry_on ConnectionFailed / PG::ConnectionBad, attempts: 5`. `attempts` counts **total** attempts, so these are 2 and 4 retries. | `app/jobs/application_job.rb:5,8-9` |
+| Database | One Postgres database; Solid Queue tables live in it | `config/database.yml`, `db/schema.rb` |
+| Deploy | Kamal (`config/deploy.yml`: service `miru-web`, roles `web` and `worker`) and Render (`render.yaml`) | |
+| Config | In `config/deploy.yml`, `REDIS_URL` is a plain `env` value (`:59`); `DATABASE_URL` is in the `secret` list (`:60-63`) | `config/deploy.yml:59-63` |
+| Events | `Rails.event.notify` from model callbacks, recorded by `rails_event_viewer` for observability. No outbox. | `config/initializers/rails_event_viewer.rb`, `docs/ai/events.md` |
 
-### 3.2 Domain model and the tenant chain [O]
+### 1.2 Data model and tenancy
 
-```mermaid
-erDiagram
-  COMPANY ||--o{ CLIENT : has
-  COMPANY ||--o{ EMPLOYMENT : has
-  CLIENT ||--o{ PROJECT : has
-  PROJECT ||--o{ PROJECT_MEMBER : "has (hourly_rate)"
-  PROJECT ||--o{ TIMESHEET_ENTRY : has
-  USER ||--o{ TIMESHEET_ENTRY : logs
-  COMPANY ||--o{ INVOICE : issues
-  CLIENT ||--o{ INVOICE : billed
-  INVOICE ||--o{ INVOICE_LINE_ITEM : has
-  INVOICE_LINE_ITEM }o--o| TIMESHEET_ENTRY : "timesheet_entry_id (FK)"
-  INVOICE_LINE_ITEM ||--o{ INVOICE_LINE_ITEM_TIME_ENTRY : links
-  INVOICE_LINE_ITEM_TIME_ENTRY }o--|| TIMESHEET_ENTRY : "FK"
-  INVOICE ||--o{ INVOICE_TAX : has
-  INVOICE ||--o{ PAYMENT : settles
-```
+- `timesheet_entries` has no `company_id`. Tenancy is derived project → client → company
+  (`scope :in_workspace`, `app/models/timesheet_entry.rb:63`; `has_one :company, through: :client`, `:44-45`).
+- Tenancy is enforced **by convention**, through `current_company` in controllers and policy scopes. There
+  is no default scope (`app/controllers/concerns/current_company_concern.rb`).
+- `timesheet_entries.duration` is `float` (minutes). `invoice_line_items.quantity` is `integer`
+  (minutes) (`db/schema.rb:560`). `invoice_line_items.rate` is `decimal(20,2)`.
+- Two foreign keys point from billing at entries: `invoice_line_item_time_entries → timesheet_entries`
+  (`db/schema.rb:1282`) and `invoice_line_items → timesheet_entries` (`:1284`).
+- Nothing in the database stops one entry from being on several invoices. The join table is unique only
+  per (line item, entry) pair (`db/schema.rb:549`) (K6).
 
-Facts that constrain the split:
+### 1.3 Every writer of `timesheet_entries`
 
-- `timesheet_entries` and `projects` have **no `company_id`**. Tenancy is derived via
-  project → client → company: `scope :in_workspace, ->(company) { where(project_id: company&.project_ids) }`
-  (`app/models/timesheet_entry.rb:63`; `has_one :company, through: :client` at `:44-45`).
-- `invoices.company_id` is **nullable** (`db/schema.rb:590`) though `belongs_to :company` requires it
-  (`app/models/invoice.rb:38`).
-- Foreign keys cross the future boundary: `invoice_line_items.timesheet_entry_id → timesheet_entries`,
-  `invoice_line_item_time_entries.timesheet_entry_id → timesheet_entries` (`db/schema.rb:1281-1284`),
-  and `timesheet_entries → projects, users, agents` (`:1325-1327`).
-- Column types that matter for money/time: `timesheet_entries.duration float` (minutes);
-  `invoice_line_items.quantity integer` (minutes); `invoice_line_items.rate decimal(20,2)`;
-  `project_members.hourly_rate decimal` (no precision/scale); invoice and payment amounts
-  `decimal(20,2)`; `exchange_rate decimal(18,10)` (`db/schema.rb:554-567,583-622,721-741,767-777,1106-1139`).
-- There is **no unique constraint** stopping one entry from appearing on several line items or invoices:
-  `invoice_line_items.timesheet_entry_id` has a plain index, and the join table is unique only per
-  (line item, entry) pair (`db/schema.rb:549,565-566`). Confirmed by C6.
-
-### 3.3 Timekeeping write paths [O]
-
-| # | Path | Route | Authorization | Notes |
-|---|---|---|---|---|
-| A | Web + mobile entry CRUD — `Api::V1::TimesheetEntryController` | `/api/v1/timesheet_entry`, `/api/v1/mobile/timesheet_entries` (`config/routes/api.rb:56,76`) | `TimesheetEntryPolicy` (`app/policies/timesheet_entry_policy.rb`) | Project looked up in `current_company.projects.kept` with **no membership check** (`timesheet_entry_controller.rb:60-62`); owner/admin may log for any company user, others only for themselves (`:68-76`); permits `bill_status` (`:79`). |
-| B | Bulk move/delete — `TimesheetEntry::BulkActionController` | `PATCH/DELETE /api/v1/timesheet_entry/bulk_action` (`api.rb:58`) | `bulk_update?`/`bulk_destroy?` + own `entry_locked?` (`bulk_action_controller.rb:65-70`) | Treats `billed?` (not `locked`) as locked; uses non-bang `update` and `discard_all` [O-inf]. |
-| C | CLI — `Api::V1::Cli::TimesheetEntriesController` | `/api/v1/cli/timesheet_entries` (`api.rb:67`) | Pundit; record looked up via `current_user.timesheet_entries` | Owners cannot edit others' entries over CLI. |
-| D | MCP tools `miru.time.{create,update,delete}` | `/mcp` → proxied to C (`app/mcp/tools/*`, `app/mcp/api_proxy.rb`) | Re-enters Rails with caller's Authorization | Idempotency via `MCPIdempotencyRecord` + `pg_try_advisory_lock`, 24 h TTL (`app/mcp/idempotency_store.rb:8-54`). |
-| E | Agent API — `Api::V1::Agent::TimesheetEntriesController#create` | `POST /api/v1/agent/timesheet_entries` (`api.rb:90`) | Agent key; no Pundit (`agent/base_controller.rb:7`) | Forces `review_status: pending_review` via model (`timesheet_entry.rb:142-151`); writes `external_run_id`/`external_session_id` with **no dedupe**. |
-| F | Harvest import | `POST /api/v1/imports` → `DataImportJob`; rake `imports:harvest_time_entries` | `DataImportPolicy` owner/admin | Slices of 500 per transaction, savepoint per row; creates `billed` rows as `unbilled` then `update!(bill_status: :billed)` (`app/services/imports/harvest_time_entries_importer.rb:388-409,461-477`). |
-| G | **Billing writes to entries** | Invoice create/update/destroy, line-item destroy | `InvoicePolicy` owner/admin | `locked` true on every draft save (`invoice.rb:62,200-202`); false on draft discard (`:63,204-206`) and on line-item destroy while draft (`invoice_line_item.rb:10,72-76`); `bill_status: billed` only via `update_timesheet_entry_status!` (`invoice.rb:126-128`). |
-| H | Demo seeder | `analytics:seed_demo` | n/a | `app/services/analytics/demo_seeder.rb:162-177`. |
-
-Model rules shared by all paths (`app/models/timesheet_entry.rb`) [O]:
-
-- `bill_status` enum `non_billable | unbilled | billed` (`:14`), defaulted from `project.billable`
-  (`:47,132-139`); cannot be created `billed` (`:49,153-155`); an `employee` cannot change it away from
-  `billed` (`:50,157-162`); `unbilled` on a non-billable project is invalid (`:59,164-168`).
-- `review_status` enum `not_required | pending_review | approved | rejected` (`:15`); agent entries are
-  forced to `pending_review` (`:48,142-151`). **No endpoint approves or rejects an entry today** [O].
-- `locked` blocks updates **only for the `employee` role** and only when `Current.user` is set
-  (`:61,180-186`); jobs, imports and rake tasks bypass it. Confirmed by C7.
-- Audited fields exclude `locked` (`:6-7`).
-- `has_one :invoice_line_item, dependent: :destroy` (`:43`) — a hard delete of an entry would delete its
-  line item, on any invoice [O-inf]; normal deletes are soft (`discard`).
-
-### 3.4 Billing paths that consume time [O]
-
-1. **Selection.** `GET /api/v1/invoices/line_items` (`api.rb:158`) →
-   `GenerateInvoice::NewLineItemsService` (`app/services/generate_invoice/new_line_items_service.rb`).
-   It returns kept, `unbilled` entries of the client's kept projects, **excluding entries already
-   referenced by any kept invoice** (direct or linked) and `selected_entries` (`:34-59`). The
-   exclusion query is not company-scoped (`Invoice.kept.pluck(:id)`, `:35`; harmless for correctness
-   because the outer query is client-scoped, but a full-table read). `rate` is read live from
-   `project_members.hourly_rate` (`app/presenters/project_members_presenter.rb:10-20`). `review_status`
-   is **not** filtered, so `pending_review` agent entries are invoiceable (`:54-59`).
-2. **Line item creation.** There is no server-side builder: the SPA maps selected rows into nested
-   `invoice_line_items_attributes` (`app/javascript/src/components/Invoices/common/utils.js:27-39`)
-   permitted by `InvoicePolicy#permitted_attributes` (`app/policies/invoice_policy.rb:48-60`). Line items
-   are **snapshots** (own `name`, `description`, `date`, `quantity`, `rate`) plus live references
-   `timesheet_entry_id` and `linked_timesheet_entry_ids`. Server validation of references is
-   company-match only (`invoice_line_item.rb:56-70`, `invoice_line_item_time_entry.rb:12-17`).
-3. **Lock and send.** Draft save locks (C1). `POST /api/v1/invoices/:id/send_invoice` generates the PDF,
-   enqueues `InvoiceMailer#send_invoice` and calls `record_send!` (`app/controllers/api/v1/invoices_controller.rb:64-103`,
-   `app/models/concerns/invoice_sendable.rb:10-18`); **neither touches `bill_status`** (C2, C2b). The
-   `after_action :update_status` that would set `billed` is registered `only: [:invoice]`
-   (`invoice_mailer.rb:4`), and `InvoiceMailer#invoice` is reached only through
-   `InvoiceSendable#send_to_email`, which has no caller in `app/` [O].
-4. **Status transitions.** `draft→sent` (`record_send!`), `sent→viewed` (public view key,
-   `app/controllers/api/v1/invoices/view_controller.rb:10`), `sent|viewed→overdue` (daily job,
-   `app/services/update_invoice_status_to_overdue_service.rb:5-6`), `→paid` (`Invoice#settle!`,
-   `invoice.rb:138-149`), `sent|viewed|overdue→waived` (`invoices/waived_controller.rb:6`,
-   rule at `invoice.rb:194-198`), leaving `paid` is blocked (`:184-188`), and `status` is also a
-   permitted update attribute (`invoice_policy.rb:50`).
-5. **Payments and providers.** Stripe, Razorpay and PayPal webhooks are signature-verified and
-   idempotent by provider event id with `with_lock` (except Stripe `checkout.session.expired`, which is
-   not idempotent — `app/services/invoice_payment/stripe_checkout_failed.rb:14-15`). One Stripe endpoint
-   (`config/routes.rb:84`) handles **both** invoice checkout events and SaaS subscription events
-   (`app/services/handle_stripe_checkout_event_service.rb:11-13,45-55`). None of the providers
-   reference time entries.
-6. **QuickBooks export** reads only invoice/line/payment columns (`app/services/quick_books/mappers/invoice.rb:65-123`).
-
-### 3.5 Reporting reads and the cross-domain joins [O]
-
-Single-statement joins across timekeeping and billing (the hard part):
-
-| # | Location | Join |
-|---|---|---|
-| J1 | `app/services/analytics/team_productivity_analytics.rb:64-72` | `invoice_line_items ⋈ invoices ⋈ timesheet_entries`, grouped by entry user (revenue per person). Reused by `ComparativeAnalysisService`, `ThresholdEvaluator`, analytics exports. |
-| J2 | `app/models/project.rb:60-79` | `invoices ⋈ invoice_line_items WHERE timesheet_entry_id IN (project's kept entries)` (project page receivables). |
-| J3 | `app/services/analytics/growth_metrics_service.rb:81-97` | `EXISTS(timesheet_entries ⋈ projects ⋈ clients) OR EXISTS(invoices)` (founder digest). |
-| J4 | `app/services/time_entries/filters.rb:41-42`, `app/services/team/removal_impact_service.rb:36-45` | Billing state read from the timekeeping row (`bill_status`). |
-
-Same payload, separate queries (easy to split): `Reports::ClientRevenues::ReportDecorator`
-(`app/services/reports/client_revenues/report_decorator.rb:122-168`), `DashboardPresenter`
-(`app/presenters/dashboard_presenter.rb`), `Clients::IndexService` (`app/services/clients/index_service.rb:102-110`),
-`ProjectSqlQueries` (`app/models/concerns/project_sql_queries.rb:6-39`, cost = duration × hourly rate),
-legacy admin `AnalyticsController` (`app/controllers/analytics_controller.rb:88,119`).
-
-Single-domain reads: `TimeTrackingIndexService` (timekeeping + Core time-off/holidays, no billing,
-`app/services/time_tracking_index_service.rb:54-58`); `Reports::TimeEntries::ReportService`
-(timekeeping only); revenue/aging/payments reports (billing only).
-
-Analytics results are cached 30 min in Redis/`Rails.cache` keyed by company and filters
-(`app/services/analytics/cache_store.rb:11-58`); everything else is computed per request. Search is
-`pg_search` on live tables — there is no external index to keep in sync (`app/models/concerns/searchable.rb`).
-
-### 3.6 Identity, tenancy and events [O]
-
-- **Authentication order** (`app/controllers/concerns/authenticable.rb:13-67`): session cookie →
-  CLI bearer (`CliSession`, digest-stored, sliding expiry, revalidates employment and role,
-  `app/models/cli_session.rb:11-49`) → devise-jwt bearer → legacy `X-Auth-Email`/`X-Auth-Token`
-  (used by mobile, `apps/mobile/src/api.ts:27-28`). Agents use `AgentKey` bearer tokens
-  (`app/models/agent_key.rb:10-31`) and are signed in as `agent.user` with workspace forced to
-  `agent.company` (`app/controllers/api/v1/agent/base_controller.rb:14-44`).
-- **Tenant resolution**: `current_company` = CLI session company → `current_user.current_workspace` →
-  first kept employment (`app/controllers/concerns/current_company_concern.rb:10-18`); copied into
-  `Current.user` / `Current.company` (`app/controllers/concerns/set_current_details.rb:7-11`).
-  Roles via rolify, checked live per request (`app/policies/application_policy.rb`).
-- **Events**: 14 `ApplicationEvent` classes emitted with `Rails.event.notify` inside model callbacks
-  (e.g. `timesheet_entry.rb:53`, `invoice.rb:67-71`). The only subscriber is `rails_event_viewer`,
-  which writes them synchronously inside the business transaction (`config/initializers/rails_event_viewer.rb:5-24`).
-  `docs/ai/events.md:8-12` states they are best-effort observability, **not a delivery queue**. There is
-  no outbox.
-
-### 3.7 Dependency matrix (table access today) [O]
-
-| Table | Written by timekeeping code | Written by billing code | Read by reporting code |
+| # | Writer | Entry point | Authorization today |
 |---|---|---|---|
-| `timesheet_entries` | A–F, H | **G (`locked`, `bill_status`)** | J1–J4, time reports, dashboard, team, clients, projects |
-| `invoices`, `invoice_line_items`, `invoice_line_item_time_entries`, `invoice_taxes` | — | yes | J1, J2, J3, revenue/aging/outstanding reports, dashboard |
-| `payments` | — | yes | revenue forecast, payments report, digests |
-| `projects`, `project_members` | read (validation, scope) | read (rates) | yes |
-| `clients`, `companies`, `users`, `employments`, `roles` | read | read | yes |
+| W1 | Web and mobile entry CRUD, `Api::V1::TimesheetEntryController` | `/api/v1/timesheet_entry`, `/api/v1/mobile/timesheet_entries` (`config/routes/api.rb:76`) | `TimesheetEntryPolicy`; project from `current_company.projects.kept`, no membership check (`timesheet_entry_controller.rb:60-62`) |
+| W2 | Bulk move and bulk delete, `TimesheetEntry::BulkActionController` | `PATCH/DELETE /api/v1/timesheet_entry/bulk_action` | `bulk_update?`/`bulk_destroy?` plus its own `entry_locked?` (`bulk_action_controller.rb:65-70`) |
+| W3 | CLI, `Api::V1::Cli::TimesheetEntriesController` | `/api/v1/cli/timesheet_entries` | Pundit; record looked up in `current_user.timesheet_entries` (`cli/timesheet_entries_controller.rb:51`) |
+| W3a | **MCP** tools `miru.time.{create,update,delete}` | `/mcp` | Calls W3 **in-process** through `Rack::MockRequest` (`app/mcp/api_proxy.rb:40`), not over HTTP, with the caller's `Authorization` |
+| W4 | Agent API, `Api::V1::Agent::TimesheetEntriesController#create` | `POST /api/v1/agent/timesheet_entries` | Agent key. **Skips Pundit** (`agent/base_controller.rb:7`); only applies `ProjectPolicy::Scope` for the agent's user (`agent/timesheet_entries_controller.rb:4-18,28-31`) |
+| W5 | Harvest import | `DataImportJob`; rake `imports:harvest_time_entries` | `DataImportPolicy` at upload; rows written with no `Current.user`. Creates `billed` rows as `unbilled`, then `update!(bill_status: :billed)` (`harvest_time_entries_importer.rb:469,475`) |
+| W6 | **Agent destroy** | `Agent has_many :timesheet_entries, dependent: :nullify` (`app/models/agent.rb:11`), reached through `Company has_many :agents, dependent: :destroy` (`company.rb:49`) and `User has_many :agents, dependent: :destroy` (`user.rb:39`) | None of its own. Rewrites `agent_id` to `NULL` on the agent's entries (K8). Revision 1 did not list this writer. |
+| W7 | Invoice callbacks | §1.4 | `InvoicePolicy`, `Invoices::BulkDeletionPolicy` |
+| W8 | Demo seeder | `analytics:seed_demo` (`app/services/analytics/demo_seeder.rb`) | n/a |
+
+Model rules every writer shares (`app/models/timesheet_entry.rb`):
+
+- `source` is normalized on every save. The agent controller sets `"automation"`, and the model rewrites it
+  to `"mcp"` when `source_metadata["mcp_server"]` is present (`:190,232-235`) (K10).
+- Agent entries are forced to `review_status: pending_review` (`:142-151`).
+- `locked` blocks updates only for the `employee` role, and only when `Current.user` is set (`:180-186`).
+  Jobs, imports and rake tasks bypass it.
+
+### 1.4 How billing writes entries today
+
+- **Draft save locks.** `after_save :lock_timesheet_entries, if: :draft?` sets `locked = true` on every
+  entry the invoice references, direct and linked (`invoice.rb:62,200-202`) (K1).
+- **Draft discard re-locks.** `after_discard :unlock_timesheet_entries, if: :draft?` runs first. Then
+  `after_discard :update_invoice_number` calls `update` (`:64,323-325`). That save fires
+  `after_save :lock_timesheet_entries` again, because the invoice is still a draft. The entries **stay
+  locked** (K2).
+- **Non-draft discard** does nothing to entries: they stay locked (K3).
+- **Line-item destroy** releases its entries only when the invoice is a draft (`invoice_line_item.rb:10,72-76`) (K4).
+- **Send** (`record_send!`) changes the invoice only. Entries stay `unbilled` (K5). The only code that sets
+  `billed` from billing, `Invoice#update_timesheet_entry_status!` (`invoice.rb:126-128`), is reached only
+  from `InvoiceMailer#invoice`, which has no live caller.
+- **Single delete is soft, bulk delete is hard.** `InvoicesController#destroy` calls `discard!`
+  (`app/controllers/api/v1/invoices_controller.rb:59-62`). `Invoices::BulkDeletionController` calls
+  `destroy` on `current_company.invoices.where(id: …)`, with **no `.kept` filter**, so it also hard-deletes
+  already-discarded invoices (`invoices/bulk_deletion_controller.rb:7-8`). A hard-deleted draft releases
+  its entries through the line-item callback. A hard-deleted non-draft leaves them locked, with no row left
+  that references them (K7).
+- **Mobile collections create invoices outside `InvoicePolicy`.** `Mobile::CollectionsController` skips
+  `verify_authorized` and allows any owner, admin, book keeper **or employee** of a company with pro
+  access (`mobile/collections_controller.rb:6-7,155-161`). It creates invoices with `status: :sent` and
+  records payments (`:238-258`). These invoices have no time-entry lines.
+- **Foreign keys.** The two keys in §1.2 tie line items to entry rows. Today they are harmless. Once
+  entries are owned elsewhere they would reject a line item whose entry is not yet in the local table, so
+  this design **drops them before cutover** (§10.2).
+
+### 1.5 Line items and quantity
+
+`GenerateInvoice::NewLineItemsService` only **suggests** line items. It offers the entry's float
+`duration` as `quantity` (`new_line_items_service.rb:110`; summed per group at `:140`). The client posts
+`quantity` back in `invoice_line_items_attributes`, and it is stored in an **integer** column
+(`db/schema.rb:560`). Fractional minutes are cast away on save: 90.7 becomes 90 (K9). Candidate selection
+hides entries already on a kept invoice, but explicit ids posted through the API or MCP are not checked
+(K6).
+
+### 1.6 Money, PDF and audit
+
+- Stored invoice totals: subtotal = Σ(`quantity`/60 × `rate`) in Float, rounded to 2 dp; tax recomputed
+  while draft; `amount` = subtotal − discount + tax (`invoice.rb:226-257,304`).
+- The PDF **recomputes** the subtotal as `(SUM(quantity * rate) / 60.0).round(3)` and the total as
+  `subtotal + tax - discount`, **unrounded** (`invoice_line_item.rb:20-22`;
+  `pdf_generation/invoice_service.rb:24-25,46-54`). The printed total can therefore differ from the stored
+  `amount`. Example: 19 minutes at 33.33 is stored as 10.55 and printed as $10.56 (K11).
+- Line `total_cost` rounds `(quantity/60) × rate` to 3 dp (`invoice_line_item.rb:46-47`).
+- **The audit log cannot prove financial parity.** `audited` on `Invoice` covers only `amount`,
+  `base_currency_amount`, `exchange_rate`, `exchange_rate_date`, `currency`, `status`, `amount_paid` and
+  `amount_due` (`invoice.rb:10-11`). It omits `discount`, `tax` and `outstanding_amount`. Line items and
+  invoice taxes are not audited. Parity is proven by a snapshot comparison instead (§10.4, §13).
+
+### 1.7 Readers of `timesheet_entries`
+
+Every reader below keeps reading the table unchanged (§3.3):
+
+- Time tracking: `TimeTrackingIndexService`, `Reports::TimeEntries::{ReportService,FilterService}`, `TimeEntries::Filters`.
+- Reports and analytics: `Analytics::TeamProductivityAnalytics` (joins invoice line items), `Analytics::GrowthMetricsService`,
+  `Reports::ClientRevenues::ReportDecorator` (sums entry `duration` per client, `report_decorator.rb:159-164`),
+  `Metrics::DataBuilder`, `AnalyticsController`.
+- Project, client and team totals: `Project` (`project.rb:48-82`), `ProjectSqlQueries`, `Projects::IndexService`,
+  `Client`, `Clients::IndexService`, `Team::IndexDecorator`, `Team::RemovalImpactService`.
+- Dashboard: `DashboardPresenter`. Reminders: `WeeklyReminderForMissedEntriesService`.
+- Billing: `GenerateInvoice::NewLineItemsService` (candidate selection) and line-item validation (L8).
+
+`Metrics::DataBuilder` line 86 filters `:non_billable`, which exists. Lines 85 and 140 filter
+`bill_status: :billable`, which is **not** a value of the enum (`timesheet_entry.rb:14`), so billable hours
+there are always zero. The design preserves this (D4).
+
+### 1.8 Identity
+
+Authentication order: session → CLI bearer → devise-jwt → legacy `X-Auth-Email`/`X-Auth-Token`
+(`app/controllers/concerns/authenticable.rb`). Agents authenticate with an `AgentKey` and are signed in as
+`agent.user` with the workspace forced to `agent.company` (`agent/base_controller.rb:14-44`). Roles come from
+rolify, checked live per request.
 
 ---
 
-## 4. Behavior: observed, anomalous, assumed, proposed
+## 2. Behaviour
 
-### 4.1 Observed behavior that must be preserved [O]
+### 2.1 Entry rules and authorization (preserved) [O]
 
-| ID | Behavior | Evidence |
+| ID | Rule | Evidence |
 |---|---|---|
-| B-1 | Public HTTP routes, request params and JSON shapes under `/api/v1/**`, `/internal_api/v1/**`, `/mcp`, `/webhooks/**` and the public invoice view stay byte-compatible. | `config/routes.rb`, `config/routes/api.rb`; request specs under `spec/requests/**` |
-| B-2 | Role rules of `TimesheetEntryPolicy`: owner/admin/employee may create; update/destroy denied if `billed?`, denied for non-privileged users when `work_date` is older than `company.timesheet_edit_days`, otherwise owner/admin of the entry's company or the entry's own user. Scope: owner/admin see all kept entries of the workspace, others their own. | `app/policies/timesheet_entry_policy.rb:4-69`; `spec/policies/timesheet_entry_policy_spec.rb` |
-| B-3 | Per-path quirks: web path has no project-membership check; CLI path cannot edit others' entries; agent path forces `pending_review`; bulk path treats `billed?` (not `locked`) as locked. | §3.3 |
-| B-4 | `bill_status` defaulting/validation rules (§3.3) and that **billing does not change `bill_status` on send** (C2, C2b). | `timesheet_entry.rb:132-168`; Appendix A |
-| B-5 | Saving a draft invoice locks every entry it references (C1); removing a line item from a draft unlocks its entries (C9); locks block only employees (C7). | `invoice.rb:62,200-202`; `invoice_line_item.rb:72-76` |
-| B-6 | Selection eligibility: kept, `unbilled`, on the client's kept projects, not referenced by any kept invoice; entries of discarded invoices become eligible again (C10). `review_status` does not affect eligibility. | `new_line_items_service.rb:34-59` |
-| B-7 | Line items are snapshots; rate comes from `project_members.hourly_rate` at selection time; entry `duration` (float) is truncated into integer `quantity` (C5). | §3.4; Appendix A |
-| B-8 | Invoice money math exactly as today: subtotal = Σ(`quantity`/60 × `rate`) in Float rounded to 2 dp; total = (subtotal − discount + tax) rounded to 2 dp; tax amounts recomputed only while draft; `base_currency_amount = (amount × rate).round(2)` with rate fixed at issue date; line `total_cost` rounds to 3 dp with Float×BigDecimal arithmetic (C8). | `invoice.rb:226-349`; `invoice_line_item.rb:20-48`; `app/models/invoice_tax.rb:21-42` |
-| B-9 | Stored amounts of non-draft invoices and recorded payments are never recomputed; historical PDFs render from the same code path (which recomputes subtotal for display, `app/services/pdf_generation/invoice_service.rb:46-54`). | §10 |
-| B-10 | Invoice status transitions and their guards (§3.4 item 4); invoice numbers unique per company; discard renames to `ARC-<id>-<number>` (`invoice.rb:95,323-325`). | |
-| B-11 | Payment-provider idempotency by provider event id; Stripe/Razorpay/PayPal webhook URLs unchanged. | §3.4 item 5 |
-| B-12 | Report numbers (values, rounding, currency choice — including today's known inconsistencies in §4.2) are identical before and after each report moves to projections. | `spec/services/analytics/**`, `spec/services/reports/**`, `spec/requests/api/v1/reports/**` |
-| B-13 | Audit history (`audits` table) for entries, invoices and payments remains queryable through the audit-log API. | `app/models/timesheet_entry.rb:6-7`; `app/controllers/api/v1/audit_logs_controller.rb` |
-| B-14 | MCP write tools remain idempotent with the same key semantics. | `app/mcp/idempotency_store.rb` |
-| B-15 | Record ids (`timesheet_entries.id`, `invoices.id`, …) are stable; they appear in URLs, audits, QuickBooks references and client caches. | |
+| A1 | Owner, admin and employee may create and list entries. | `timesheet_entry_policy.rb:4-14` |
+| A2 | Web/mobile: the project is any kept project of the company; no membership check. Owner/admin may log for any company user, others only for themselves. | `timesheet_entry_controller.rb:54-76` |
+| A3 | Update and destroy are refused when the entry is `billed`. | `timesheet_entry_policy.rb:24-25` |
+| A4 | For non-owner/admin users, update and destroy are refused when `work_date` is older than `company.timesheet_edit_days`. | `:26,43-53` |
+| A5 | Otherwise owner/admin of the entry's company, or the entry's own user, may update and destroy. | `:27-29,38-41` |
+| A6 | Scope: owner/admin see all kept entries of the workspace, others their own. | `:62-68` |
+| A7 | CLI and MCP: a caller can only update or delete their own entries, whatever their role. | `cli/timesheet_entries_controller.rb:51` |
+| A8 | `review_status` does not affect invoicing; `pending_review` agent entries are invoiceable. | `new_line_items_service.rb` |
+| A9 | Bulk move and delete treat `billed` or out-of-window entries as locked (403). Bulk move uses non-bang `update` on the relation, so an entry the model rejects, such as a `locked` entry moved by an employee, is **silently skipped** and the response is still 200. | `bulk_action_controller.rb:27,65-70` (K12) |
+| A10 | Agent entries: user forced to the agent's user, `review_status: pending_review`, no dedupe on `external_run_id`, `source` rewritten to `mcp` when `source_metadata["mcp_server"]` is present. | `timesheet_entry.rb:142-151,232-235` (K10) |
+| A11 | `bill_status` is settable by any user who may edit the entry (W1 and W3 permit it), so an employee can mark their own entry `billed`. An employee cannot change it **away** from `billed`. The import sets it too. | `timesheet_entry_controller.rb:79`, `timesheet_entry.rb:157-162` (K13) |
 
-### 4.2 Observed anomalies (preserved by default; each needs a decision) [O]
+**The agent API does not get A1-A7.** It skips Pundit and applies only the project scope (W4). This design
+keeps exactly that.
 
-| ID | Anomaly | Evidence | Default in this design | Decision |
+### 2.2 Authorization timing [O]
+
+`authorize` runs before the write's transaction opens. It reads the caller's role and
+`company.timesheet_edit_days` (A3-A5). Inside the transaction only model validations run. Two of them read
+the caller's primary role again: the `locked` check and the `billed` check (`timesheet_entry.rb:157-162,180-186`).
+This is why the gateway can resolve these facts per request and pass them as claims (§6.1) without changing
+how fresh they are.
+
+### 2.3 Locking and billing links
+
+Preserved [O]:
+
+| ID | Behaviour | Evidence |
+|---|---|---|
+| L1 | Saving a draft locks every entry it references. Entries added while the invoice is not a draft are not locked. The lock stops employees only. | `invoice.rb:62`, `timesheet_entry.rb:180-186` (K1) |
+| L3 | Discarding a non-draft invoice keeps its entries locked. Those entries become selectable again. | `invoice.rb:63` (K3) |
+| L4 | Removing a line item releases its entries only on a draft. On a non-draft they stay locked. | `invoice_line_item.rb:72-76` (K4) |
+| L5 | Only three things set `billed`: the import (W5), any user who may edit the entry (A11), and the unreachable `update_timesheet_entry_status!`. | §1.3, §1.4 |
+| L6 | Sending an invoice leaves its entries `unbilled`. | K5 |
+| L7 | `bill_status` is independent of invoices. No live invoice operation sets or clears it. `billed` blocks edits for every role (A3) and removes the entry from selection. | `new_line_items_service.rb` |
+| L8 | A line item may reference only entries of the invoice's company. | `invoice_line_item.rb:56-70`, `invoice_line_item_time_entry.rb:12-17` |
+
+Changed by the repository owner's decision (L2 is today's draft-discard behaviour):
+
+**Deliberate fixes**
+
+| # | Case | Today | After | What a user sees |
 |---|---|---|---|---|
-| X-1 | Sending an invoice through the live UI/API path never sets entries to `billed`; only dead code (`InvoiceMailer#invoice` via unused `send_to_email`) does. Team removal-impact "invoiced entries" therefore counts only manually/import-billed entries (`removal_impact_service.rb:45`). | C2, C2b, C3 | Preserve: Billing never writes `bill_status`. Remove the dead path in P1 (no behavior change). | D-1 |
-| X-2 | Discarding a **draft** invoice leaves its entries locked: `after_discard :unlock_timesheet_entries` runs, then `after_discard :update_invoice_number` calls `update`, whose `after_save :lock_timesheet_entries, if: :draft?` re-locks them. The entries are simultaneously eligible for a new invoice (C10). | C4, C4-cause; `invoice.rb:62-64,323-325` | Preserve via one rule row in the lock rule table (§9.3), switchable. | D-2 |
-| X-3 | One entry can be referenced by several line items on several invoices; nothing in the DB prevents double invoicing; only the selection UI filters it. | C6; `db/schema.rb:549,565-566` | Record and report, do not enforce, until D-3. | D-3 |
-| X-4 | Fractional minutes are truncated on invoicing (90.7 min → 90). | C5 | Preserve. | D-5 |
-| X-5 | Two arithmetic paths for line totals (Float in invoice totals, Float×BigDecimal in `total_cost`) disagree at the third decimal. | C8 | Preserve both, move into one pure module with golden tests. | D-5 |
-| X-6 | Report inconsistencies: dashboard sums `invoices.amount` without base conversion; several expense aggregates use `amount` not `base_currency_amount`; client-revenue per-row vs summary totals differ; accounts-aging lacks `.kept`. | `app/presenters/dashboard_presenter.rb:92-255`; `app/services/analytics/comparative_analysis_service.rb:104`; `app/services/reports/client_revenues/report_decorator.rb:98,136`; `app/services/reports/accounts_aging/fetch_overdue_amount.rb:51-55` | Port verbatim; fixing is out of scope of this migration. | D-6 |
-| X-7 | Entries added to an invoice after it leaves draft are never locked (`after_save … if: :draft?`). | `invoice.rb:62` [O-inf] | Preserve via lock rule table. | D-2 |
-| X-8 | `InvoiceLineItem#unlock_timesheet_entries` unlocks an entry even if another draft invoice still references it (only possible because of X-3). | `invoice_line_item.rb:72-76` [O-inf] | Preserve; disappears if D-3 enforces single reference. | D-3 |
+| F1 | An entry already on a kept invoice is put on a second one | Allowed. Both invoices lock one boolean. Candidate selection hides such entries, but explicit ids through the API or MCP get through (K6). | Prepare is refused: the entry is on another invoice. | An explicit double allocation fails with a clear error instead of billing the time twice. Normal selection is unchanged. |
+| F2 (L2) | A draft invoice is discarded | Its entries stay locked. `after_discard :unlock_timesheet_entries` runs, then `update_invoice_number` calls `update`, which fires `after_save :lock_timesheet_entries` again (`app/models/invoice.rb:62-64`, `:323-325`) (K2). | Its reservations are released. | An employee can edit time that was on a discarded draft. |
 
-### 4.3 Assumptions [A]
+Historical invoices and amounts do not change under either fix. Both fixes stay in force through
+rollback (§10.5).
 
-| ID | Assumption | How it will be checked |
-|---|---|---|
-| A-1 | Production volume fits comfortably in one Postgres cluster for the foreseeable future; the split is driven by ownership and deploy independence, not scale. | Owner confirmation; `pg_stat_statements` review (PgHero is mounted, `config/routes.rb:22-24`). |
-| A-2 | No external integrator reads Miru's database directly. | Owner confirmation. |
-| A-3 | Production contains some X-3 duplicates and X-2 locked-but-unreferenced entries. | P0 data audit queries (§12.3). |
-| A-4 | Reporting staleness of ≤ 5 s (p99) is acceptable for cross-domain pages (team productivity, project receivables, growth digest). | Product sign-off (D-7). |
-| A-5 | Stripe invoice-checkout events can be routed by a separate webhook endpoint (multiple endpoints per account are standard Stripe functionality); whether connected-account events need special handling is unverified. | Spike in WP-B5. |
-| A-6 | Playwright specs (`spec/e2e/*.spec.ts`, `tests/*.spec.ts`) are not run in CI (`.github/workflows/validations.yml`) and need a harness before they can gate releases. | Observed workflow; confirm no external runner. |
+### 2.4 Money (preserved) [O]
 
-### 4.4 Proposed requirements [P]
+| ID | Behaviour |
+|---|---|
+| M1 | The PDF recomputes its subtotal with `round(3)` and its total unrounded, so the printed total can differ from the stored `amount` (§1.6, K11). |
+| M2 | Stored totals use Float arithmetic rounded to 2 dp; tax is recomputed only while draft (§1.6). |
+| M3 | Line `quantity` is an integer posted by the client; fractional minutes are cast away (K9). |
+| M4 | The audit log does not cover `discount`, `tax`, `outstanding_amount`, line items or taxes, so parity is proven by snapshot (§1.6). |
 
-- R-1 Each service is the only writer of its tables; enforced by database roles, not convention.
-- R-2 No synchronous call chain longer than one hop on any user request (Core → service).
-- R-3 Every mutating internal call is idempotent by key; every event is delivered at-least-once and
-  consumed idempotently by `(aggregate, version)`.
-- R-4 Any phase can be rolled back by configuration until P6.
-- R-5 Money is transported as decimal strings, never JSON floats.
-- R-6 Every service-owned row carries `company_id`; every query is company-scoped and verified by tests.
+Normal billing operations that a user is authorized to make keep their existing recalculation behaviour.
+Moving data between owners never recomputes or converts a value.
+
+### 2.5 Observed, outside the scope of change
+
+The design does not change these; they are recorded because the boundary must not hide them:
+
+- single invoice delete is soft and bulk delete is hard, with no `.kept` filter (§1.4);
+- mobile collections let an employee with pro access create sent invoices and payments outside
+  `InvoicePolicy` (§1.4);
+- tenancy is enforced by convention through `current_company`, not a default scope (§1.2).
 
 ---
 
-## 5. Target architecture
-
-### 5.1 Picture
+## 3. Target architecture [P]
 
 ```mermaid
 flowchart LR
-  subgraph Clients
-    SPA[React SPA]
-    MOB[Mobile app]
-    CLI[CLI / MCP clients]
-    AGT[Agents]
-    PSP[Stripe / Razorpay / PayPal]
+  subgraph Existing["Existing application (miru-web)"]
+    CTRL[Entry writers W1-W6<br/>+ invoice boundary]
+    GW[Write gateway]
+    RULE1[Reservation rule<br/>shared library]
+    PROJ[Projection consumer]
+    TE[(timesheet_entries<br/>read model)]
+    READ[Reports, dashboard,<br/>totals, reminders]
   end
-
-  subgraph Core["Core (existing Rails monolith)"]
-    GW[Gateway / BFF<br/>auth, tenant, routing flags]
-    DIR[Directory<br/>companies, users, roles,<br/>clients, projects, members, rates,<br/>agents, exchange rates]
-    RPT[Reporting module<br/>projections + report services]
-    OTHER[Leave, expenses,<br/>subscriptions, MCP server]
-    CDB[(core DB)]
+  subgraph TK["Timekeeping (new app, own DB)"]
+    API[Entry API<br/>prepare / commit / abort]
+    RULE2[Reservation rule<br/>shared library]
+    TDB[(entries, reservations,<br/>receipts, audits, outbox)]
+    RELAY[Relay job<br/>queue: timekeeping_relay]
   end
-
-  subgraph TK["Timekeeping service"]
-    TKAPI[Entries API<br/>claims API]
-    TKDB[(timekeeping DB<br/>entries, claims,<br/>directory replica, outbox)]
-  end
-
-  subgraph BL["Billing service"]
-    BLAPI[Invoices, payments API<br/>webhooks, PDF, QuickBooks]
-    BLDB[(billing DB<br/>invoices, lines, taxes,<br/>payments, rate replica, outbox)]
-  end
-
-  SPA & MOB & CLI & AGT --> GW
-  PSP -- invoice payment webhooks --> BLAPI
-  PSP -- subscription webhooks --> GW
-  GW -- "internal token" --> TKAPI
-  GW -- "internal token" --> BLAPI
-  BLAPI -- "claims (sync, idempotent)" --> TKAPI
-  TKAPI -. event feed .-> RPT
-  BLAPI -. event feed .-> RPT
-  DIR -. event feed .-> TKAPI
-  DIR -. event feed .-> BLAPI
-  BLAPI -. "rate miss (sync)" .-> DIR
+  CTRL --> GW
+  GW -- "HTTP, user token + generation" --> API
+  API --- RULE2
+  API --> TDB
+  TDB --> RELAY
+  RELAY -- "entry snapshots, HTTP" --> PROJ
+  PROJ --> TE
+  READ --> TE
+  GW --- RULE1
 ```
 
-Solid arrows are synchronous HTTP; dotted arrows are pull-based event feeds (§7.5).
+### 3.1 The write gateway
 
-### 5.2 Service responsibilities and authoritative data
+`Timekeeping::Gateway` is one module in the existing application. It is the **only** code allowed to
+write entry state or reservations. Every writer in §1.3 calls it:
 
-| Service | Owns (single writer) | Exposes | Depends on |
-|---|---|---|---|
-| **Timekeeping** | `timesheet_entries` (+ new `company_id`, `lock_version`), `billing_claims`, `tk_idempotency_keys`, `tk_outbox`, read-only directory replica (`tk_dir_*`) | Entry CRUD (all paths A–F, H), time-tracking list, bulk actions, entry aggregates (minutes by project/client/user), claimable-entries query, claims API, event feed | Core directory feed; internal token keys |
-| **Billing** | `invoices`, `invoice_line_items` (+ `project_id`, `user_id`, `entry_snapshot`), `invoice_line_item_time_entries`, `invoice_taxes`, `tax_configurations`, `payments`, `payments_providers`, `stripe_connected_accounts`, `razorpay_payouts`, `quickbooks_*`, `bulk_invoice_download_statuses`, `bl_outbox`, `bl_idempotency_keys`, rate replica | Invoice/line-item/payment APIs, invoice view by external key, PDF, provider webhooks, QuickBooks export, receivables aggregates, event feed | Timekeeping claims + claimable query; Core directory feed; Core exchange-rate API on miss |
-| **Core** | Users, sessions, CLI sessions, agent keys, roles, companies, employments, clients, client members, projects, project members and **hourly rates**, exchange rates, leave/time-off/holidays, expenses, subscriptions, analytics reports, audits (historic), `rpt_*` projections, `service_routes` | Public API (gateway), directory feed and APIs, exchange-rate API | Both service APIs and feeds |
+- W1 web and mobile controller, W2 bulk controller, W3 CLI controller (and so W3a MCP, which reaches W3
+  in-process), W4 agent controller, W5 Harvest import;
+- W6 **agent destroy**: `dependent: :nullify` is replaced by a gateway command that nulls `agent_id` on the
+  agent's company's entries in Timekeeping and writes an audit row;
+- W7 the **invoice reservation boundary** (§7), which replaces `Invoice#lock_timesheet_entries`,
+  `#unlock_timesheet_entries`, `#update_timesheet_entry_status!` and `InvoiceLineItem#unlock_timesheet_entries`.
 
-Why these boundaries:
+Routes, params and response shapes do not change. Controllers keep authenticating and authorizing as
+today (§6.2), then hand the gateway a command. The gateway attaches the current **ownership generation**
+(§10.1) and sends the command to the current owner. A command carrying a stale generation is refused.
 
-- **Timekeeping** is defined by one aggregate (the entry) with many writers (six paths) and one hard
-  invariant shared with billing: "an invoiced entry cannot be edited by an employee and is not offered
-  for invoicing again." Putting the claims ledger *inside* Timekeeping makes that invariant a local
-  transaction (edit and claim checks lock the same row), instead of a distributed one.
-- **Billing** is defined by money, external payment providers, and its own lifecycle (draft → sent →
-  paid). It consumes time as snapshots; it already copies `name`, `date`, `quantity`, `rate` onto line
-  items (B-7), so most of its dependency on live entries is already gone. What remains is the claim.
-- **Projects, clients and rates stay in Core** because they are edited together in one screen
-  (project + members + rates), are referenced by expenses and leave as well, and are the tenant
-  backbone. Moving them into Timekeeping would make Billing depend on Timekeeping for rates and client
-  data; moving them into Billing would make Timekeeping depend on Billing for project validity. Core
-  publishes them; both services hold read-only replicas.
-- **Reporting stays in Core** because its value is joining data from all domains. As a separate
-  service it would replicate the same three feeds Core already replicates and add a deployable with
-  no write authority of its own. Its separation is enforced by data access: reporting code may read
-  only `rpt_*` projections and Core tables (R-1, CI check in §14).
-- **Time-off / leave stays in Core** (it is HR data, not billed time). The time-tracking page composes
-  entries (Timekeeping) with time-off and holidays (Core) in the BFF.
+The gateway's choice of owner is one table, read from the ownership record:
 
-### 5.3 What remains in the monolith, explicitly
+| Owner | Entry writes go to | Reservations go to |
+|---|---|---|
+| `legacy` (before the first cutover only) | today's model code | today's callbacks |
+| `timekeeping` | Timekeeping entry API | Timekeeping prepare/commit/abort |
+| `monolith` (after a rollback) | local entry code | local reservation table, same shared rule |
 
-Authentication (Devise, JWT, OTP, passkeys, TOTP, SSO), CLI and agent credential issuance and
-verification, workspaces and roles, clients and client portal membership, projects, project members
-and rates, employments, leave/time-off/holidays/carryovers, expenses, SaaS subscriptions and the
-subscription half of the Stripe webhook, analytics/reporting (on projections), notifications and
-digests, MCP server (its tools call the gateway exactly as today), admin, the SPA and the mobile API.
+`legacy` is never returned to. Rollback goes to `monolith`, the **prepared** existing application (§10.5).
 
----
+### 3.2 Data ownership and the read model
 
-## 6. Alternatives considered
+| Data | Owner while Timekeeping owns | Notes |
+|---|---|---|
+| Entries, reservations, entry audit rows, invoice-operation receipts, entry API idempotency receipts | Timekeeping | Same entry ids |
+| `timesheet_entries` | Read model in the existing application | Written **only** by the projection consumer |
+| Invoices, line items, invoice taxes, payments, invoice-operation intents | Existing application | Billing rows hold no tokens or reservation state |
+| Users, companies, roles, clients, projects, members, rates, agents | Existing application | Read synchronously by the gateway |
 
-| # | Alternative | Verdict | Reason |
-|---|---|---|---|
-| A1 | **Modular monolith only** (Rails engines/packs, one DB, one deploy). | Rejected as end state; **adopted as P1**. | The issue requires independent deployment and explicit data ownership; packs alone give neither. But the seams must exist in-process first, so it is the first phase. |
-| A2 | **Three services** (Timekeeping, Billing, Reporting). | Deferred. | Reporting has no write authority and needs every domain's data; extracting it duplicates replication and adds a deployable without reducing coupling. Re-evaluate when any of: report queries exceed 20 % of Core DB time; reporting needs a different store (columnar); or a separate team owns it. The `rpt_*` projections make that extraction mechanical later. |
-| A3 | **Billing-only extraction** (timekeeping stays in Core). | Rejected. | Leaves the entry-lock invariant split between Core and Billing anyway, and does not separate timekeeping from reporting. Same protocol cost, half the benefit. |
-| A4 | **Timekeeping owns projects, clients and members.** | Rejected. | Makes Billing depend on Timekeeping for client/rate data and moves the tenant backbone out of Core where expenses/leave also need it (§5.2). |
-| A5 | **Claims owned by Billing** (Billing tells Timekeeping "lock/unlock entry"). | Rejected. | The edit-lock check happens on entry update, inside Timekeeping. If Billing owned claims, every entry edit would need a synchronous call to Billing, or the lock would be eventually consistent and an employee could edit an entry that was just invoiced. |
-| A6 | **Shared database with schema separation forever.** | Partially adopted (P3–P5). | Schemas + roles give ownership; separate databases (P6) remove the shared failure and upgrade domain. P6 is planned but can be postponed without losing the other benefits. |
-| A7 | **Message broker** (Kafka / SQS / NATS) instead of HTTP feeds. | Rejected for now. | Adds infrastructure that does not exist today (§3.1). A transactional outbox exposed as a cursor-paged HTTP feed gives at-least-once delivery, replay and backfill with the existing Postgres + Solid Queue stack. The envelope (§7.5) is broker-neutral, so a broker can be added behind the relay later. |
-| A8 | **Event-sourced time ledger.** | Rejected. | Large rewrite of every write path with no requirement that needs it; audits already provide history. |
-| A9 | **Distributed transactions / 2PC between Billing and Timekeeping.** | Rejected. | Not supported by the stack; a reservation (hold → confirm/release) with idempotent retries gives the needed guarantee (§11.2). |
+`timesheet_entries` keeps its columns. It gains a `version` column, and `locked` becomes a derived value
+carried in the snapshot (true when the entry holds a reservation with the edit lock, §7.2). The
+consumer applies a snapshot only when its `version` is higher than the stored one.
 
----
+### 3.3 Two read rules
 
-## 7. API and event contracts
+1. **Reads that decide money, or that a user makes right after writing, read Timekeeping.** These are the
+   entry API's own list and show reads (web, mobile, CLI, MCP, agent), invoice candidate selection
+   (`GenerateInvoice::NewLineItemsService`), and invoice validation (L8, through the prepare response).
+2. **Every aggregate reads the projection and may lag.** These are reports, analytics, metrics, the
+   dashboard, project, client and team totals, and reminders (§1.7). They read `timesheet_entries` exactly
+   as today.
 
-All payloads below are illustrative design material.
+There is one writer to the projection. Nothing writes through from the request path.
 
-### 7.1 Conventions [P]
-
-- **Versioning.** Internal APIs are path-versioned (`/internal/v1/...`). Within a version, changes are
-  additive only (new optional fields, new endpoints). Removing or changing a field requires `/v2`, run
-  side by side for at least two releases of every consumer. Events carry `type` with a version suffix
-  (`timekeeping.time_entry.upserted.v1`); consumers ignore unknown fields and unknown types.
-- **Public API compatibility.** Public routes do not change (B-1). Core keeps the existing controllers
-  as thin adapters: authenticate, resolve tenant, mint internal token, forward, and render with the
-  existing jbuilder views where shapes are derived (see §12 P4 "adapter parity" tests).
-- **Headers.** `Authorization: Bearer <internal token>` (§8), `Idempotency-Key` (required on every
-  mutating internal call), `X-Request-Id` (propagated from the edge), `traceparent`/`sentry-trace`.
-- **Errors.** `application/problem+json` with stable `type` URIs, e.g.
-  `…/errors/entry-locked`, `…/errors/stale-entry`, `…/errors/claim-conflict`,
-  `…/errors/idempotency-key-reused`. Core maps them back to today's public error JSON
-  (`app/controllers/concerns/error_handler.rb:7-10`).
-- **Money and time.** Money as decimal strings with the column's scale (`"150.00"`). Durations as the
-  stored minute value; for the float column it is serialized with Ruby's shortest round-trip
-  representation and documented as such (R-5, §10.2).
-- **Pagination.** Opaque cursors; feeds use a numeric `position` cursor.
-
-### 7.2 Timekeeping API [P]
-
-Public-equivalent (called by Core gateway, one per existing write path so B-3 quirks are preserved):
-
-```
-POST   /internal/v1/entries                  # paths A, mobile   (body: project_id, user_id?, duration, work_date, note, bill_status)
-PATCH  /internal/v1/entries/{id}
-DELETE /internal/v1/entries/{id}             # soft delete (discard)
-PATCH  /internal/v1/entries/bulk             # path B: { ids, project_id }
-DELETE /internal/v1/entries/bulk             # path B
-POST   /internal/v1/cli/entries              # path C (and MCP via C)
-PATCH  /internal/v1/cli/entries/{id}
-DELETE /internal/v1/cli/entries/{id}
-POST   /internal/v1/agent/entries            # path E (external_run_id, proof_* …)
-POST   /internal/v1/imports/harvest/batches  # path F, called by Core's DataImportJob in 500-row batches
-GET    /internal/v1/entries?from&to&user_id&project_ids&status&cursor   # time tracking, reports
-GET    /internal/v1/aggregates/minutes?group_by=project|client|user&from&to&filters…
-```
-
-Billing-facing:
-
-```
-GET /internal/v1/claimable-entries?client_id=&project_ids[]=&filters…&exclude_ids[]=&cursor=
-  -> { entries: [ { id, project_id, user_id, work_date, duration, note, bill_status,
-                    review_status, version } ], next_cursor }
-```
-
-Returns exactly B-6: kept, `unbilled` (unless the `status` filter overrides it, as today —
-`time_entries/filters.rb:41-43` merged after defaults), on the given kept projects, and **with no
-active claim**. Rates are not returned; Billing joins its rate replica.
-
-```
-PUT /internal/v1/billing-claims/{invoice_id}
-Idempotency-Key: claim:{invoice_id}:{revision}
-{
-  "company_id": 42,
-  "invoice_id": 9001,
-  "revision": 7,                 // Billing's invoice lock_version; monotonic
-  "invoice_state": "draft",      // draft | issued | void | deleted
-  "entry_ids": [101, 102, 205],  // full set referenced by the invoice at this revision
-  "phase": "hold"                // hold | confirm | cancel  (see §11.2)
-}
--> 200 {
-  "applied_revision": 7,
-  "claims": [ { "entry_id": 101, "state": "held", "version": 14, "locked": true } , … ],
-  "conflicts": [ { "entry_id": 205, "other_invoice_ids": [8800] } ]   // reported, not enforced until D-3
-}
-```
-
-Set-replace semantics: the request states the whole truth for one invoice at one revision; requests
-with `revision` lower than the stored one are acknowledged and ignored (out-of-order safe).
-`invoice_state` lets Timekeeping evaluate the lock rule table (§9.3) without knowing invoice internals.
-
-```
-GET /internal/v1/billing-claims?invoice_id=…            # reconciliation
-GET /internal/v1/billing-claims?entry_id=…              # support tooling
-```
-
-### 7.3 Billing API [P]
-
-Public-equivalent (Core forwards the existing routes): invoices CRUD, `send_invoice`,
-`send_reminder`, `download`, `waived`, `bulk_deletion`, `bulk_download`, `line_items` (selection —
-Billing calls `claimable-entries` and joins rates), `payments`, `razorpay_payment_link`,
-`quickbooks_sync`, invoice analytics, invoice view by `external_view_key` (unauthenticated, as today).
-
-Aggregates for Core pages:
-
-```
-GET /internal/v1/receivables?client_id=…            # client overdue/outstanding (InvoiceAmountsSummary)
-GET /internal/v1/receivables?company_id=…           # company overdue/outstanding/draft
-```
-
-Webhooks (public, unauthenticated, signature-verified; same URLs, routed at the edge — §13.2):
-`/webhooks/razorpay/*`, `/webhooks/paypal/*`, and the invoice half of Stripe (§12 P5, A-5).
-
-### 7.4 Core directory API [P]
-
-```
-GET /internal/v1/directory/projects/{id}            # read-through on replica miss
-GET /internal/v1/directory/companies/{id}
-GET /internal/v1/exchange-rates?from=EUR&to=USD&date=2026-11-10   # Core is the single rate writer
-```
-
-### 7.5 Event feeds [P]
-
-Each service (and Core) writes events to an outbox table **in the same transaction** as the state
-change. A single relay per service (Solid Queue job holding an advisory lock) assigns a gap-free
-`position` in commit order to newly committed rows. Feeds expose only positioned rows, so a consumer
-can never skip an event committed late with a lower primary key.
-
-```
-GET /internal/v1/feed?after=123456&limit=500
--> { "events": [ <envelope>, … ], "next_after": 123956, "high_watermark": 124002 }
-```
-
-Envelope:
-
-```json
-{
-  "event_id": "0b6c4f9e-…",
-  "type": "timekeeping.time_entry.upserted.v1",
-  "position": 123457,
-  "company_id": 42,
-  "aggregate": { "type": "time_entry", "id": 101, "version": 14 },
-  "occurred_at": "2026-11-10T18:22:03.120Z",
-  "actor": { "type": "user", "id": 7, "agent_id": null, "source": "cli" },
-  "request_id": "…",
-  "data": { "…": "full current state of the aggregate" }
-}
-```
-
-Events are **state-carrying** (full aggregate state + version), so consumers upsert and discard
-anything older than what they hold. That makes duplicates and reordering harmless and lets a consumer
-rebuild from position 0.
-
-| Producer | Event types (v1) |
-|---|---|
-| Timekeeping | `time_entry.upserted` (create/update/discard/undiscard, includes `bill_status`, `review_status`, `locked`, `discarded_at`), `billing_claim.changed` |
-| Billing | `invoice.upserted` (header, totals, status, lines with `entry_ids`, `project_id`, `user_id`), `payment.upserted` |
-| Core | `company.upserted` (`base_currency`, `timesheet_edit_days`, time zone), `user.upserted`, `employment.upserted`, `client.upserted`, `project.upserted` (`billable`, `discarded_at`), `project_member.upserted` (incl. `hourly_rate`), `agent.upserted`, `exchange_rate.upserted` |
-
-Existing `Rails.event.notify` calls stay as they are (observability, B-1 for the event viewer); the
-outbox is a separate, durable mechanism.
-
----
-
-## 8. Tenant isolation, authorization and identity propagation
-
-### 8.1 Identity propagation [P]
-
-All end-user, CLI, MCP, mobile and agent traffic still authenticates in Core exactly as today
-(§3.6). Core then mints a **per-request internal token** (JWT, EdDSA, 60 s TTL) for each downstream
-call:
-
-```json
-{
-  "iss": "miru-core", "aud": "timekeeping", "exp": …, "jti": "…",
-  "sub": "user:7",
-  "company_id": 42,
-  "roles": ["employee"],                 // rolify roles on company 42, read live at mint time
-  "actor": { "type": "user|agent|system|webhook", "agent_id": 3, "auth": "session|jwt|cli|x_auth|agent_key" },
-  "source": "web|mobile|cli|mcp|agent|harvest_import",
-  "request_id": "…"
-}
-```
-
-Because the token is minted per request from live role data, role revocation takes effect on the
-next request — the same freshness as today's per-request `has_role?` checks. Services verify the
-signature against Core's published public keys (JWKS, rotated with overlap), check `aud`, `exp`, and
-reject tokens whose `company_id` disagrees with the target resource.
-
-`actor.type = "system"` replaces today's `Current.user == nil` case (jobs, imports, rake tasks), and
-the model-level checks that are skipped today when `Current.user` is nil (`timesheet_entry.rb:157-162,180-186`)
-are skipped for system actors — preserving B-5 exactly.
-
-Service-to-service calls (Billing → Timekeeping claims) carry a service token (`sub: "service:billing"`)
-**plus** the originating user's claims in `act` (RFC 8693 style), so Timekeeping can audit who caused a
-lock.
-
-### 8.2 Authorization [P]
-
-- Policies move with their data: `TimesheetEntryPolicy` and the bulk/CLI/agent controller rules move
-  to Timekeeping verbatim; `InvoicePolicy`, `InvoiceLineItemPolicy`, `PaymentPolicy` move to Billing.
-  They read roles from the token instead of rolify, through a small `RoleSource` interface so the
-  existing policy specs can run against both.
-- Core keeps a coarse gate (authenticated, tenant resolved, pro-access where required) and never
-  decides domain permissions for data it does not own.
-- Policy specs (`spec/policies/timesheet_entry_policy_spec.rb`, `invoice_policy_spec.rb`,
-  `invoice_line_item_policy_spec.rb`, `payment_policy_spec.rb`) are ported first and run unchanged
-  against the in-process interface in P1, then against the service in P4/P5.
-
-### 8.3 Tenant isolation [P]
-
-- **Every** service-owned row gets `company_id` (backfilled for `timesheet_entries` from
-  project → client → company, §12.2) and every query is scoped by it, using the token's company.
-- Defense in depth: Postgres **row-level security** on service tables, with policies
-  `USING (company_id = current_setting('app.company_id')::bigint)`, set per transaction by the
-  service. System jobs that legitimately span tenants (overdue job, reconciliation) use a separate
-  role with `BYPASSRLS`, audited.
-- Feeds are global (one cursor per consumer) but every envelope carries `company_id`; projections are
-  tenant-scoped at write.
-- The public invoice view by `external_view_key` remains unauthenticated (B-1) and is served by
-  Billing; Core forwards without a user token.
-- A cross-tenant test suite (§14.3) proves that every internal endpoint rejects resources from
-  another company.
-
----
-
-## 9. Review, locking, billing associations and state transitions
-
-### 9.1 Ownership [P]
-
-| Concept | Owner | Writers | Notes |
-|---|---|---|---|
-| `review_status` | Timekeeping | Entry writers (agent path forces `pending_review`); future approve/reject endpoints | No approve/reject exists today (§3.3). Billing does **not** filter on it (B-6) unless D-4 changes that. |
-| `bill_status` | Timekeeping | Users/API/import as today | Billing never writes it (X-1, D-1). |
-| `locked` | Timekeeping | **Only** the lock rule interpreter (§9.3) reacting to claims | Enforcement unchanged (employee-only, B-5). |
-| Claims (entry ↔ invoice references) | Timekeeping (ledger) | Billing via `PUT billing-claims` only | Billing's line items remain the authoritative record of *what was invoiced* (snapshots); claims are the authoritative record of *which entries are spoken for*. |
-| Line items and snapshots | Billing | Billing | Gains `project_id`, `user_id`, `entry_snapshot` (duration, work_date, note, version) at claim time, removing reporting's need to join live entries for revenue by person/project. |
-
-### 9.2 Entry and claim state [P]
-
-```mermaid
-stateDiagram-v2
-  [*] --> Unclaimed
-  Unclaimed --> Pending: hold (invoice revision being saved)
-  Pending --> Held: confirm (invoice draft committed)
-  Pending --> Unclaimed: cancel / hold TTL expired
-  Held --> Committed: invoice issued (draft to sent, viewed, ...)
-  Held --> Unclaimed: removed from draft / draft voided / draft hard-deleted
-  Committed --> Unclaimed: invoice voided (discarded) / removed from issued invoice
-  Committed --> Committed: status changes (viewed, overdue, paid, waived)
-```
-
-- *Eligibility* (B-6): an entry is claimable iff it has no claim in `Pending`, `Held` or `Committed`.
-  Today's rule — "not on any kept invoice" — maps exactly: kept draft ⇒ `Held`, kept non-draft ⇒
-  `Committed`, discarded ⇒ released.
-- `Pending` exists only for the duration of an invoice save (§11.2) and has a TTL (default 10 min).
-  Pending claims make entries ineligible but do **not** change `locked`, so a failed save leaves no
-  user-visible trace once the TTL passes.
-
-### 9.3 The lock rule table [P]
-
-`locked` stays a stored column in Timekeeping. It is seeded from today's value at backfill (so X-2
-residue carries over unchanged) and afterwards is mutated **only** by one interpreter that maps
-(claim transition, invoice state) to a lock effect. The rules are data; the **compat** set
-reproduces today exactly, the **corrected** set is what D-2 would approve.
-
-| Transition reported by Billing | Today (code) | `compat` effect | `corrected` effect |
-|---|---|---|---|
-| Entry enters a claim, invoice `draft` | `after_save :lock_timesheet_entries, if: :draft?` (C1) | lock | lock |
-| Any save of a `draft` invoice (entries unchanged) | same callback re-locks all | lock all referenced | lock all referenced |
-| Entry leaves a claim, invoice `draft` (line removed, or invoice hard-deleted) | `InvoiceLineItem#unlock_timesheet_entries` (C9) | unlock | unlock **unless still claimed elsewhere** |
-| Invoice `draft` → `void` (discard) | unlock then re-lock by renumbering save (C4) | **no change (stays locked)** — X-2 | unlock |
-| Entry enters a claim, invoice issued | callback skipped (X-7) | no change | lock |
-| Invoice issued → `void` | no unlock (C4b) | no change | unlock |
-| Invoice `draft` → issued, or issued → other issued states | no effect | no change | no change |
-
-The interpreter is one function over this table, so all lock branching lives in one place.
-Switching sets is a per-company configuration value, so the correction can be rolled out and
-rolled back like any other flag.
-
-### 9.4 Billing associations [P]
-
-- Billing keeps `invoice_line_items.timesheet_entry_id` and `invoice_line_item_time_entries` as
-  **plain ids** (FKs to `timesheet_entries` dropped in P3), plus the new snapshot columns.
-- Every Billing transaction that changes which entries an invoice references, or changes its state
-  between draft / issued / void / deleted, produces exactly one claims declaration for the new
-  revision (§11.2). That is the **only** coupling point; it replaces `Invoice#lock_timesheet_entries`,
-  `#unlock_timesheet_entries`, `#update_timesheet_entry_status!` and
-  `InvoiceLineItem#unlock_timesheet_entries`.
-- Entry discard after invoicing: today an entry can be discarded while on an invoice (discard skips
-  validations [O-inf]); the line item keeps its snapshot. Preserved. Timekeeping emits
-  `time_entry.upserted` with `discarded_at`; reporting applies today's `.kept` filters (J2) on the
-  projection.
-
----
-
-## 10. Financial precision, rounding and historical invoices
-
-### 10.1 Rules [P]
-
-1. **Billing is the only place money is computed** for invoices. Timekeeping never computes money.
-2. The current formulas (B-8) are extracted unchanged into one pure module, `Billing::Totals`
-   (inputs: line quantities, rates, discount, taxes, paid amount, status; outputs: subtotal, tax,
-   amount, amount_due, outstanding_amount), including the Float arithmetic and both rounding points.
-   `Billing::LineCost` holds the 3-dp `total_cost` path separately (X-5). Golden tests pin outputs for
-   a generated corpus plus a production sample (§14.2).
-3. Changing the arithmetic (e.g. BigDecimal throughout, or keeping fractional minutes) is a separate,
-   decided change (D-5), shipped with a diff report of every open draft it would alter. It never
-   alters non-draft invoices.
-4. **Quantity conversion** from entry duration (float minutes) to line quantity (integer minutes)
-   stays in Billing with today's truncation (C5, X-4). Timekeeping returns the stored float.
-
-### 10.2 Transport [P]
-
-- Money: decimal strings at column scale (`"150.00"`, rates `"0.9200000000"`). Parsed with
-  `BigDecimal`, never `Float`.
-- Durations: JSON numbers produced by Ruby `Float#to_s` (shortest round-trip). A contract test asserts
-  `parse(serialize(x)) == x` for a corpus that includes values like `90.7`, `0.1`, `479.99999`.
-
-### 10.3 Currency and exchange rates [P]
-
-- Core remains the single writer of `exchange_rates` (it already fetches and persists them,
-  `app/services/currency_conversion_service.rb:11-34`, `app/models/exchange_rate.rb:15-37`).
-- Billing keeps a replica fed by `exchange_rate.upserted`; on a miss it calls Core's rate API
-  synchronously (the same failure mode as today's external fetch on miss).
-- `invoices.exchange_rate`, `exchange_rate_date` and `base_currency_amount` are fixed at
-  computation time exactly as today (`invoice.rb:327-349`) and travel with invoice events, so
-  reporting never re-converts.
-
-### 10.4 Historical invoices [P]
-
-- No migration step recomputes `amount`, `amount_due`, `amount_paid`, `outstanding_amount`, `tax`,
-  `discount`, `base_currency_amount`, `exchange_rate` or any payment amount. Data moves as
-  `numeric → numeric` (logical replication or `COPY`), never through Ruby floats.
-- Billing must suppress the `before_validation :calculate_amounts` / `calculate_base_currency_amount`
-  triggers on any migration write (there should be none: data is moved, not saved through models).
-- A **financial fingerprint** is computed before and after every phase that touches billing data:
-  per company and per currency, `count(*)`, `sum(amount)`, `sum(amount_paid)`, `sum(amount_due)`,
-  `sum(base_currency_amount)`, `sum(tax)`, `sum(discount)` for invoices by status and discarded flag;
-  the same for payments by status; plus a SHA-256 over `(id, amount, base_currency_amount, status,
-  updated_at)` ordered by id. Exit criteria require exact equality (§15).
-- PDFs: the PDF code path (`InvoicePayment::PdfGeneration`, `app/services/pdf_generation/invoice_service.rb`)
-  moves to Billing unchanged; a byte-level text comparison of rendered PDFs for a sample of historical
-  invoices (text extracted, timestamps masked) is part of P5 exit.
-
----
-
-## 11. Transactions, consistency, retries, duplicates, concurrency and partial failure
-
-### 11.1 Transaction boundaries [P]
+### 3.4 Transaction boundaries
 
 | Operation | Today | Target |
 |---|---|---|
-| Entry create/update/discard | One AR transaction | One Timekeeping transaction: entry row (`SELECT … FOR UPDATE`, `lock_version`) + audit + outbox row |
-| Draft invoice save | One AR transaction: invoice, lines, taxes, **entry locks** | Billing: hold (sync) → Billing transaction (invoice, lines, taxes, outbox, `claims_pending` marker) → confirm (sync, retried from outbox if it fails) |
-| Invoice send | `record_send!` transaction; mail via job | Billing transaction (status, `sent_at`, outbox incl. claims declaration with `invoice_state: issued`) ; mail via Billing's job |
-| Payment webhook | `with_lock` on invoice | unchanged inside Billing |
-| Harvest import | 500-row transactions | Core job parses CSV and calls Timekeeping batch endpoint per 500 rows; each batch one Timekeeping transaction, idempotent by `import_id:batch_no` |
+| Entry create, update, discard | One transaction in the existing app | One Timekeeping transaction: entry row, audit row, outbox row, idempotency receipt |
+| Bulk move or delete | Relation `update` / `discard_all` | One Timekeeping transaction per request, keeping A9's per-entry silent skip |
+| Harvest import | 500 rows per transaction, savepoint per row | The existing app parses; Timekeeping takes 500-row batches, one transaction each, idempotent by `import_id:batch_no` |
+| Invoice save, discard, destroy | One transaction including entry locks | The save order in §9.2 |
+| Agent destroy | `nullify` inside the destroy transaction | The existing app destroys the agent after Timekeeping acknowledges the detach command (idempotent by agent id) |
 
-### 11.2 The claim protocol (reservation with idempotent confirm) [P]
+---
+
+## 4. Alternatives considered
+
+| Alternative | Verdict | Reason |
+|---|---|---|
+| Two services, Timekeeping and Billing (revision 1) | Rejected | Billing has no write coupling problem once reservations exist. A second service doubles the deploy, contract and migration work without removing a concept. |
+| Modular monolith only | Rejected | Gives no independent deployment or separate data ownership. The gateway is still built first, because it is the boundary either way. |
+| Reservations owned by billing | Rejected | The edit check runs on entry update, inside Timekeeping. Billing ownership would need a synchronous call to billing on every entry edit. |
+| Event-carried directory replicas (`Projects::Changed`, `ProjectMemberships::Changed`, `Companies::SettingsChanged` or revision 1's directory feed) | Removed | Authorization facts are read before the write transaction today (§2.2). The gateway reads them synchronously and passes them as claims. Nothing would consume these events. |
+| Message broker | Rejected | One producer and one consumer. A transactional outbox and an HTTP relay on the existing Solid Queue stack cover it. |
+| Per-company waves with shadow reads | Deferred (§15.3) | Two seeded businesses move in one pause. Waves bring mixed ownership and its id and sync machinery. |
+| `duration` as decimal | Deferred (§15.3) | Adds a conversion and a round-trip check, and changes no result. |
+
+---
+
+## 5. Contracts [P]
+
+All payloads are illustrative design material. Each contract has a fake on its consumer's side (§14).
+
+### 5.1 Conventions
+
+- Internal paths are versioned (`/internal/v1/...`). Changes within a version are additive.
+- Every mutating call carries `Idempotency-Key` and `X-Ownership-Generation`. A request with a stale
+  generation gets `409 stale-generation`.
+- Errors are `application/problem+json` with stable `type` values. The gateway maps them to today's
+  public error JSON.
+- Money is a decimal string at column scale. `duration` is the stored float, serialized with Ruby's
+  shortest round-trip form. A contract test asserts `parse(serialize(x)) == x` for values such as `90.7`,
+  `0.1` and `479.99999`.
+
+### 5.2 Entry API (Timekeeping)
 
 ```
-Billing.save_invoice(cmd):
-  rev = invoice.lock_version + 1
-  r1 = Timekeeping.PUT billing-claims/{id}  {phase: hold, revision: rev, entry_ids, invoice_state}
-       Idempotency-Key: claim:{id}:{rev}:hold
-       -> entries now Pending for this invoice (TTL 10 min); conflicts reported
-  BEGIN (billing db)
-    write invoice, lines (+snapshots from r1), taxes; lock_version = rev
-    insert outbox(claims.confirm {id, rev})
-  COMMIT
-  relay delivers claims.confirm -> Timekeeping.PUT {phase: confirm, revision: rev}
-       Idempotency-Key: claim:{id}:{rev}:confirm      (retried until 2xx)
-  on rollback: best-effort PUT {phase: cancel}; otherwise TTL expiry cancels
+POST   /internal/v1/entries                       # W1 create, W3 create, W4 create (writer in token)
+PATCH  /internal/v1/entries/{id}
+DELETE /internal/v1/entries/{id}                  # discard
+POST   /internal/v1/entries/bulk_move             # W2 { ids, project }  -> { moved_ids, skipped_ids }
+POST   /internal/v1/entries/bulk_discard          # W2
+POST   /internal/v1/imports/{import_id}/batches/{n}   # W5
+POST   /internal/v1/agents/{agent_id}/detach      # W6: null agent_id on the company's entries, with audit row
+GET    /internal/v1/entries?user_id&from&to&cursor
+GET    /internal/v1/entries/{id}
+GET    /internal/v1/candidates?client_id&project_ids[]&filters…   # selection: kept, unbilled, no active reservation
 ```
 
-- **Why hold first:** it reproduces today's guarantee that entries are spoken for before the invoice
-  is visible, and makes the selection screen exclude them immediately (B-6).
-- **Confirm is asynchronous but immediate**: the relay runs right after commit; the user-visible
-  `locked` flips at confirm. Between commit and confirm (normally < 1 s) an employee edit would still
-  be allowed; today the lock is in the same transaction. Mitigation: Timekeeping treats `Pending`
-  claims of an invoice that has a *newer* confirmed revision as `Held` for edit checks, and the
-  confirm path is also invoked synchronously after commit (outbox is the retry backstop). Residual
-  window: only when Billing crashes between commit and the synchronous confirm — bounded by relay
-  latency and named in §17 (R-T2).
-- **Idempotency:** keys include phase and revision; Timekeeping stores `(key, request_hash, response)`
-  for 7 days; same key + same hash returns the stored response; same key + different hash returns 409
-  `idempotency-key-reused`.
-- **Ordering:** older revisions are ignored; a `cancel` for revision *n* is ignored if *n+1* is
-  confirmed.
+Responses carry the full entry and its `version`. The gateway renders them with today's views, so
+public JSON does not change. Idempotency receipts are stored with the entry and travel in the
+checkpoint (§10.5), so a client retry after a handoff returns its stored result.
 
-### 11.3 Retries and duplicate requests [P]
+### 5.3 Reservation API: prepare, commit, abort
 
-- Sync calls: timeout 2 s, at most 2 retries with jittered backoff, only for idempotent requests;
-  circuit breaker per dependency (open after 50 % failures over 20 requests, half-open after 30 s).
-- Public clients that retry (mobile, CLI, MCP) keep today's behavior; MCP's idempotency store stays in
-  Core (B-14) and wraps the forwarded call.
-- **Agent duplicates:** today `external_run_id` is not deduplicated (§3.3 E). Preserve; offer
-  optional `Idempotency-Key` on the agent path as an additive capability.
-- **Event consumers** keep an inbox table `(producer, event_id)` and upsert by `(aggregate id,
-  version)`; replays are no-ops.
+```
+POST /internal/v1/invoices/{invoice_id}/operations/{operation_id}/prepare
+{
+  "company_id": 42, "generation": 3,
+  "kind": "save",                 // save | discard | destroy
+  "invoice_state": "draft",       // draft | non_draft
+  "entry_ids": [101, 102, 205],   // desired set after this operation
+  "resolves": null                // or { "operation_id": "…", "outcome": "committed|aborted" }
+}
+-> 200 { "status": "prepared", "entries": [ { "id": 101, "company_id": 42, "project_id": 7,
+          "user_id": 3, "duration": 90.7, "work_date": "2026-11-02", "version": 14 }, … ] }
+-> 409 { "type": "…/reservation-refused", "retryable": false,
+         "refused": [ { "entry_id": 205, "reason": "on_other_invoice" } ] }   // F1
+-> 409 { "type": "…/operation-unresolved", "retryable": true }               // R2
 
-### 11.4 Concurrency [P]
+POST /internal/v1/invoices/{invoice_id}/operations/{operation_id}/commit   { "generation": 3 }
+POST /internal/v1/invoices/{invoice_id}/operations/{operation_id}/abort    { "generation": 3 }
+```
 
-- Entry edits vs claims: both take `SELECT … FOR UPDATE` on the entry rows inside Timekeeping, so an
-  edit and a claim on the same entry serialize. Internal entry updates may send `If-Match: <version>`
-  and receive 409 `stale-entry` on mismatch. Today there is no optimistic locking (last writer wins),
-  so the public adapters in Core omit `If-Match` and public behavior is unchanged; exposing the 409 to
-  public clients is **a behavior change** gated by D-8.
-- Two invoices claiming the same entry: in `compat` mode (X-3) both claims succeed and a conflict is
-  reported; with D-3 approved, a partial unique index
-  `UNIQUE (entry_id) WHERE state IN ('pending','held','committed')` makes the second hold fail with
-  409 `claim-conflict`.
-- Invoice saves serialize on the invoice row in Billing (`lock_version`), which also orders claim
-  revisions.
+- **prepare** reserves the invoice's new entries provisionally and keeps its committed ones.
+- **commit** makes the desired set the reservation set and applies the rule's effect for removed
+  entries (§7.2).
+- **abort** drops only this operation's provisional reservations.
+- All three are idempotent by `(invoice_id, operation_id)`. Timekeeping keeps a **terminal receipt** per
+  (invoice, operation): `committed` or `aborted`. A prepare that arrives after its own operation is
+  terminal changes nothing and returns the receipt.
+- An invoice has at most one unresolved operation. A new prepare whose earlier operation is not terminal
+  either carries that operation's outcome in `resolves`, or is refused as retryable.
+- The prepare response is authoritative for existence and same-company (L8). It also returns the
+  entry facts the line-item validation needs.
 
-### 11.5 Partial failure catalogue [P]
+### 5.4 The one event stream
+
+Timekeeping writes an **entry snapshot** to its outbox in the same transaction as every entry or
+reservation change:
+
+```json
+{ "type": "timekeeping.entry_snapshot.v1", "entry_id": 101, "version": 15, "company_id": 42,
+  "data": { "project_id": 7, "user_id": 3, "agent_id": null, "duration": 90.7, "work_date": "2026-11-02",
+            "note": "…", "bill_status": "unbilled", "review_status": "not_required", "locked": true,
+            "source": "manual", "source_metadata": {}, "proof_url": null, "proof_metadata": {},
+            "external_run_id": null, "external_session_id": null, "discarded_at": null,
+            "created_at": "…", "updated_at": "…" } }
+```
+
+A relay job on its own queue (`timekeeping_relay`), run by its own worker, delivers batches over HTTP to
+`POST /internal/v1/projection/entry_snapshots` in the existing application. The consumer upserts each
+row by `(entry_id, version)` and ignores anything not newer. Duplicates and reordering are harmless.
+
+This is the only event stream. The existing application publishes no events for Timekeeping. The
+`Rails.event.notify` observability calls stay as they are.
+
+---
+
+## 6. Tenancy, authorization and identity [P]
+
+### 6.1 Identity propagation
+
+Clients authenticate in the existing application exactly as today (§1.8). The gateway then mints a
+short-lived signed **user token** (60 s TTL, key shared through a secret) carrying the facts it resolved
+before the write, the same facts `authorize` reads today (§2.2):
+
+```json
+{ "sub": "user:7", "company_id": 42, "role": "employee", "timesheet_edit_days": 7,
+  "actor": { "type": "user|agent|system", "agent_id": null },
+  "writer": "web|mobile|bulk|cli|mcp|agent|import|agent_destroy|invoice",
+  "project": { "id": 9, "company_id": 42, "kept": true, "billable": true },
+  "request_id": "…" }
+```
+
+`actor.type = "system"` stands for today's `Current.user == nil` case (import, jobs), so the model checks
+that skip on nil today keep skipping (`timesheet_entry.rb:157-162,180-186`).
+
+### 6.2 Authorization per writer
+
+| Writer | Checked in the existing app, before forwarding | Checked in Timekeeping, in the write transaction |
+|---|---|---|
+| W1 web/mobile | Identity, tenant, A1, A2 (project and target user) | A3-A5 against the locked row, with role and edit days from the token; model validations |
+| W2 bulk | `bulk_update?`/`bulk_destroy?`, target project via `ProjectPolicy::Scope` | A9's `entry_locked?` (403) and per-entry silent skip |
+| W3/W3a CLI, MCP | Pundit, own-entries lookup (A7) | A3-A5; model validations |
+| W4 agent | Agent key; project via `ProjectPolicy::Scope` only. **No Pundit**, as today | A10 (forced user, `pending_review`, source rewrite); model validations. Not A1-A7. |
+| W5 import | `DataImportPolicy` (owner/admin) at upload | Model validations as a system actor |
+| W6 agent destroy | Whatever destroys the company or user | Company match |
+| W7 invoices | `InvoicePolicy` / `Invoices::BulkDeletionPolicy`, unchanged | L8 and F1 in prepare |
+
+### 6.3 Tenant isolation
+
+- Timekeeping stores `company_id` on every entry and reservation (backfilled from project → client →
+  company at the first cutover) and scopes every query by the token's `company_id`.
+- L8 is decided by the prepare response: an entry of another company is refused (`wrong_company`). The
+  line-item validation stays as a second check, using the company from that response.
+- The existing application's convention-based tenancy (§1.2) is not changed.
+- Tests prove both seeded businesses, **Fork & Leaf Salads** and **Copper Kettle Bakery**
+  (`db/seeds.rb:154,538`), cannot read, write, prepare or project each other's entries (§12).
+
+---
+
+## 7. Reservations [P]
+
+### 7.1 The rule
+
+**An entry has at most one reservation by a kept invoice.** A reservation is identified by
+(entry, invoice) and is either **provisional** or **committed**. It also records:
+
+- `company_id` and the stable `invoice_id`, with no foreign key to any invoice row;
+- `edit_lock`: whether it blocks employee edits (L1);
+- `disposition`: `active` (the entry is on that kept invoice) or `retained` (the invoice no longer lists
+  the entry, but the reservation keeps its edit lock until a successor takes over).
+
+A retained reservation does not count against "at most one by a kept invoice". The entry is selectable
+again, as it is today (L3, L4). When another invoice's operation commits for the entry, it **succeeds** the
+retained reservation, which is then removed. While that operation is provisional, the retained
+reservation stays. If it aborts, the old state is untouched. A second prepare for an entry while one is
+provisional is refused.
+
+The projection's `locked` column is true exactly when the entry holds a reservation with `edit_lock`.
+
+### 7.2 One decision table
+
+The table lives in one shared library (`packages/timekeeping_reservations`) used by Timekeeping, by the
+gateway, and by the prepared rollback target (§10.5). Nobody re-implements it.
+
+| Operation | Invoice state | Entry | Effect at prepare | Effect at commit | Today |
+|---|---|---|---|---|---|
+| save | draft | added | provisional, `edit_lock` | active, `edit_lock` | L1 |
+| save | draft | kept | — | `edit_lock` set (a draft save re-locks all) | L1 |
+| save | draft | removed | — | released | L4 |
+| save | non-draft | added | provisional, no lock | active, no lock | L1 (not locked after draft) |
+| save | non-draft | kept | — | unchanged | — |
+| save | non-draft | removed | — | retained | L4 |
+| discard | draft | all | — | released | **F2** (today: stays locked, K2) |
+| discard | non-draft | all | — | retained | L3 |
+| destroy | draft | all | — | released | today's line-item callback (K7) |
+| destroy | non-draft | all | — | retained; owner carried by the reservation | K7 |
+| any | any | holds an active reservation by another kept invoice, or a provisional one | **refused** | — | **F1** (today: allowed, K6) |
+| any | any | holds a retained reservation by another invoice | provisional; old one stays | succeeds and removes the old one | — |
+
+Removals take effect only at commit, so a failed save never unlocks an entry the committed draft still
+holds. A provisional addition locks edits from prepare, which is stricter than today for the length of
+a save. An abort removes it.
+
+### 7.3 Discarded and deleted invoices
+
+- A discarded **non-draft** invoice is a known owner. Its entries stay locked against edits until another
+  invoice's operation commits for them (L3).
+- A bulk invoice delete is a hard `destroy` (§1.4) and goes through the same boundary:
+  - a destroyed **draft** releases its reservations, as a line-item destroy on a draft does today (L4);
+  - a destroyed **non-draft** keeps them as retained. Its invoice and line-item rows are gone, so the
+    reservation itself carries the owner: tenant, stable invoice id and disposition. Nothing in it
+    depends on, or cascades from, the deleted row. No invoice snapshot, no replacement chain;
+  - a failed delete leaves the prior state as it was. A successful delete keeps the edit lock and allows
+    the same provisional successor as above.
+
+### 7.4 Mapping today's state at the first cutover
+
+| Today | Becomes |
+|---|---|
+| On exactly one kept invoice | committed, `active`, `edit_lock` = current `locked` |
+| Not on a kept invoice, `locked`, referenced by exactly one discarded non-draft | committed, `retained`, `edit_lock` |
+| Not on a kept invoice, `locked`, referenced only by discarded drafts, no other owner | released (F2 correction, listed) |
+| `locked`, referenced by no invoice, kept or discarded | **orphan** (listed, needs a disposition) |
+| On two or more kept invoices, or more than one plausible historical owner | **conflict** (listed, needs a disposition) |
+| Not locked, not referenced | no reservation |
+
+The pre-flight in §10.4 lists every row in the last three classes before any copy.
+
+### 7.5 Future work
+
+Not in scope: gating invoicing on `review_status` (A8 stays), deduplicating agent submissions by
+`external_run_id` (A10 stays), fixing `:billable` in `Metrics::DataBuilder` (§1.7), and marking entries
+`billed` on send (L6 stays). Exclusivity and draft-discard release are **no longer future work**. They
+are F1 and F2.
+
+---
+
+## 8. Money and time [P]
+
+1. **No value is recomputed or converted by moving data.** Migration, cutover, rollback and re-cutover
+   copy `numeric → numeric` and `float8 → float8`. They never save through models, so
+   `before_validation :calculate_amounts` never runs on moved data.
+2. **Billing keeps its own money, rate and quantity values.** Invoice math stays in the existing
+   application, unchanged (M2). Timekeeping never computes money.
+3. **`duration` stays a float** in Timekeeping (D2). It is serialized with shortest round-trip form (§5.1).
+4. **Quantity.** The candidate service still suggests the float `duration`. The client still posts
+   `quantity`, and the integer column still casts away fractional minutes (M3). Nothing in this design
+   moves that conversion.
+5. **PDF.** The PDF code path is untouched, including its `round(3)` subtotal and unrounded total (M1).
+   Parity is checked on the **rendered** totals (§13).
+
+---
+
+## 9. Transactions, failures and concurrency [P]
+
+### 9.1 The operation intent ledger (existing application)
+
+`invoice_operations` is one table in the existing application: `operation_id`, `company_id`,
+`invoice_id`, `kind`, desired entry ids, `state` (`pending | succeeded | failed`), `generation`,
+`delivered_at`.
+
+- It has **no foreign key to `invoices`**, so it survives invoice deletion.
+- A partial unique index on `invoice_id WHERE state = 'pending'` makes writing the intent the
+  serialization lock. A second mutation of the same invoice, or recovery, cannot start while one is
+  pending. This works for creation (the invoice id is taken from `invoices_id_seq` before the intent)
+  and for deletion, where no row is left to lock.
+- Rows with an outcome and no `delivered_at` are what the relay delivers as commit or abort. The ledger is
+  its own outbox.
+
+### 9.2 Save order
+
+1. Write the pending intent durably, in its own committed transaction, outside the invoice transaction.
+   This takes the per-invoice serialization lock.
+2. Prepare the desired set synchronously, with a 2 s timeout.
+3. In one transaction, lock the intent row, check it is still `pending`, write the invoice change, and
+   mark the intent `succeeded`. If the intent is no longer `pending`, roll back.
+4. After the database commit, deliver commit from the ledger. On every failure path, the failure is
+   recorded first (`failed`, in its own transaction), then abort is delivered.
+
+Recovery runs from the ledger. It takes the intent row `FOR UPDATE`, which waits for any step-3
+transaction still in progress. If the intent is still `pending`, no commit can follow, so recovery
+records `failed` and then delivers abort. A missing response or elapsed time alone never releases a
+reservation. Time only decides when recovery looks.
+
+### 9.3 Failure cases
 
 | Failure | Effect | Recovery |
 |---|---|---|
-| Timekeeping down during invoice save | Hold fails → invoice save fails with 503; nothing persisted. Manual (non-time) line items still saveable if the invoice references no entries. | Retry by user; alert on circuit open. |
-| Billing commit fails after hold | Entries `Pending` (ineligible) for ≤ TTL; not locked. | Cancel call or TTL expiry. Reconciliation counts expired holds. |
-| Confirm delivery fails after commit | Invoice visible; entries ineligible (Pending); lock not yet applied. | Outbox retry until 2xx; alert if pending > 60 s. |
-| Billing down | Time tracking unaffected; invoice pages 503; webhooks queue at provider (providers retry). | Providers redeliver; idempotent fulfillment. |
-| Core down | All public traffic down (as today). Provider webhooks still reach Billing directly (§13.2). | — |
-| Feed consumer behind | Reports stale; banner shows "data as of". | Lag alert (§13.3). |
-| Directory replica stale (new project not yet replicated) | Entry create would 422. | Read-through to Core directory on miss; cache 60 s. |
-| Directory replica stale (project just archived) | Entry may be created on a just-archived project within the lag window. | Accepted window ≤ feed lag; D-7. |
+| Timekeeping down at prepare | Save fails with 503; nothing changed. The intent is recorded `failed` | User retries |
+| Prepare refused (F1, wrong company) | Save fails with today's 422 shape and a clear reason | — |
+| Prepare refused, earlier operation unresolved | Retryable 409 | Recovery resolves it; client retries |
+| Lost response on prepare | Intent `pending`; reservation may exist | Recovery records `failed`, sends abort; abort of an unknown operation is a no-op with a receipt |
+| Crash after prepare, before the invoice commits | Intent `pending` | As above |
+| Invoice transaction rolls back | Intent recorded `failed` | Abort delivered from the ledger |
+| Lost response on commit | Intent `succeeded`, not delivered | Relay retries; commit is idempotent |
+| Prepare arrives after its operation is terminal | No change; receipt returned | — |
+| Stale generation | 409 `stale-generation` | Gateway re-reads ownership; the command is retried against the current owner only if it was never admitted |
+| Relay paused | Projection lags; `locked` and aggregates stale | Candidate selection and entry lists read Timekeeping (§3.3), so invoicing a new entry works at once |
+| Projection consumer down | Same as relay paused | Relay retries; upsert by version |
+| Hard delete of a non-draft fails | Prior state unchanged | — |
+
+### 9.4 Retries, idempotency and concurrency
+
+- Gateway → Timekeeping calls: 2 s timeout, at most 2 retries with jitter, only with the same
+  `Idempotency-Key`.
+- MCP keeps its own idempotency store in the existing application (`app/mcp/idempotency_store.rb`).
+- The entry API stores `(key, request hash, response)` receipts. Same key and same hash returns the stored
+  response. Same key and a different hash gets 409.
+- Entry edits and reservation changes both take `SELECT … FOR UPDATE` on the entry rows in Timekeeping,
+  so they serialize. Public last-writer-wins behaviour is unchanged.
 
 ---
 
-## 12. Migration, backfill, reconciliation, cutover and rollback
+## 10. Migration, cutover and rollback [P]
 
-### 12.1 Phases
+### 10.1 One ownership generation
 
-```mermaid
-flowchart LR
-  P0[P0 Guardrails] --> P1[P1 In-process seams]
-  P1 --> P2[P2 Reporting on projections]
-  P1 --> P3[P3 Schema + role separation]
-  P3 --> P4[P4 Timekeeping deployable]
-  P3 --> P5[P5 Billing deployable]
-  P4 --> P5
-  P2 --> P6[P6 Physical DB split + cleanup]
-  P4 --> P6
-  P5 --> P6
-```
+One record holds `(generation, owner, state)`, with `state` one of `open | closed | frozen`. A copy lives
+in each database, written by the handoff tool.
 
-| Phase | What | Entry criteria | Exit criteria | Rollback |
-|---|---|---|---|---|
-| **P0 Guardrails** | Promote characterization cases (Appendix A) into the suite; financial fingerprint job; data audit (§12.3); boundary linter in report-only mode; decisions D-1…D-8 recorded. | Design approved. | Suite green; audit numbers published; decisions recorded. | n/a (additive). |
-| **P1 In-process seams** | `Timekeeping` and `Billing` namespaces with public interfaces; replace G-path callbacks with the claims protocol **in-process** (same DB, same transaction possible); add `company_id`, `lock_version` to entries; `billing_claims` table, backfilled; outboxes + relays + feeds; delete dead `send_to_email` path (D-1); boundary linter enforcing. | P0 exit. | All existing specs green; claims ledger and legacy `locked` agree for 100 % of entries (or every difference is an X-2/X-3/X-8 class explained by audit); linter shows zero cross-boundary references outside interfaces. | Per-company flag `claims_mode = legacy|ledger`; `legacy` re-enables the original callbacks (kept until P4 exit). |
-| **P2 Reporting on projections** | `rpt_*` projections fed from the feeds; J1–J3 and other cross-domain reports read projections; single-domain aggregates read owning interface. Dual-run comparator per report. | P1 feeds live. | Each report: 7 days of dual-run with zero diffs (B-12) across all companies, or diffs explained and accepted. | Per-report flag back to live SQL (live tables still present until P6). |
-| **P3 Schema and role separation** | Move tables into Postgres schemas `timekeeping`, `billing`, `core`; one DB role per module with grants only on its schema (+ read on its replicas); drop cross-schema FKs (replaced by reconciliation); Rails `connects_to` per module. | P1 exit. | Monolith runs with per-module roles in production for 7 days with no permission errors. | Re-grant broad role (config); schemas can stay. |
-| **P4 Timekeeping deployable** | New Rails API app `services/timekeeping` using the `timekeeping` schema role; Core routes entry traffic per company via `service_routes`; adapter parity tests. | P3 exit. | 100 % of companies routed for 14 days; error rate and p95 latency within 10 % of baseline; zero reconciliation diffs. | Flip `service_routes` back to `core` per company. Same tables, single writer at any moment — no data movement. |
-| **P5 Billing deployable** | New Rails API app `services/billing`; invoice/payment routes; Razorpay/PayPal webhooks routed at the edge; Stripe invoice events on a second endpoint (A-5). | P4 stable ≥ 7 days (claims traffic becomes cross-process). | Same as P4 plus financial fingerprint identical daily; provider webhook success ≥ baseline. | Flip routes back; re-point provider webhook URLs (documented runbook); same tables. |
-| **P6 Physical split and cleanup** | Move `timekeeping` and `billing` schemas to their own databases (logical replication, short write freeze per service); remove legacy callbacks, dual paths and dead columns; Solid Queue per service. | P2, P4, P5 exit; 30-day soak. | Fingerprints and reconciliation identical across the move; no Core code references service schemas. | Before cutover: abort replication. After cutover: reverse logical replication kept for 7 days; this is the **point of no return** once disabled. |
+Every write by every writer in §1.3 (W1-W7, agent destroy included) holds a shared lock on the local
+ownership row in its own transaction and checks the generation it carries. Raising the generation takes
+the row exclusively. It therefore waits for admitted transactions to finish, and afterwards refuses
+every stale command, including queued jobs. One **global** generation covers both tenants. There are no
+per-company epochs.
 
-### 12.2 Backfills [P]
+### 10.2 Steps
 
-1. `timesheet_entries.company_id` ← `projects.client_id → clients.company_id`, in batches of 10 000 by
-   id with `strong_migrations`-safe steps: add nullable column → backfill → validate → add `NOT NULL`
-   via check constraint → index `(company_id, work_date)`. A trigger keeps it in sync until all writers
-   set it (P1).
-2. `billing_claims` from `invoice_line_items` ∪ `invoice_line_item_time_entries` joined with
-   `invoices`: kept draft → `held`; kept non-draft → `committed`; discarded → `released`
-   (`release_reason = invoice_voided`). Multiple claims per entry are allowed in compat mode (X-3).
-3. Line-item snapshots (`project_id`, `user_id`, `entry_snapshot`) from the referenced entry's current
-   state, flagged `snapshot_backfilled = true` (it is the entry's state at backfill time, not at
-   invoicing time — documented as such).
-4. Reporting projections: rebuilt from feed position 0 after a "bootstrap" event dump (each producer
-   emits one `upserted` event per existing aggregate at its current version).
+1. **Characterize.** Pin today's behaviour in specs (§12.1), including the behaviours revision 1 had
+   wrong (K2, K7, K12).
+2. **Gateway in `legacy` mode.** Route every writer through the gateway, still calling today's code. The
+   single-writer guard (§12.2) proves no other path writes entries.
+3. **Drop the two foreign keys** (`db/schema.rb:1282,1284`) in their own migration, **before** cutover.
+   Otherwise a new entry could be invoiced before the projection holds its row, and the key would reject
+   the line item.
+4. **Deploy Timekeeping** and the prepared local reservation table, both inactive.
+5. **Cut over** with the procedure in §10.5 (owner `legacy` → `timekeeping`), including the pre-flight
+   in §10.4.
+6. **Rollback** (`timekeeping` → `monolith`) and **re-cutover** (`monolith` → `timekeeping`) are the same
+   procedure, run in the demo journey (§13).
 
-### 12.3 Data audit and reconciliation [P]
+### 10.3 IDs
 
-P0 audit (read-only queries, results published to the decision owners):
+There is one owner at a time, so there is one id allocator at a time. Timekeeping keeps the existing entry
+ids. At cutover, inside the fence, Timekeeping's sequence is set above the highest copied id. At rollback,
+the existing application's sequence is set above the highest Timekeeping id. A sequence only advances.
 
-- entries referenced by > 1 kept invoice (X-3);
-- entries with `locked = true` and no kept invoice reference (X-2 residue);
-- entries on kept invoices with `locked = false` (X-7);
-- `invoices.company_id IS NULL`;
-- line items whose entry belongs to another company (should be zero given validations).
+### 10.4 Pre-flight and reconciliation
 
-Continuous reconciliation (daily job + on-demand, per company):
+**Pre-flight**, inside the write fence and before any copy, lists today's states. It never normalizes
+them quietly.
 
-| Check | Source A | Source B | Tolerance |
+- **orphans**: entries locked with no invoice, kept or discarded, that references them. K7 shows one way
+  this happens: a hard-deleted non-draft;
+- **conflicts**: entries referenced by two or more kept invoices, or with more than one plausible
+  historical owner;
+- entries held by a discarded non-draft invoice: kept as retained;
+- entries locked only by the old draft-discard re-lock: released as a listed correction (F2), only when no
+  other committed or pending owner exists.
+
+Cutover proceeds only when the orphan and conflict lists are empty, or when every item has a recorded
+disposition. For the two seeded businesses, the characterization fixtures assert that both lists are
+empty.
+
+**Reconciliation** compares the checkpoint with its source. Any unexplained difference aborts the
+handoff.
+
+| Check | Source | Target | Tolerance |
 |---|---|---|---|
-| Claims vs invoice references | Billing line items + links, kept/discarded | Timekeeping claims by invoice | 0 |
-| Lock effect (P1 shadow) | Legacy callbacks' resulting `locked` on every invoice write | Interpreter's resulting `locked` for the same write | 0 (compat) |
-| Lock invariant (after P1) | Entries whose active claim entered while the invoice was draft | `locked = true` | 0, except entries released after an X-8 edge (reported) |
-| Entry totals | Timekeeping `count`, `sum(duration)` by (project, month, bill_status, discarded) | `rpt_time_entries` | 0 |
-| Invoice fingerprint | Billing | `rpt_invoices` | 0 |
-| Report dual-run | Live SQL (until P6) | Projection SQL | 0 |
+| Entries | Every column of every entry, by id | Incoming owner | Exact |
+| Reservations | Each entry's owner, state, `edit_lock`, disposition | Incoming owner | Exact |
+| Reservations vs invoices | Kept invoices' line items and links | Active reservations | Exact, apart from listed pre-flight items |
+| Projection | Timekeeping entries through the final outbox position | `timesheet_entries` | Exact |
+| Receipts | Terminal operation receipts, entry idempotency receipts | Incoming owner | Exact |
+| Money | Financial snapshot (§13 item 2) | Same, after the handoff | Identical |
 
-Every non-zero result opens an alert with the offending ids; none auto-repairs money.
+### 10.5 The handoff procedure
 
-### 12.4 Cutover mechanics [P]
+The procedure has the same shape in both directions and can resume from the step that failed.
 
-- `service_routes(company_id, domain, target)` table in Core, cached 30 s, editable by super admin
-  and a rake task. Cohorts: internal workspaces → 5 % → 25 % → 100 %, each held ≥ 48 h.
-- **Single writer per company per domain at any moment**: the gateway is the only router, and the
-  in-process path checks the same table, so a company is never written by both code paths
-  concurrently. Switching drains in-flight requests by waiting one cache TTL plus the longest
-  request timeout before the new target accepts writes (the flag has a `switching` state that makes
-  writes return 503 + `Retry-After: 2` for that window).
-- Background jobs (overdue, exchange rates, QuickBooks, payouts) move with their domain at the same
-  switch; each job checks the route before acting.
+1. **Close admission.** Raise the ownership generation. This refuses new writes, new prepares and every
+   stale queued command. Then drain the transactions already admitted.
+2. **Settle.** Resolve every registered invoice operation from its durable outcome. During this step
+   only, the outgoing owner still applies a commit or abort that carries the old generation, and only for
+   an operation it registered. No pending billing operation crosses the handoff.
+3. **Freeze.** Stop every remaining mutation. Capture the final outbox position, and drain the outbox into
+   the projection through that position.
+4. **Take one frozen, verified checkpoint** and load it into the incoming owner. It holds:
+   - every entry, as a full snapshot;
+   - each entry's reservation owner and state, including the owner data of destroyed invoices (tenant,
+     stable invoice id, disposition);
+   - the entry audit rows;
+   - every terminal invoice-operation receipt;
+   - the entry API's idempotency receipts, so a client retry after the handoff returns its stored result.
+5. Advance the incoming owner's id sequence (§10.3).
+6. Reconcile the checkpoint against the source (§10.4). Abort on any unexplained difference.
+7. Flip ownership. After this, a late commit or abort is refused and cannot change the retired owner.
+
+The outgoing owner stays fenced from step 1 through the flip, including through copy, reconciliation,
+an interruption and a resume.
+
+**Rollback target.** Rollback goes to a **prepared** existing application. It already enforces the
+corrected rule (F1, F2) through the shared decision table, with its own reservation table. It never goes
+back to the old boolean callbacks. The `locked` boolean cannot carry the exclusive owner, which is why
+reservations travel in the checkpoint. Billing rows hold no tokens, so rollback never edits billing
+tables.
 
 ---
 
-## 13. Deployment, configuration and observability
+## 11. Deployment and observability [P]
 
-### 13.1 Repository and build [P]
+### 11.1 Repository and runtime
 
-- Monorepo: `services/timekeeping/` and `services/billing/` as Rails 8.1 API-only apps on the same
-  Ruby (4.0.1) as Core; `packages/miru_contracts/` (Ruby gem in-repo): JSON Schemas for APIs and
-  events, generated clients, token verification, outbox/relay/feed and idempotency modules shared by
-  all three.
-- One Dockerfile per service; CI builds only what changed (path filters) plus contract tests on any
-  `packages/miru_contracts` change.
-- Each service runs **web** (Falcon) and **worker** (Solid Queue) processes, with its own Solid Queue
-  tables in its own schema/database.
+- `services/timekeeping/`: a Rails 8.1 API-only application on Ruby 4.0.1, with its own database and its own
+  Solid Queue tables.
+- `packages/timekeeping_reservations/`: the shared decision table (§7.2), plus the entry snapshot and
+  reservation contract schemas.
+- Timekeeping runs a web process and **one dedicated worker** for the `timekeeping_relay` queue. In the demo
+  environment only this worker is started. The existing `default` worker is not started for this work,
+  because it would run the integration jobs already queued in the demo data.
+- Retry budgets are stated as total attempts, as in `ApplicationJob` (§1.1).
 
-### 13.2 Environments and routing [P]
+### 11.2 Configuration
 
-- Render: two more web services + two workers per environment (`render.yaml`); Kamal: one deploy
-  config per service, sharing `kamal-proxy` with host/path routing.
-- Edge routing: only provider webhooks (`/webhooks/razorpay/*`, `/webhooks/paypal/*`, Stripe invoice
-  endpoint) and the public invoice view go to Billing directly; everything else to Core.
-- Service discovery by ENV (`TIMEKEEPING_URL`, `BILLING_URL`, `CORE_URL`); private network only.
-- Secrets: internal token signing key (Core only), JWKS URL (services), provider secrets move to
-  Billing, QuickBooks credentials move to Billing (`app/services/quick_books/configuration.rb:37-81`).
+- A second Kamal configuration (`config/deploy.timekeeping.yml`), image and CI job for Timekeeping. Each
+  application deploys on its own; neither release requires the other.
+- Timekeeping `env`: `EXISTING_APP_URL` (projection endpoint). Timekeeping `secret`: `DATABASE_URL`,
+  `RAILS_MASTER_KEY`, and the shared token key. Timekeeping needs no Redis.
+- Existing application: `TIMEKEEPING_URL` (plain) and the shared token key (secret). `REDIS_URL` stays a
+  plain env value, as today. `EVENT_BROKER_URL` is not introduced.
 
-### 13.3 Observability [P]
+### 11.3 Observability
 
-- **Correlation:** `X-Request-Id` from the edge, propagated in every call and event envelope; Sentry
-  distributed tracing across the three apps (`sentry-trace`/`baggage`), tagged `service` and
-  `company_id`.
-- **Logs:** structured JSON with `request_id`, `company_id`, `actor`, `route_target`.
-- **Health:** `/health` (process + DB) and `/ready` (DB, outbox relay lag < 60 s, dependency
-  breakers closed) per service; Kamal/Render health checks use `/health`, deploy gates use `/ready`.
-- **SLIs and alerts:**
+| Signal | Alert |
+|---|---|
+| Relay lag (latest outbox position − delivered position) | > 60 s for 5 min |
+| `invoice_operations` pending older than 60 s | any |
+| Undelivered commit or abort | any older than 60 s |
+| Stale-generation refusals outside a handoff | any |
+| Single-writer guard violations (staging) | any |
+| Reconciliation differences | any (aborts the handoff) |
 
-| Signal | Target | Alert |
+`X-Request-Id` travels in every call and every snapshot. Both applications report to Sentry with a
+`service` tag.
+
+---
+
+## 12. Verification [P]
+
+### 12.1 Characterization first
+
+The existing suite is the oracle, but several specs do not pin what revision 1 said they pin:
+
+- the send specs (`spec/requests/api/v1/invoices/send_invoice_spec.rb`, `spec/mailers/invoice_mailer_spec.rb`)
+  never check `bill_status` (L6);
+- `spec/models/invoice_spec.rb` never checks `locked`, so neither the draft-discard re-lock (L2) nor L3 is
+  pinned;
+- the bulk specs (`spec/requests/api/v1/timesheet_entries/bulk_actions/*`) cover `billed` and the edit
+  window, but not a `locked` entry or A9's silent skip;
+- nothing covers A10's source rewrite, agent destroy (W6), hard delete of a non-draft (K7), or the PDF total
+  differing from `amount` (M1).
+
+All of these, K1-K13 (Appendix A), and the double-allocation case become characterization specs
+**before** any change. They run on two-tenant seed fixtures. F1 and F2 flip their two cases in the same
+change that ships the fix.
+
+### 12.2 Single-writer guard
+
+One test runs every writer in §1.3, **agent destroy included**, plus the invoice boundary. It fails if
+anything other than the projection consumer changes a `timesheet_entries` row while Timekeeping owns the
+data.
+
+### 12.3 Contract tests
+
+- Each of the three contracts (entry API, prepare/commit/abort, entry snapshot) has a schema and a fake on
+  its consumer's side. Provider tests run against the schema in Timekeeping's CI.
+- The shared decision table is tested row by row (§7.2), once, in its package.
+
+### 12.4 Integration
+
+- **Relay paused:** a newly created entry can be invoiced at once and appears in the entry list. The
+  projection catches up when the relay resumes.
+- **Alternating writers** across cutover, rollback and re-cutover, on both tenants, through every writer.
+- Failure injection for every row of §9.3.
+
+---
+
+## 13. Acceptance for the implementation
+
+For the demo environment, the implementation is accepted when all of these hold:
+
+1. **The journey, end to end, on both tenants:** create and edit entries → a direct and a grouped draft
+   invoice → reservations → reports and PDF → cutover → new writes → rollback → new writes →
+   re-cutover.
+2. **Financial parity by snapshot,** not by the audit log. Before and after migration, rollback and
+   re-cutover, compare invoice `amount`, `tax`, `discount` and `outstanding_amount`, every line item's
+   `rate` and `quantity`, every `invoice_taxes` row, and the rendered PDF totals. They must be identical,
+   or the run fails. (`audited` on `Invoice` omits `discount`, `tax` and `outstanding_amount`, and line
+   items and taxes are not audited, so the audit log cannot prove this.)
+3. **Rollback and re-cutover** keep every write accepted on either side, every reservation owner, and every
+   idempotency receipt.
+4. **Independent deployment:** two deploys, one of each application, with no paired release.
+5. **Relay paused:** a newly created entry can be invoiced at once and appears in the entry list. The
+   projection catches up when the relay resumes.
+6. **Failure cases:** outage, retry, duplicate and reordered delivery; a lost response on prepare and on
+   commit; a crash after prepare and before the invoice commits; a prepare that arrives after its
+   operation is terminal; a stale generation; a failed and a successful hard delete of a non-draft
+   invoice; an interrupted and resumed handoff.
+7. **Tenant isolation** and ownership guards on both tenants; the single-writer guard passes.
+
+---
+
+## 14. Implementation sequence
+
+Capability lanes are grouped by dependency. How the work splits into issues is the implementer's
+judgement.
+
+**Foundation, first:**
+- characterization specs: the real draft-discard re-lock, L3, L4, L6, A9, PDF totals and the rest of
+  §12.1;
+- two-tenant seed fixtures;
+- three contracts, each with a fake on its consumer's side: the entry API, prepare/commit/abort, and the
+  entry snapshot event.
+
+**Then, each lane on its own contract and tests:**
+
+| Lane | Work | Fixed contract it builds against |
 |---|---|---|
-| Feed lag (high_watermark − consumer cursor), per consumer | p99 < 5 s | > 60 s for 5 min |
-| Pending claims older than 60 s | 0 | any |
-| Claim conflicts (X-3) | report | new conflict |
-| Reconciliation diffs | 0 | any |
-| Financial fingerprint mismatch | 0 | any (page) |
-| Internal call error rate | < 0.5 % | > 2 % for 5 min |
-| Idempotency key reuse with different body | 0 | any |
-| Routing table changes | audit | every change |
+| Timekeeping core | Service shell, entry API and rules, idempotency, the shared reservation decision table | Entry API, reservation API |
+| Timekeeping outbox | The relay on its dedicated queue and worker | Entry snapshot |
+| Gateway | Forwarding in every writer, agent destroy included; the user token and reference claims; the generation fence | Entry API (fake Timekeeping) |
+| Invoice boundary | The reservation module that replaces the callbacks; the operation ledger; the foreign-key migration; candidate selection and validation through Timekeeping; the prepared application's local reservation table | Reservation API (fake Timekeeping) |
+| Projection consumer | The version upsert into `timesheet_entries`, and the read split | Entry snapshot (fake relay) |
+| Cutover and rollback tooling | The fence, the pre-flight, the sequence handoff, the drain, the reconcile, the financial snapshot diff | All three, plus the ownership record |
+| Deployment and runtime | The second Kamal configuration, image and CI. **Start early.** | — |
 
-- Mission Control (`config/routes.rb:13-15`) stays available per service for job inspection.
+**Join, last:** the end-to-end journey (§13 item 1) and the independent deployment proof (§13 item 4).
+
+**Runtime:** start only the dedicated relay worker. The `default` worker would run the integration jobs
+already queued in the demo data.
+
+The lanes are independent because their contracts are fixed in the foundation, not because the work was
+cut into arbitrary pieces. The single serial point is the join.
 
 ---
 
-## 14. Verification strategy
+## 15. Decisions, risks and deferred work
 
-### 14.1 Regression (the oracle) [P]
+### 15.1 Decisions
 
-The existing suite is the definition of preserved behavior. The minimum gate for every phase is the
-whole RSpec suite as run in CI (`.github/workflows/validations.yml`), and in particular these
-domain-critical groups, which pass on the baseline (321 examples, 0 failures — Appendix A):
-
-- Models: `spec/models/{timesheet_entry,invoice,invoice_line_item,invoice_line_item_time_entry,invoice_tax,invoice_currency_conversion,payment}_spec.rb`
-- Policies: `spec/policies/{timesheet_entry,invoice}_policy_spec.rb`
-- Requests: `spec/requests/api/v1/timesheet_entries/**`, `spec/requests/api/v1/cli/timesheet_entries/**`,
-  `spec/requests/api/v1/agent/timesheet_entries/**`, `spec/requests/api/v1/invoices/{create,update,send_invoice}_spec.rb`,
-  `spec/requests/api/v1/invoices/line_items/index_spec.rb`
-- Mailers, services, events: `spec/mailers/invoice_mailer_spec.rb`, `spec/services/invoice_amounts_summary_spec.rb`,
-  `spec/events/event_emission_spec.rb`
-
-Also required per phase: `spec/services/analytics/**`, `spec/services/reports/**`,
-`spec/requests/api/v1/reports/**`, `spec/requests/webhooks/**`, `spec/services/invoice_payment/**`,
-`spec/mcp/**`, `spec/services/imports/harvest_time_entries_importer_spec.rb`.
-
-### 14.2 New suites [P]
-
-| Suite | Purpose | Phase |
+| ID | Decision | Status |
 |---|---|---|
-| Characterization (C1–C10, Appendix A) | Pins X-1…X-8 so any change in them is a visible, decided change. | P0 |
-| Lock rule table tests | Every row of §9.3 in both `compat` and `corrected` sets. | P1 |
-| Golden money tests | `Billing::Totals`/`LineCost` against a generated corpus (quantities 0–10 000, rates with 0–2 dp, discounts, percentage/flat taxes, paid/waived) and an anonymized production sample; byte-equal outputs. | P1 |
-| Contract tests | Provider-verified JSON Schemas in `miru_contracts`; consumer tests in each consumer's CI; breaking change detection on schema diff. | P1→ |
-| Adapter parity | For each public route moved, the same request against in-process and forwarded paths yields identical status and JSON (ordering-normalized). | P4, P5 |
-| Integration (compose) | Core + Timekeeping + Billing + Postgres; scenarios: log → select → draft → remove line → send → pay → report; failure injection for each row of §11.5. | P4→ |
-| Tenant isolation | Every internal endpoint × foreign `company_id` → 404/403; RLS on with wrong `app.company_id` → zero rows. | P3→ |
-| End-to-end | Playwright: time entry, invoice from time, send, record payment, reports, as owner/admin/employee/book_keeper/client. Requires adding a Playwright runner to CI (A-6). | P4→ |
-| Reconciliation and dual-run | §12.3, continuously in production. | P1→ |
+| D1 | Reservations are exclusive: at most one by a kept invoice per entry (F1). | **Decided**: exclusive. |
+| D2 | `duration` type. | **Decided**: keep float. |
+| D3 | Where the relay runs. | **Decided**: dedicated queue (`timekeeping_relay`) and dedicated worker. |
+| D4 | Legacy billing behaviours. | **Decided**: draft discard (F2) and double allocation (F1) fixed. L3, L6, A8, A9 and the `:billable` filter kept. |
+| D5 | Report inconsistencies (dashboard currency, client-revenue totals, aging `.kept`). | Kept as they are. Aggregates read the unchanged table, so nothing in this design changes them. |
 
-### 14.3 Boundary enforcement [P]
+Revision 1's D-6 (port reports verbatim versus fix them) is removed: no report is ported.
 
-A CI check (packwerk-style or a custom Rubocop cop) fails when code outside `Timekeeping` references
-its models/tables, or code outside `Billing` references billing models, and when reporting code
-reads anything but `rpt_*` and Core tables. Report-only in P0, enforcing from P1 exit.
+### 15.2 Risks
 
----
+| Risk | Mitigation |
+|---|---|
+| A writer outside the list in §1.3 (console, rake, a future callback) writes `timesheet_entries` | Single-writer guard (§12.2) in CI; stale-generation refusal at runtime |
+| The prepare call adds latency to invoice saves | One synchronous hop with a 2 s timeout; reads that decide money already need Timekeeping |
+| An orphan or conflict in real data blocks cutover | The pre-flight lists them; dispositions are recorded, never automatic |
+| The provisional edit lock surprises an employee during a slow save | It lasts only for the save; abort removes it (§7.2) |
+| Projection lag shows a stale `locked` in reports | Aggregates may lag by design (§3.3); entry lists and selection read Timekeeping |
 
-## 15. Acceptance criteria for the completed migration
+### 15.3 Deferred, and why
 
-The migration is complete when **all** hold:
+These are kept as notes for a future production rollout, outside this scope:
 
-1. **Independent deployment:** Timekeeping, Billing and Core each deploy from their own pipeline;
-   for 30 days, at least one release of each happened without deploying the others, with no
-   coordinated-release requirement in any runbook.
-2. **Data ownership:** each service's tables live in its own database; no service or Core role has
-   write access to another's tables; no cross-database foreign keys; the boundary check passes.
-3. **No cross-domain writes:** `grep`/linter shows no code outside Timekeeping writing `locked`,
-   `bill_status` or `review_status`; the only Billing→Timekeeping mutation is `PUT billing-claims`.
-4. **Behavior preserved:** the full pre-migration RSpec suite (ported where code moved) passes;
-   characterization cases C1–C10 pass with outcomes unchanged unless a decision (D-1…D-8) explicitly
-   changed them, in which case the new expected outcome is recorded with the decision.
-5. **Financial integrity:** financial fingerprints (§10.4) of all invoices and payments are
-   identical before the first phase and after the last; zero reconciliation diffs for 30 consecutive
-   days; sample PDF text comparisons identical.
-6. **Authorization:** ported policy specs pass against the services; tenant-isolation suite passes;
-   no internal endpoint accepts a token for another company.
-7. **Reports:** every report and analytics endpoint has completed dual-run with zero unexplained
-   diffs; feed lag p99 < 5 s over 30 days.
-8. **Resilience:** each row of §11.5 has an automated integration test; with Billing stopped, time
-   entry create/update/list succeed; with Timekeeping stopped, invoice view, payments and webhooks
-   succeed.
-9. **Operability:** dashboards and alerts of §13.3 exist; a rollback drill for P4 and P5 routing has
-   been executed in staging and production (on an internal company).
-10. **Clean-up:** legacy callbacks (`Invoice#lock_timesheet_entries`, `#unlock_timesheet_entries`,
-    `#update_timesheet_entry_status!`, `InvoiceLineItem#unlock_timesheet_entries`), the `claims_mode`
-    and `service_routes` flags, and dual-run code are removed.
+- **Per-company waves, shadow reads, 7-day gates, 30-day observation, 90-day retirement.** A production
+  rollout needs them. Two seeded businesses moved in one pause do not, and they bring mixed ownership and
+  its id and sync machinery.
+- **Retiring `timesheet_entries`, and a second reporting model.** Keeping the table as a projection keeps
+  every aggregate reader working with no rewrite.
+- **Changing `duration` to a decimal.** It adds a conversion and a round-trip check, and changes no result.
+- **More services, a broker, or a general event platform.** One consumer does not need them.
+- **Payroll, scheduling, or new features.** Out of scope.
 
----
+### 15.4 Open questions
 
-## 16. Implementation sequence and parallel work
-
-### 16.1 Work packages
-
-Owners are lanes, not people: **TK** (timekeeping), **BL** (billing), **RP** (reporting), **PL**
-(platform), **QA**.
-
-| WP | Lane | Phase | Work | Depends on |
-|---|---|---|---|---|
-| WP-P1 | PL | P0 | `miru_contracts` gem skeleton: envelope schema, token mint/verify, idempotency store, outbox + relay + feed modules (in-process first). | — |
-| WP-P2 | PL | P0 | Financial fingerprint job + data audit queries. | — |
-| WP-Q1 | QA | P0 | Promote characterization cases; golden money corpus; boundary linter (report-only). | — |
-| WP-T1 | TK | P1 | `Timekeeping` namespace + public interface; move entry controllers' logic behind it; `company_id` + `lock_version` migrations and backfill. | WP-Q1 |
-| WP-T2 | TK | P1 | `billing_claims` ledger, lock rule interpreter (compat + corrected), claimable-entries query, claims API (in-process). | WP-T1, WP-P1 |
-| WP-B1 | BL | P1 | `Billing` namespace + interface; extract `Billing::Totals`/`LineCost` with golden tests. | WP-Q1 |
-| WP-B2 | BL | P1 | Replace invoice/line-item lock callbacks with claims declarations (behind `claims_mode`); line-item snapshots + backfill; remove dead `send_to_email` path (D-1). | WP-T2, WP-B1 |
-| WP-C1 | PL | P1 | Core directory outbox events + directory read API; exchange-rate API. | WP-P1 |
-| WP-R1 | RP | P2 | `rpt_*` projections and consumers (bootstrap dumps from all producers). | WP-P1, WP-C1, feeds from WP-T2/WP-B2 |
-| WP-R2 | RP | P2 | Port J1–J3 and remaining cross-domain reports to projections with dual-run comparators, one report per PR. | WP-R1 |
-| WP-P3 | PL | P3 | Schemas, roles, RLS, `connects_to`, FK removal. | WP-T2, WP-B2 |
-| WP-T3 | TK | P4 | `services/timekeeping` app; directory replica; gateway forwarding for paths A–F; adapter parity tests. | WP-P3 |
-| WP-P4 | PL | P4 | `service_routes`, gateway forwarding framework, internal token, deploy configs, dashboards. | WP-P1 |
-| WP-B3 | BL | P5 | `services/billing` app; invoice/payment routes; jobs; QuickBooks; PDFs. | WP-P3, WP-P4 |
-| WP-B4 | BL | P5 | Cross-process claims client + outbox confirm path; failure-injection tests. | WP-T3, WP-B3 |
-| WP-B5 | BL | P5 | Webhook routing: Razorpay, PayPal, Stripe second endpoint spike and cutover (A-5). | WP-B3 |
-| WP-Q2 | QA | P4→ | Compose integration suite, tenant isolation suite, Playwright in CI. | WP-T3 / WP-B3 |
-| WP-P5 | PL | P6 | Physical DB split runbooks, logical replication, per-service Solid Queue, legacy removal. | P2, P4, P5 exits |
-
-### 16.2 Dependency graph and parallelism
-
-```mermaid
-flowchart TD
-  P1[WP-P1 contracts] --> T2 & C1 & P4
-  Q1[WP-Q1 characterization] --> T1 & B1
-  P2[WP-P2 fingerprints]
-  T1[WP-T1 TK seam] --> T2[WP-T2 claims ledger]
-  B1[WP-B1 Billing seam] --> B2[WP-B2 replace callbacks]
-  T2 --> B2
-  C1[WP-C1 directory feed] --> R1
-  T2 --> R1[WP-R1 projections]
-  B2 --> R1
-  R1 --> R2[WP-R2 port reports]
-  T2 --> P3[WP-P3 schemas/roles]
-  B2 --> P3
-  P3 --> T3[WP-T3 TK service]
-  P4[WP-P4 routing/gateway] --> T3 & B3
-  P3 --> B3[WP-B3 Billing service]
-  T3 --> B4[WP-B4 cross-process claims]
-  B3 --> B4
-  B3 --> B5[WP-B5 webhooks]
-  R2 & B4 & B5 --> P5[WP-P5 physical split]
-```
-
-Genuinely parallel from day one: **WP-P1, WP-P2, WP-Q1**. After WP-Q1: **WP-T1 ∥ WP-B1**. After
-WP-P1: **WP-C1 ∥ WP-P4**. Reporting (WP-R1/R2) proceeds in parallel with P3–P5 once feeds exist; the
-report ports in WP-R2 are independent of each other (one PR per report). **WP-T3 ∥ WP-B3** can be
-built in parallel; only their cutovers are serialized (P4 before P5) so that cross-process claims
-are introduced against a stable Timekeeping.
-
-Unavoidable serial points and integration risks:
-
-1. **WP-T2 → WP-B2** — the claims protocol is the single seam; both lanes must agree on §7.2 before
-   coding. Mitigation: contract-first (schemas merged in WP-P1), and WP-T2 ships an in-process fake.
-2. **WP-P3** touches every query path's DB role; it is a one-lane change with a staging soak.
-3. **P4 → P5 cutovers** are sequenced deliberately (one new network dependency at a time).
-4. **P6** requires all prior exits plus soak.
-
----
-
-## 17. Risks, open questions and decisions for review
-
-### 17.1 Risks
-
-| ID | Risk | Likelihood | Impact | Mitigation |
-|---|---|---|---|---|
-| R-T1 | Hidden reader/writer of `timesheet_entries` or invoice tables outside the mapped paths (rake tasks, admin, seeds). | M | H | Boundary linter (§14.3) + DB roles in P3 make every missed access fail loudly in staging before production. |
-| R-T2 | Lock window between Billing commit and confirm lets an employee edit a just-invoiced entry. | L | M | Synchronous confirm after commit + outbox backstop; pending-as-held rule (§11.2); alert on pending > 60 s. |
-| R-F1 | Money drift from serialization or a "harmless" refactor of totals. | M | H | Decimal strings, golden tests, fingerprints with zero tolerance, no recomputation of historical data. |
-| R-F2 | Draft invoices recomputed during migration change totals (tax recompute while draft, `invoice.rb:384-393`). | M | M | Migration moves rows, never saves through models; dual-run fingerprint per draft. |
-| R-R1 | Reports show stale data after writes (eventual consistency). | H | L–M | Single-domain aggregates served live; lag SLO; "as of" stamp; D-7. |
-| R-O1 | Operational load triples (three apps, three workers, feeds). | H | M | Shared contracts gem, identical deploy templates, one dashboard; physical DB split (P6) optional if A-1 holds. |
-| R-S1 | Stripe webhook split mishandles connected-account invoice events (A-5). | M | H | Spike in WP-B5 before P5; keep Core forwarding as fallback. |
-| R-A1 | Token/role drift between Core and services. | L | H | Per-request minting from live roles; 60 s TTL; tenant mismatch rejection. |
-| R-D1 | Directory replica lag causes spurious 422s for new projects or allows entries on just-archived projects. | M | L | Read-through on miss; lag SLO; D-7. |
-| R-X1 | Fixing an anomaly (X-1…X-8) during the migration masks a regression. | M | M | Anomalies stay pinned by characterization; each fix is a separate, decided change with its own release. |
-
-### 17.2 Open questions
-
-1. Are there consumers (spreadsheets, BI tools, integrations) that read the production database
-   directly (A-2)?
-2. What is the actual distribution of X-2/X-3/X-7 cases in production (P0 audit)?
-3. Is a ≤ 5 s reporting lag acceptable on project and team pages (A-4)?
-4. Does product want `review_status` to gate invoicing in future (D-4)? If yes, Timekeeping's claimable
-   query is the place to add it.
-5. Should the desktop/mobile current-timer blob (`DesktopCurrentTimer`) move to Timekeeping? It never
-   creates entries server-side today (§3.3); this design leaves it in Core.
-6. Will a separate team own Billing? If so, the P5 cutover and on-call split need staffing decisions.
-
-### 17.3 Decisions needed
-
-| ID | Decision | Options | Recommendation |
-|---|---|---|---|
-| D-1 | X-1: should sending an invoice mark entries `billed`? | (a) Keep today's live behavior (no) and delete dead code; (b) mark `billed` on send (behavior change for reports, policies and removal impact). | **(a)** during migration; if (b) is wanted, ship it later as a Timekeeping lock-rule extension, not a Billing write. |
-| D-2 | X-2/X-7: lock rule set. | `compat` vs `corrected` (§9.3). | Ship `compat`; switch to `corrected` after P4 behind the per-company setting, with product sign-off (it changes what employees can edit). |
-| D-3 | X-3/X-8: enforce one active claim per entry? | Report only vs enforce (409). | Enforce after the P0 audit shows the existing duplicates and finance decides how to treat them. |
-| D-4 | Should `pending_review`/`rejected` entries be invoiceable? | Keep (today) vs exclude. | Keep during migration. |
-| D-5 | X-4/X-5: arithmetic changes (fractional minutes, BigDecimal). | Keep vs change for drafts only. | Keep; revisit after P6 with a diff report. |
-| D-6 | X-6: report inconsistencies. | Port verbatim vs fix during port. | Port verbatim; fix afterwards one report at a time. |
-| D-7 | Accepted staleness for projections and directory replica. | ≤ 5 s p99 vs synchronous reads. | ≤ 5 s p99 with read-through for directory writes. |
-| D-8 | Optimistic locking (`lock_version`) on entries returns 409 on concurrent edits. | Adopt vs last-writer-wins (today). | Adopt for internal calls; map to today's behavior on the public API until product approves. |
+1. Does anything outside this repository read `timesheet_entries` directly? If so, it becomes a projection
+   reader and may lag.
+2. Production data would need the pre-flight run read-only well before any production rollout, to size
+   the orphan and conflict lists. That is outside this scope.
 
 ---
 
 ## Appendix A — Characterization run
 
-To separate observation from assumption, the behaviors this design depends on were executed against
-the baseline in the repository's test container (`miru-test`, Ruby 4.0.1, Postgres 16) with a
-throwaway spec kept outside version control (under the ignored `tmp/` directory). It is **not part of
-this change**; WP-Q1 proposes promoting it.
+The behaviours cited as `K#` were executed against `main` at `e8cf97b` in the repository's test container
+(`miru-test`: Ruby 4.0.1, Postgres). The spec lived under the ignored `tmp/` directory and is **not part of
+this change**. Promoting it is foundation work (§14).
 
 | Case | Assertion | Result |
 |---|---|---|
-| C1 | Saving a draft invoice locks the referenced entry; `bill_status` stays `unbilled`. | pass |
-| C2 | `record_send!` (live API send path) moves the invoice to `sent`; entry stays `unbilled` and locked. | pass |
-| C2b | Delivering `InvoiceMailer#send_invoice` (what the API enqueues) does not change `bill_status` or invoice status. | pass |
-| C3 | `Invoice#update_timesheet_entry_status!` (legacy path) sets `billed`. | pass |
-| C4 | Discarding a draft invoice leaves entries **locked**; number becomes `ARC-…`. | pass |
-| C4-cause | With `update_invoice_number` stubbed, the same discard unlocks — the renumbering save re-runs the draft lock. | pass |
-| C4b | Discarding a sent invoice keeps entries locked. | pass |
-| C5 | Entry duration 90.7 min becomes line quantity 90; invoice amount at rate 100 is 150.00. | pass |
-| C6 | The same entry can be put on line items of two invoices. | pass |
-| C7 | A locked entry cannot be updated by an employee; an owner can update it. | pass |
-| C8 | Line `total_cost` (7 min × 33.33) = 3.888 (Float×BigDecimal), pure Float would give 3.889; invoice amount = 3.89. | pass |
-| C9 | Removing a line item from a draft via nested `_destroy` unlocks its entry. | pass |
-| C10 | After discarding a draft, its entry is offered again by `NewLineItemsService` while still `locked`. | pass |
+| K1 | Saving a draft invoice locks its entry; `bill_status` stays `unbilled`. | pass |
+| K2 | Discarding a draft leaves its entry locked; the number becomes `ARC-…`. | pass |
+| K3 | Discarding a sent invoice keeps its entry locked. | pass |
+| K4 | A line-item destroy releases its entry on a draft, not on a sent invoice. | pass |
+| K5 | `record_send!` moves the invoice to `sent`; the entry stays `unbilled` and locked. | pass |
+| K6 | One entry can be put on two kept invoices. | pass |
+| K7 | Hard `destroy` of a draft releases its entry; of a sent invoice, removes the line items and leaves the entry locked. | pass |
+| K8 | Destroying an agent nulls `agent_id` on its entries. | pass |
+| K9 | A line item posted with `quantity` 90.7 stores 90; amount at rate 100 is 150.0. | pass |
+| K10 | An agent entry with `source_metadata["mcp_server"]` is stored with `source: "mcp"`. | pass |
+| K11 | First found PDF/stored mismatch: 19 min at 33.33, stored `amount` 10.55, PDF total 10.555, printed $10.56. | pass |
+| K12 | Bulk move by an employee of a `locked` (not billed, in-window) entry answers 200 and leaves the entry unmoved. | pass |
+| K13 | An employee may set `bill_status: billed` on their own entry through the web API. | pass |
 
-Baseline regression for the domain-critical groups listed in §14.1: **321 examples, 0 failures**
-(same container, `SKIP_VITE_TEST_BUILD=1`).
-
----
-
-## Appendix B — Table ownership map
-
-| Table | Target owner | Notes |
-|---|---|---|
-| `timesheet_entries` | Timekeeping | + `company_id`, `lock_version`; FKs to `projects`/`users`/`agents` become replica references |
-| `billing_claims` (new) | Timekeeping | |
-| `invoices`, `invoice_line_items`, `invoice_line_item_time_entries`, `invoice_taxes`, `tax_configurations` | Billing | Line items + `project_id`, `user_id`, `entry_snapshot` |
-| `payments`, `payments_providers`, `stripe_connected_accounts`, `razorpay_payouts` | Billing | |
-| `quickbooks_connections`, `quickbooks_references`, `quickbooks_sync_runs`, `quickbooks_sync_events` | Billing | |
-| `bulk_invoice_download_statuses` | Billing | |
-| `exchange_rates`, `currency_pairs` | Core | Replicated to Billing |
-| `companies`, `users`, `employments`, `roles`, `users_roles`, `clients`, `client_members`, `projects`, `project_members`, `agents`, `agent_keys`, `cli_sessions`, `devices` | Core | Replicated (subset) to Timekeeping and Billing |
-| `timeoff_entries`, `leaves`, `leave_types`, `holidays`, `holiday_infos`, `carryovers`, `custom_leaves` | Core | |
-| `expenses`, `expense_categories` | Core | |
-| `analytics_reports`, `analytics_threshold_notification_logs`, `metrics`, `ahoy_*` | Core | |
-| `audits` | Core (historic) | New audits written by each service in its own DB; audit-log API federates (B-13) |
-| `mcp_idempotency_records` | Core | |
-| `rails_event_viewer_entries` | Each app its own | Observability only |
-| `rpt_*` (new) | Core (Reporting module) | Projections |
-| `*_outbox`, `*_idempotency_keys`, `*_inbox` (new) | Each app its own | |
-| `solid_queue_*` | Each app its own (P6) | Shared until P6 |
+Result: 13 examples, 0 failures.
 
 ---
 
-## Appendix C — Source index
+## Appendix B — Source index
 
-Timekeeping: `app/models/timesheet_entry.rb`, `app/policies/timesheet_entry_policy.rb`,
-`app/controllers/api/v1/timesheet_entry_controller.rb`,
-`app/controllers/api/v1/timesheet_entry/bulk_action_controller.rb`,
-`app/controllers/api/v1/cli/timesheet_entries_controller.rb`,
-`app/controllers/api/v1/agent/timesheet_entries_controller.rb`, `app/mcp/tools/time_*_tool.rb`,
-`app/mcp/idempotency_store.rb`, `app/services/imports/harvest_time_entries_importer.rb`,
-`app/services/time_tracking_index_service.rb`, `app/services/time_entries/filters.rb`.
+Entries: `app/models/timesheet_entry.rb`, `app/models/agent.rb`, `app/policies/timesheet_entry_policy.rb`,
+`app/controllers/api/v1/timesheet_entry_controller.rb`, `app/controllers/api/v1/timesheet_entry/bulk_action_controller.rb`,
+`app/controllers/api/v1/cli/timesheet_entries_controller.rb`, `app/controllers/api/v1/agent/{base,timesheet_entries}_controller.rb`,
+`app/mcp/api_proxy.rb`, `app/mcp/idempotency_store.rb`, `app/services/imports/harvest_time_entries_importer.rb`.
 
-Billing: `app/models/invoice.rb`, `app/models/invoice_line_item.rb`,
-`app/models/invoice_line_item_time_entry.rb`, `app/models/invoice_tax.rb`, `app/models/payment.rb`,
-`app/models/concerns/invoice_sendable.rb`, `app/mailers/invoice_mailer.rb`,
-`app/controllers/api/v1/invoices_controller.rb`, `app/controllers/api/v1/invoices/*`,
-`app/services/generate_invoice/new_line_items_service.rb`, `app/presenters/project_members_presenter.rb`,
-`app/services/invoice_payment/*`, `app/services/handle_stripe_checkout_event_service.rb`,
-`app/services/quick_books/*`, `app/services/update_invoice_status_to_overdue_service.rb`,
-`app/services/currency_conversion_service.rb`, `app/policies/invoice_policy.rb`.
+Billing: `app/models/invoice.rb`, `app/models/invoice_line_item.rb`, `app/models/invoice_line_item_time_entry.rb`,
+`app/models/concerns/invoice_sendable.rb`, `app/controllers/api/v1/invoices_controller.rb`,
+`app/controllers/api/v1/invoices/bulk_deletion_controller.rb`, `app/controllers/api/v1/mobile/collections_controller.rb`,
+`app/services/generate_invoice/new_line_items_service.rb`, `app/services/pdf_generation/invoice_service.rb`.
 
-Reporting: `app/services/analytics/*`, `app/services/reports/*`, `app/presenters/dashboard_presenter.rb`,
-`app/models/project.rb`, `app/models/client.rb`, `app/models/concerns/project_sql_queries.rb`,
-`app/services/clients/index_service.rb`, `app/services/team/removal_impact_service.rb`,
-`app/services/invoice_amounts_summary.rb`, `app/controllers/analytics_controller.rb`.
+Readers: `app/services/reports/client_revenues/report_decorator.rb`, `app/services/metrics/data_builder.rb`,
+`app/services/analytics/*`, `app/presenters/dashboard_presenter.rb`, `app/models/project.rb`,
+`app/services/time_tracking_index_service.rb`, `app/services/weekly_reminder_for_missed_entries_service.rb`.
 
-Platform: `config/routes.rb`, `config/routes/api.rb`, `config/database.yml`, `config/solid_queue.yml`,
-`config/initializers/rails_event_viewer.rb`, `config/initializers/sentry.rb`, `docs/ai/events.md`,
-`app/events/*`, `app/controllers/concerns/{authenticable,current_company_concern,set_current_details}.rb`,
-`app/models/{cli_session,agent_key}.rb`, `db/schema.rb`, `render.yaml`, `config/deploy.yml`,
-`.github/workflows/validations.yml`.
+Platform: `app/jobs/application_job.rb`, `config/solid_queue.yml`, `config/deploy.yml`, `db/schema.rb`,
+`db/seeds.rb`.
