@@ -16,6 +16,10 @@ class InvoiceLineItem < ApplicationRecord
   validates :name, :date, :rate, :quantity, presence: true
   validates :rate, numericality: { greater_than_or_equal_to: 0 }
   validates :quantity, numericality: { greater_than_or_equal_to: 0 }
+  # No foreign key ties a line to its entry (docs/architecture/timekeeping-soa.md
+  # §10.2 step 3), so an id naming no entry is refused here, with the message
+  # belongs_to gives a grouped line's required link (InvoiceLineItemTimeEntry).
+  validates :timesheet_entry, presence: { message: :required }, if: :timesheet_entry_id?
   validate :timesheet_entry_belongs_to_invoice_company
   validate :linked_timesheet_entries_belong_to_invoice_company
 
