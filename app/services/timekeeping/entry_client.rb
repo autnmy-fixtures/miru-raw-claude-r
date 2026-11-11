@@ -10,12 +10,12 @@
 # company (§6.1), which scopes it to that tenant (§6.3); who may select
 # candidates was already decided here, by InvoiceLineItemPolicy.
 #
-# Entry writes, single and bulk, for the write gateway (§3.1): each carries
-# the caller's claims (§6.1), the admitted ownership generation and one
-# Idempotency-Key (§5.1). A request the contract cannot carry raises Invalid
-# and is never sent. A transport failure or a 5xx is retried at most twice with jitter,
-# with the same key, so a retry after a lost response replays the stored
-# result (§9.4).
+# Entry writes, single and bulk, and agent detach, for the write gateway
+# (§3.1): each carries the caller's claims (§6.1), the admitted ownership
+# generation and one Idempotency-Key (§5.1). A request the contract cannot
+# carry raises Invalid and is never sent. A transport failure or a 5xx is
+# retried at most twice with jitter, with the same key, so a retry after a
+# lost response replays the stored result (§9.4).
 #
 # A transport failure or any 5xx that remains raises Unavailable, which the
 # caller answers as a retryable 503. A problem Timekeeping answered raises
@@ -76,6 +76,11 @@ class Timekeeping::EntryClient < Timekeeping::InternalApi
     mutate(:bulk_discard, { "ids" => ids }, write:).fetch("discarded_ids")
   end
 
+  # W6 (§5.2): nulls agent_id on the token company's entries that name the
+  # agent, and answers the ids it changed. Detaching an agent that no entry
+  # names changes nothing, so a repeat is harmless.
+  def detach_agent(agent_id, write:) = mutate(:detach_agent, {}, write:, agent_id:).fetch("detached_ids")
+
   # `project_ids` and `user_ids` restrict the candidates to those ids; nil
   # `user_ids` is no restriction. An empty list selects nothing, as an empty
   # IN list does in SQL, and a query string cannot carry one, so no call is
@@ -93,12 +98,13 @@ class Timekeeping::EntryClient < Timekeeping::InternalApi
 
   private
 
-    def mutate(name, body, write:, id: nil)
+    # `path_params` fills the operation's path template, such as {id}.
+    def mutate(name, body, write:, **path_params)
       operation = contract_operation(name)
       errors = Timekeeping::Contracts.errors(CONTRACT, operation.fetch("request"), body)
       raise Invalid.new(name, errors) if errors.any?
 
-      path = operation.fetch("path").sub("{id}", id.to_s)
+      path = operation.fetch("path").gsub(/\{(\w+)\}/) { path_params.fetch(Regexp.last_match(1).to_sym).to_s }
       headers = token_headers(write.claims).merge(
         "Idempotency-Key" => write.idempotency_key,
         "X-Ownership-Generation" => write.generation.to_s,

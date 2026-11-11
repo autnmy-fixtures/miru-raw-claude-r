@@ -283,6 +283,47 @@ RSpec.describe Timekeeping::Gateway::Remote, type: :model do
     end
   end
 
+  describe "DetachAgent (W6)" do
+    let(:agent) { create(:agent, company: tenant.company, user: tenant.employee) }
+
+    def held(tenant, **attributes)
+      fake.seed_entry(
+        company_id: tenant.company.id, project_id: tenant.project.id, user_id: tenant.employee.id,
+        duration: 30.0, work_date: "2026-11-02", **attributes
+      )
+    end
+
+    it "detaches the agent's entries in the agent's company as the agent_destroy writer, and answers their ids" do
+      named = held(tenant, agent_id: agent.id)
+      unnamed = held(tenant)
+
+      detached = forwarded { gateway::DetachAgent.new(agent:) }
+
+      expect(detached).to eq([named["id"]])
+      expect(fake.entry(named["id"])).to include("agent_id" => nil, "version" => 2)
+      expect(fake.entry(unnamed["id"])).to eq(unnamed)
+      expect(fake.calls.sole.claims).to include(
+        "writer" => "agent_destroy", "company_id" => tenant.company.id, "project" => nil,
+        "sub" => "user:#{tenant.employee.id}", "actor" => { "type" => "user", "agent_id" => nil }
+      )
+    end
+
+    it "touches nothing of another tenant: the owner scopes by the agent's company (§6.3)" do
+      foreign = held(other_tenant, agent_id: agent.id)
+
+      expect(forwarded { gateway::DetachAgent.new(agent:) }).to eq([])
+      expect(fake.entry(foreign["id"])).to eq(foreign)
+    end
+
+    it "is the system actor when no user is signed in, as for a destroy from a job or the console" do
+      Current.user = nil
+
+      forwarded { gateway::DetachAgent.new(agent:) }
+
+      expect(fake.calls.sole.claims).to include("sub" => "system", "role" => nil, "writer" => "agent_destroy")
+    end
+  end
+
   it "refuses the commands it does not forward yet, and writes nothing" do
     writes = timesheet_entry_writes do
       expect { gateway.call(gateway::ImportEntry.new(company: tenant.company, attributes: {}, billed: false)) }

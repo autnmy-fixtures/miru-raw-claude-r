@@ -16,10 +16,10 @@
 # fence through Timekeeping::BillingWriteFence.
 #
 # The legacy owner (§10.2 step 2) runs today's model code unchanged. The
-# timekeeping owner (Remote) forwards the single-entry and bulk commands to
-# Timekeeping's entry API; the commands it does not forward yet, and every
-# command under the monolith owner, are refused, never written locally,
-# because a local write there would be a second writer.
+# timekeeping owner (Remote) forwards the single-entry and bulk commands and
+# agent detach to Timekeeping's entry API; the commands it does not forward
+# yet, and every command under the monolith owner, are refused, never written
+# locally, because a local write there would be a second writer.
 module Timekeeping::Gateway
   class OwnerUnavailable < StandardError; end
 
@@ -58,7 +58,9 @@ module Timekeeping::Gateway
   # marked billed, as today (§1.3).
   ImportEntry = Data.define(:company, :attributes, :billed)
 
-  # W6 agent destroy: replaces `dependent: :nullify` on Agent.
+  # W6 agent destroy: replaces `dependent: :nullify` on Agent. It runs
+  # before the agent row is deleted, so the destroy completes only once the
+  # owner has detached the agent's entries (§3.4).
   DetachAgent = Data.define(:agent)
 
   # W7 the invoice callbacks, until the invoice boundary replaces them (§7).

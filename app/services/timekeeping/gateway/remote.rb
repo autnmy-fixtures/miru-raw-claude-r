@@ -3,8 +3,8 @@
 # The `timekeeping` owner of the gateway (docs/architecture/timekeeping-soa.md
 # §3.1): entry writes go to Timekeeping's entry API (§5.2). So far it forwards
 # the single-entry commands of W1 web and mobile, W3 CLI (and so W3a MCP) and
-# W4 agent, and W2's bulk move and bulk discard. The gateway refuses every
-# other command under this owner.
+# W4 agent, W2's bulk move and bulk discard, and W6's agent detach. The
+# gateway refuses every other command under this owner.
 #
 # Each command becomes one request: the tenant it runs in, the project it
 # names, the agent acting, if any, and the writer. The interpreter adds the
@@ -29,7 +29,10 @@ module Timekeeping::Gateway::Remote
   # The legacy owner sets the command's project and user after the writer's
   # attributes on create, and the project before them on update; the bodies
   # keep that order. W2 is always the bulk writer (§6.1); a bulk move skips
-  # what the owner's rules reject and still answers it (A9).
+  # what the owner's rules reject and still answers it (A9). W6 runs in the
+  # agent's company, the only check Timekeeping makes for it (§6.2), and
+  # answers the ids it detached; the agent row is deleted only after that
+  # answer, by the destroy that sent it (§3.4).
   REQUESTS = {
     gateway::CreateEntry => ->(command) {
       entry = entry_attributes(command.attributes).compact
@@ -62,6 +65,12 @@ module Timekeeping::Gateway::Remote
       Request.new(
         company: command.company, project: nil, agent: nil, writer: "bulk",
         forward: ->(client, write) { client.bulk_discard(command.entries.map(&:id), write:) }
+      )
+    },
+    gateway::DetachAgent => ->(command) {
+      Request.new(
+        company: command.agent.company, project: nil, agent: nil, writer: "agent_destroy",
+        forward: ->(client, write) { client.detach_agent(command.agent.id, write:) }
       )
     }
   }.freeze

@@ -4,8 +4,8 @@ require "rails_helper"
 
 # Entry writes forwarded to Timekeeping (docs/architecture/timekeeping-soa.md
 # §3.1, §5.2, §6.1), through the real entry points of W1 web and mobile, W2
-# bulk, W3 CLI, W3a MCP and W4 agent, against the consumer-side fake of
-# Timekeeping.
+# bulk, W3 CLI, W3a MCP, W4 agent and W6 agent destroy, against the
+# consumer-side fake of Timekeeping.
 # Under `timekeeping` each write reaches the owner with its writer's claims,
 # answers today's public JSON from the owner's entry, and writes nothing to
 # timesheet_entries, which is the projection with one writer (§3.2, §12.2).
@@ -279,6 +279,39 @@ RSpec.describe "Timekeeping entry forwarding", type: :request do
         expect(response).to have_http_status(:unprocessable_entity)
         expect(fake.calls).to be_empty
         expect(fake.entry(foreign.id)["discarded_at"]).to be_nil
+      end
+    end
+
+    describe "W6 agent destroy" do
+      let(:agent) { create(:agent, company: tenant_a.company, user: employee, default_project: tenant_a.project) }
+
+      # An agent's entry logged under the timekeeping owner, which the relay
+      # has not projected yet.
+      let!(:held) do
+        fake.seed_entry(
+          company_id: tenant_a.company.id, project_id: tenant_a.project.id, user_id: employee.id,
+          agent_id: agent.id, duration: 30.0, work_date: "2026-11-02"
+        )
+      end
+
+      it "detaches the agent's entries in Timekeeping, then deletes the agent (§3.4)" do
+        without_projection_writes { agent.destroy! }
+
+        expect(Agent.exists?(agent.id)).to be(false)
+        expect(fake.entry(held["id"])).to include("agent_id" => nil)
+        expect(fake.calls.map(&:operation)).to eq([:detach_agent])
+        expect(writers).to eq(["agent_destroy"])
+      end
+
+      it "keeps the agent when the owner refuses the detach, so nothing is half done" do
+        fake.fail_next(:detach_agent, status: 409, slug: "stale-generation", retryable: false)
+
+        without_projection_writes do
+          expect { agent.destroy! }.to raise_error(Timekeeping::Ownership::Moving)
+        end
+
+        expect(Agent.exists?(agent.id)).to be(true)
+        expect(fake.entry(held["id"])).to include("agent_id" => agent.id)
       end
     end
   end
