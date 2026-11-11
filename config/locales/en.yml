@@ -66,6 +66,7 @@ en:
       invalid_csv: "Invalid CSV: %{message}"
       invalid_user_map: User mappings must use First Last=email
       missing_headers: "Missing required headers: %{headers}"
+      ownership_moving: Import stopped because time entries are being moved between services. Run it again in a few minutes; rows already imported are skipped.
       unexpected: Import failed. Support has been notified.
   avatar:
     destroy:
@@ -869,6 +870,7 @@ en:
       failure: Failed to delete timesheet entries
       locked: "Only admins and owners can delete entries older than %{days} days"
       message: Timesheet deleted
+    ownership_moving: Time entries are being moved between services, so nothing was saved. Try again in a minute.
     update:
       failure: Failed to update timesheet entries
       locked: "Only admins and owners can edit entries older than %{days} days"

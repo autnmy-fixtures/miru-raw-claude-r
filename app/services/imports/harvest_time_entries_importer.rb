@@ -69,12 +69,21 @@ module Imports
     private
 
       def fail_import(error)
-        message = error.message
-        unless error.is_a?(InvalidFileError)
-          Rails.logger.error("Data import ##{data_import.id} failed: #{message}")
-          message = I18n.t("imports.errors.unexpected")
+        data_import.update!(status: "failed", error_message: failure_message(error), finished_at: Time.current)
+      end
+
+      # What the user is told. A Timekeeping handoff that closes admission
+      # mid-import (docs/architecture/timekeeping-soa.md §10.1) stops it at a
+      # row boundary: earlier batches are kept, and a re-run skips them as
+      # duplicates, so the failure says to retry rather than "unexpected".
+      def failure_message(error)
+        case error
+        when InvalidFileError then error.message
+        when Timekeeping::Gateway::OwnershipMoving then I18n.t("imports.errors.ownership_moving")
+        else
+          Rails.logger.error("Data import ##{data_import.id} failed: #{error.message}")
+          I18n.t("imports.errors.unexpected")
         end
-        data_import.update!(status: "failed", error_message: message, finished_at: Time.current)
       end
 
       def load_rows

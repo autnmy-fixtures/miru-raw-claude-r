@@ -2,11 +2,12 @@
 
 # The one ownership record of docs/architecture/timekeeping-soa.md §10.1:
 # which owner holds entries, under which generation, and whether admission is
-# open. The handoff tool writes it; everything else only reads it.
+# open. The handoff tool changes it; everything else only reads it.
 #
 # No row means no handoff has ever run here. The column defaults are the
 # initial legacy state, so .current returns them unsaved instead of keeping a
-# second copy of that state in code.
+# second copy of that state in code. The only other insert is .lock_shared!,
+# which needs a row to lock and writes exactly those defaults.
 class Timekeeping::Ownership < ApplicationRecord
   SINGLETON_ID = 1
   INITIAL_GENERATION = 0
@@ -28,6 +29,20 @@ class Timekeeping::Ownership < ApplicationRecord
 
   def self.handoff_begun?
     current.handoff_begun?
+  end
+
+  # Admission for one write (§10.1): the record read under FOR SHARE, which
+  # the caller's transaction then holds until it commits or rolls back.
+  # Raising the generation takes the row exclusively, so it waits for every
+  # write admitted this way, and a write that arrives while it is held waits
+  # and then reads the raised record. Must run inside a transaction.
+  #
+  # A database where no handoff has run has no row to lock, so the initial
+  # row is written first; concurrent writers race safely on ON CONFLICT DO
+  # NOTHING and all lock the one row.
+  def self.lock_shared!
+    insert({ id: SINGLETON_ID }) unless exists?(id: SINGLETON_ID)
+    lock("FOR SHARE").find(SINGLETON_ID)
   end
 
   # For the seed and demo-data builders: they write only in the initial legacy

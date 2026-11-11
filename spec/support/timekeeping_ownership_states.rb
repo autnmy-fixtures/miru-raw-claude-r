@@ -17,8 +17,9 @@ module TimekeepingOwnershipStates
     "re-cut over to Timekeeping" => { generation: 3, owner: "timekeeping", state: "open" }
   }.freeze
 
+  # Updates the row when a gateway write already inserted the initial one.
   def set_timekeeping_ownership!(attributes)
-    Timekeeping::Ownership.create!(attributes)
+    Timekeeping::Ownership.current.tap { |ownership| ownership.update!(attributes) }
   end
 end
 

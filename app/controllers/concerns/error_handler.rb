@@ -9,6 +9,7 @@ module ErrorHandler
     rescue_from Discard::RecordNotDiscarded, with: :record_not_discarded
     rescue_from ActiveRecord::RecordInvalid, with: :record_invalid
     rescue_from Pagy::VariableError, with: :invalid_param_value
+    rescue_from Timekeeping::Gateway::OwnershipMoving, with: :ownership_moving
   end
 
   private
@@ -56,6 +57,19 @@ module ErrorHandler
       respond_to do |format|
         format.json { render json: { errors: exception.record.errors.full_messages.first }, status: 422 }
         format.html { render file: "public/422.html", status: 422, layout: false, alert: message }
+      end
+    end
+
+    # A Timekeeping handoff closed admission while this write was made
+    # (docs/architecture/timekeeping-soa.md §10.1). Nothing was written, and
+    # the same request succeeds once the handoff finishes, so it is a
+    # retryable 503 rather than a failure of the request itself.
+    def ownership_moving(exception)
+      message = exception.message
+
+      respond_to do |format|
+        format.json { render json: { errors: message }, status: 503 }
+        format.html { render plain: message, status: 503 }
       end
     end
 
