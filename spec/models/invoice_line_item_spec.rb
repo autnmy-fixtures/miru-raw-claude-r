@@ -23,7 +23,6 @@
 # Foreign Keys
 #
 #  fk_rails_...  (invoice_id => invoices.id)
-#  fk_rails_...  (timesheet_entry_id => timesheet_entries.id)
 #
 require "rails_helper"
 
