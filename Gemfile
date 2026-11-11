@@ -236,6 +236,10 @@ group :test, :ci do
   gem "rspec-instafail", "~> 1.0"  # Show failures immediately
   gem "super_diff", "~> 0.10"  # Better diff output
   gem "test-prof", "~> 1.3"  # Performance profiling for tests
+
+  # Timekeeping contract schemas and their consumer-side fakes (spec/support/timekeeping_contracts.rb)
+  gem "json_schemer"
+  gem "jwt"
 end
 
 # https://github.com/grosser/parallel_tests

@@ -1022,6 +1022,8 @@ DEPENDENCIES
   iso_country_codes
   jbuilder (~> 2.11)
   json (>= 2.19.2)
+  json_schemer
+  jwt
   kamal
   letter_opener
   letter_opener_web

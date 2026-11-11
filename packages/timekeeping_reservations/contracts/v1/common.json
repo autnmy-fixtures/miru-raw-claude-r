@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.timekeeping.internal/v1/common.json",
+  "title": "Timekeeping contracts v1: shared definitions",
+  "description": "Definitions shared by the entry API, the reservation API and the entry snapshot event (docs/architecture/timekeeping-soa.md §5). Changes within v1 are additive (§5.1).",
+  "$defs": {
+    "id": { "type": "integer", "minimum": 1 },
+    "generation": {
+      "description": "The global ownership generation (§10.1). A mutating call carrying a stale one is refused with 409 stale-generation.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "version": {
+      "description": "The entry's version. Raised by every entry or reservation change; the projection applies a snapshot only when its version is higher than the stored one (§3.2).",
+      "type": "integer",
+      "minimum": 1
+    },
+    "date": { "type": "string", "format": "date" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "duration": {
+      "description": "Minutes, the stored float, serialized in Ruby's shortest round-trip form: parse(serialize(x)) == x (§5.1, §8 item 3).",
+      "type": "number"
+    },
+    "bill_status": { "enum": ["non_billable", "unbilled", "billed"] },
+    "review_status": { "enum": ["not_required", "pending_review", "approved", "rejected"] },
+    "source": { "enum": ["manual", "cli", "mcp", "automation", "import"] },
+    "metadata": { "type": "object" },
+    "nullable_string": { "type": ["string", "null"] },
+    "nullable_id": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+    "ids": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/id" },
+      "uniqueItems": true
+    },
+    "entry_fields": {
+      "description": "Every column of timesheet_entries except id. Open on purpose: entry_data and entry close it.",
+      "type": "object",
+      "properties": {
+        "project_id": { "$ref": "#/$defs/id" },
+        "user_id": { "$ref": "#/$defs/id" },
+        "agent_id": { "$ref": "#/$defs/nullable_id" },
+        "duration": { "$ref": "#/$defs/duration" },
+        "work_date": { "$ref": "#/$defs/date" },
+        "note": { "$ref": "#/$defs/nullable_string" },
+        "bill_status": { "$ref": "#/$defs/bill_status" },
+        "review_status": { "$ref": "#/$defs/review_status" },
+        "locked": {
+          "description": "Derived: true exactly when the entry holds a reservation with edit_lock (§7.1).",
+          "type": "boolean"
+        },
+        "source": { "$ref": "#/$defs/source" },
+        "source_metadata": { "$ref": "#/$defs/metadata" },
+        "proof_url": { "$ref": "#/$defs/nullable_string" },
+        "proof_metadata": { "$ref": "#/$defs/metadata" },
+        "external_run_id": { "$ref": "#/$defs/nullable_string" },
+        "external_session_id": { "$ref": "#/$defs/nullable_string" },
+        "discarded_at": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+        "created_at": { "$ref": "#/$defs/timestamp" },
+        "updated_at": { "$ref": "#/$defs/timestamp" }
+      },
+      "required": [
+        "project_id", "user_id", "agent_id", "duration", "work_date", "note", "bill_status",
+        "review_status", "locked", "source", "source_metadata", "proof_url", "proof_metadata",
+        "external_run_id", "external_session_id", "discarded_at", "created_at", "updated_at"
+      ]
+    },
+    "entry_data": {
+      "description": "The data block of an entry snapshot (§5.4).",
+      "$ref": "#/$defs/entry_fields",
+      "unevaluatedProperties": false
+    },
+    "entry": {
+      "description": "The full entry every entry API response carries (§5.2), with its tenant and version.",
+      "$ref": "#/$defs/entry_fields",
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "company_id": { "$ref": "#/$defs/id" },
+        "version": { "$ref": "#/$defs/version" }
+      },
+      "required": ["id", "company_id", "version"],
+      "unevaluatedProperties": false
+    },
+    "problem_type": {
+      "description": "Stable problem types. The gateway maps each to today's public error JSON (§5.1).",
+      "enum": [
+        "https://contracts.timekeeping.internal/problems/invalid-request",
+        "https://contracts.timekeeping.internal/problems/unauthenticated",
+        "https://contracts.timekeeping.internal/problems/forbidden",
+        "https://contracts.timekeeping.internal/problems/entry-locked",
+        "https://contracts.timekeeping.internal/problems/not-found",
+        "https://contracts.timekeeping.internal/problems/validation-failed",
+        "https://contracts.timekeeping.internal/problems/stale-generation",
+        "https://contracts.timekeeping.internal/problems/ownership-moving",
+        "https://contracts.timekeeping.internal/problems/idempotency-conflict",
+        "https://contracts.timekeeping.internal/problems/reservation-refused",
+        "https://contracts.timekeeping.internal/problems/operation-unresolved"
+      ]
+    },
+    "problem": {
+      "description": "application/problem+json (RFC 9457) with two extensions: retryable, and errors for validation-failed.",
+      "type": "object",
+      "properties": {
+        "type": { "$ref": "#/$defs/problem_type" },
+        "title": { "type": "string" },
+        "status": { "type": "integer", "minimum": 400, "maximum": 599 },
+        "detail": { "type": "string" },
+        "retryable": { "type": "boolean" },
+        "errors": {
+          "description": "validation-failed only: model errors by attribute, as today's ActiveModel errors.",
+          "type": "object",
+          "additionalProperties": { "type": "array", "items": { "type": "string" } }
+        },
+        "refused": {
+          "description": "reservation-refused only: every entry the prepare refused, and why (F1, L8).",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "properties": {
+              "entry_id": { "$ref": "#/$defs/id" },
+              "reason": { "enum": ["on_other_invoice", "wrong_company", "not_found"] }
+            },
+            "required": ["entry_id", "reason"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": ["type", "title", "status", "retryable"],
+      "additionalProperties": false
+    }
+  }
+}

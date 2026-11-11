@@ -1,0 +1,261 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.timekeeping.internal/v1/entry_api.json",
+  "title": "Timekeeping entry API v1",
+  "description": "Provider: Timekeeping. Consumer: the write gateway in the existing application (docs/architecture/timekeeping-soa.md §3.1, §5.2, §6.1).",
+  "x-headers": {
+    "every": ["Authorization", "X-Request-Id"],
+    "mutating": ["Idempotency-Key", "X-Ownership-Generation"]
+  },
+  "x-operations": {
+    "create_entry": {
+      "method": "POST", "path": "/internal/v1/entries", "mutating": true,
+      "request": "#/$defs/entry_create_request",
+      "responses": { "201": "#/$defs/entry_response" }
+    },
+    "update_entry": {
+      "method": "PATCH", "path": "/internal/v1/entries/{id}", "mutating": true,
+      "request": "#/$defs/entry_update_request",
+      "responses": { "200": "#/$defs/entry_response" }
+    },
+    "discard_entry": {
+      "method": "DELETE", "path": "/internal/v1/entries/{id}", "mutating": true,
+      "request": "#/$defs/empty_request",
+      "responses": { "200": "#/$defs/entry_response" }
+    },
+    "bulk_move": {
+      "method": "POST", "path": "/internal/v1/entries/bulk_move", "mutating": true,
+      "request": "#/$defs/bulk_move_request",
+      "responses": { "200": "#/$defs/bulk_move_response" }
+    },
+    "bulk_discard": {
+      "method": "POST", "path": "/internal/v1/entries/bulk_discard", "mutating": true,
+      "request": "#/$defs/bulk_discard_request",
+      "responses": { "200": "#/$defs/bulk_discard_response" }
+    },
+    "import_batch": {
+      "method": "POST", "path": "/internal/v1/imports/{import_id}/batches/{n}", "mutating": true,
+      "request": "#/$defs/import_batch_request",
+      "responses": { "200": "#/$defs/import_batch_response" }
+    },
+    "detach_agent": {
+      "method": "POST", "path": "/internal/v1/agents/{agent_id}/detach", "mutating": true,
+      "request": "#/$defs/empty_request",
+      "responses": { "200": "#/$defs/detach_agent_response" }
+    },
+    "list_entries": {
+      "method": "GET", "path": "/internal/v1/entries", "mutating": false,
+      "query": "#/$defs/list_query",
+      "responses": { "200": "#/$defs/entry_list_response" }
+    },
+    "show_entry": {
+      "method": "GET", "path": "/internal/v1/entries/{id}", "mutating": false,
+      "responses": { "200": "#/$defs/entry_response" }
+    },
+    "candidates": {
+      "method": "GET", "path": "/internal/v1/candidates", "mutating": false,
+      "query": "#/$defs/candidates_query",
+      "responses": { "200": "#/$defs/candidates_response" }
+    }
+  },
+  "$defs": {
+    "token_claims": {
+      "description": "The short-lived user token (§6.1): HS256 JWT signed with the shared token key, 60 s TTL, carrying the facts the gateway resolved before the write (§2.2).",
+      "type": "object",
+      "properties": {
+        "sub": { "type": "string", "pattern": "^(user:[1-9][0-9]*|system)$" },
+        "aud": { "const": "timekeeping" },
+        "iat": { "type": "integer" },
+        "exp": { "type": "integer" },
+        "company_id": { "$ref": "common.json#/$defs/id" },
+        "role": {
+          "description": "The caller's primary role in the company; null for a system actor (Current.user == nil today).",
+          "enum": ["owner", "admin", "employee", "book_keeper", "client", null]
+        },
+        "timesheet_edit_days": { "type": "integer", "minimum": 0 },
+        "actor": {
+          "type": "object",
+          "properties": {
+            "type": { "enum": ["user", "agent", "system"] },
+            "agent_id": { "$ref": "common.json#/$defs/nullable_id" }
+          },
+          "required": ["type", "agent_id"],
+          "additionalProperties": false
+        },
+        "writer": { "enum": ["web", "mobile", "bulk", "cli", "mcp", "agent", "import", "agent_destroy", "invoice"] },
+        "project": {
+          "description": "The reference facts of the target project, or null when the command names none.",
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "id": { "$ref": "common.json#/$defs/id" },
+                "company_id": { "$ref": "common.json#/$defs/id" },
+                "kept": { "type": "boolean" },
+                "billable": { "type": "boolean" }
+              },
+              "required": ["id", "company_id", "kept", "billable"],
+              "additionalProperties": false
+            },
+            { "type": "null" }
+          ]
+        },
+        "request_id": { "type": "string", "minLength": 1 }
+      },
+      "required": ["sub", "aud", "iat", "exp", "company_id", "role", "timesheet_edit_days", "actor", "writer", "project", "request_id"],
+      "additionalProperties": false
+    },
+    "entry_attributes": {
+      "description": "What a writer may set. agent_id comes from the token's actor, company_id from the token, review_status and the source rewrite from the provider's rules (A10).",
+      "type": "object",
+      "properties": {
+        "project_id": { "$ref": "common.json#/$defs/id" },
+        "user_id": { "$ref": "common.json#/$defs/id" },
+        "duration": { "$ref": "common.json#/$defs/duration" },
+        "work_date": { "$ref": "common.json#/$defs/date" },
+        "note": { "$ref": "common.json#/$defs/nullable_string" },
+        "bill_status": { "$ref": "common.json#/$defs/bill_status" },
+        "source": { "$ref": "common.json#/$defs/source" },
+        "source_metadata": { "$ref": "common.json#/$defs/metadata" },
+        "proof_url": { "$ref": "common.json#/$defs/nullable_string" },
+        "proof_metadata": { "$ref": "common.json#/$defs/metadata" },
+        "external_run_id": { "$ref": "common.json#/$defs/nullable_string" },
+        "external_session_id": { "$ref": "common.json#/$defs/nullable_string" }
+      },
+      "additionalProperties": false
+    },
+    "new_entry": {
+      "$ref": "#/$defs/entry_attributes",
+      "required": ["project_id", "user_id", "duration", "work_date"]
+    },
+    "empty_request": { "type": "object", "maxProperties": 0 },
+    "entry_create_request": {
+      "type": "object",
+      "properties": { "entry": { "$ref": "#/$defs/new_entry" } },
+      "required": ["entry"],
+      "additionalProperties": false
+    },
+    "entry_update_request": {
+      "type": "object",
+      "properties": { "entry": { "$ref": "#/$defs/entry_attributes", "minProperties": 1 } },
+      "required": ["entry"],
+      "additionalProperties": false
+    },
+    "entry_response": {
+      "type": "object",
+      "properties": { "entry": { "$ref": "common.json#/$defs/entry" } },
+      "required": ["entry"],
+      "additionalProperties": false
+    },
+    "bulk_move_request": {
+      "type": "object",
+      "properties": {
+        "ids": { "$ref": "common.json#/$defs/ids", "minItems": 1 },
+        "project_id": { "$ref": "common.json#/$defs/id" }
+      },
+      "required": ["ids", "project_id"],
+      "additionalProperties": false
+    },
+    "bulk_move_response": {
+      "description": "skipped_ids keeps A9's per-entry silent skip: an entry the rules reject is listed, not refused.",
+      "type": "object",
+      "properties": {
+        "moved_ids": { "$ref": "common.json#/$defs/ids" },
+        "skipped_ids": { "$ref": "common.json#/$defs/ids" },
+        "entries": { "type": "array", "items": { "$ref": "common.json#/$defs/entry" } }
+      },
+      "required": ["moved_ids", "skipped_ids", "entries"],
+      "additionalProperties": false
+    },
+    "bulk_discard_request": {
+      "type": "object",
+      "properties": { "ids": { "$ref": "common.json#/$defs/ids", "minItems": 1 } },
+      "required": ["ids"],
+      "additionalProperties": false
+    },
+    "bulk_discard_response": {
+      "type": "object",
+      "properties": { "discarded_ids": { "$ref": "common.json#/$defs/ids" } },
+      "required": ["discarded_ids"],
+      "additionalProperties": false
+    },
+    "import_batch_request": {
+      "description": "One Harvest batch: at most 500 rows, one transaction, idempotent by import_id:batch_no (§3.4).",
+      "type": "object",
+      "properties": {
+        "rows": { "type": "array", "items": { "$ref": "#/$defs/new_entry" }, "minItems": 1, "maxItems": 500 }
+      },
+      "required": ["rows"],
+      "additionalProperties": false
+    },
+    "import_batch_response": {
+      "type": "object",
+      "properties": {
+        "created_ids": { "$ref": "common.json#/$defs/ids" },
+        "failed_rows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "index": { "type": "integer", "minimum": 0 },
+              "errors": { "type": "object", "additionalProperties": { "type": "array", "items": { "type": "string" } } }
+            },
+            "required": ["index", "errors"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": ["created_ids", "failed_rows"],
+      "additionalProperties": false
+    },
+    "detach_agent_response": {
+      "description": "W6: agent_id nulled on the token company's entries, one audit row each.",
+      "type": "object",
+      "properties": { "detached_ids": { "$ref": "common.json#/$defs/ids" } },
+      "required": ["detached_ids"],
+      "additionalProperties": false
+    },
+    "id_param": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+    "date_param": { "type": "string", "format": "date" },
+    "list_query": {
+      "type": "object",
+      "properties": {
+        "user_id": { "$ref": "#/$defs/id_param" },
+        "from": { "$ref": "#/$defs/date_param" },
+        "to": { "$ref": "#/$defs/date_param" },
+        "cursor": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "entry_list_response": {
+      "type": "object",
+      "properties": {
+        "entries": { "type": "array", "items": { "$ref": "common.json#/$defs/entry" } },
+        "next_cursor": { "$ref": "common.json#/$defs/nullable_string" }
+      },
+      "required": ["entries", "next_cursor"],
+      "additionalProperties": false
+    },
+    "candidates_query": {
+      "description": "Invoice candidate selection (§3.3 rule 1): kept, unbilled entries of the client's kept projects (project_ids, resolved by the gateway as today) that hold no active or provisional reservation.",
+      "type": "object",
+      "properties": {
+        "client_id": { "$ref": "#/$defs/id_param" },
+        "project_ids": { "type": "array", "items": { "$ref": "#/$defs/id_param" } },
+        "user_ids": { "type": "array", "items": { "$ref": "#/$defs/id_param" } },
+        "exclude_ids": { "type": "array", "items": { "$ref": "#/$defs/id_param" } },
+        "from": { "$ref": "#/$defs/date_param" },
+        "to": { "$ref": "#/$defs/date_param" },
+        "search_term": { "type": "string" }
+      },
+      "required": ["client_id", "project_ids"],
+      "additionalProperties": false
+    },
+    "candidates_response": {
+      "type": "object",
+      "properties": { "entries": { "type": "array", "items": { "$ref": "common.json#/$defs/entry" } } },
+      "required": ["entries"],
+      "additionalProperties": false
+    }
+  }
+}
