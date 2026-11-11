@@ -48,8 +48,11 @@ module TimekeepingContracts
     attr_reader :violations, :calls
     attr_accessor :generation
 
-    def initialize(generation: 1, token_key: TEST_TOKEN_KEY, clock: -> { Time.current })
+    # `list_page_size` pages list_entries by that many entries, its cursor
+    # the offset of the next page; nil answers every entry on one page.
+    def initialize(generation: 1, token_key: TEST_TOKEN_KEY, clock: -> { Time.current }, list_page_size: nil)
       @generation = generation
+      @list_page_size = list_page_size
       @token_key = token_key
       @clock = clock
       @entries = {}
@@ -249,7 +252,10 @@ module TimekeepingContracts
         entries = kept(claims).select do |entry|
           (query["user_id"].nil? || entry["user_id"] == Integer(query["user_id"])) && within?(entry, query)
         end
-        [200, { "entries" => entries, "next_cursor" => nil }]
+        offset = Integer(query.fetch("cursor", "0"))
+        size = @list_page_size || entries.size
+        rest = offset + size
+        [200, { "entries" => entries[offset, size] || [], "next_cursor" => (rest.to_s if rest < entries.size) }]
       end
 
       def show_entry(params, _input, claims)

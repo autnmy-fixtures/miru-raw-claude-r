@@ -10,6 +10,11 @@
 # company (§6.1), which scopes it to that tenant (§6.3); who may select
 # candidates was already decided here, by InvoiceLineItemPolicy.
 #
+# Reads a user makes right after writing (§3.3 rule 1): the entry API's own
+# list and show, for Timekeeping::EntryReads. Each carries the caller's
+# claims, whose company scopes it (§6.3); who may read was already decided
+# here, by the caller's policy.
+#
 # Entry writes, single and bulk, import batches and agent detach, for the
 # write gateway (§3.1): each carries the caller's claims (§6.1), the admitted
 # ownership generation and one Idempotency-Key (§5.1). A request the contract
@@ -101,8 +106,27 @@ class Timekeeping::EntryClient < Timekeeping::InternalApi
       "exclude_ids" => exclude_ids.presence, "from" => work_dates&.begin&.iso8601, "to" => work_dates&.end&.iso8601,
       "search_term" => search_term
     }.compact
-    read(:candidates, query, company:).fetch("entries").map { |entry| candidate(entry) }
+    claims = Timekeeping::UserToken.system_claims(company:, writer: WRITER, request_id: SecureRandom.uuid)
+    read(:candidates, query, claims:).fetch("entries").map { |entry| candidate(entry) }
   end
+
+  # The kept entries of the claims' company for the user, with work dates in
+  # the inclusive Range of Dates, as the owner holds them (§5.2), every page
+  # of them: the owner answers a next_cursor until the last page.
+  def list_entries(user_id:, work_dates:, claims:)
+    query = { "user_id" => user_id.to_s, "from" => work_dates.begin.iso8601, "to" => work_dates.end.iso8601 }
+    entries, cursor = [], nil
+    loop do
+      page = read(:list_entries, query.merge("cursor" => cursor).compact, claims:)
+      entries.concat(page.fetch("entries"))
+      break unless (cursor = page.fetch("next_cursor"))
+    end
+    entries
+  end
+
+  # One kept entry of the claims' company, as the owner holds it (§5.2). One
+  # the owner does not hold there answers Problem not-found.
+  def show_entry(id, claims:) = read(:show_entry, {}, claims:, id:).fetch("entry")
 
   private
 
@@ -112,13 +136,17 @@ class Timekeeping::EntryClient < Timekeeping::InternalApi
       errors = Timekeeping::Contracts.errors(CONTRACT, operation.fetch("request"), body)
       raise Invalid.new(name, errors) if errors.any?
 
-      path = operation.fetch("path").gsub(/\{(\w+)\}/) { path_params.fetch(Regexp.last_match(1).to_sym).to_s }
       headers = token_headers(write.claims).merge(
         "Idempotency-Key" => write.idempotency_key,
         "X-Ownership-Generation" => write.generation.to_s,
         "Content-Type" => "application/json"
       )
-      answer(operation, retrying(name) { http.run_request(operation.fetch("method").downcase.to_sym, path, JSON.generate(body), headers) })
+      answer(operation, retrying(name) { http.run_request(operation.fetch("method").downcase.to_sym, path(operation, path_params), JSON.generate(body), headers) })
+    end
+
+    # The operation's path template, such as {id}, filled from path_params.
+    def path(operation, path_params)
+      operation.fetch("path").gsub(/\{(\w+)\}/) { path_params.fetch(Regexp.last_match(1).to_sym).to_s }
     end
 
     # The response of the first attempt Timekeeping answered below 500, or
@@ -143,9 +171,9 @@ class Timekeeping::EntryClient < Timekeeping::InternalApi
       outcome.is_a?(Faraday::Response) ? "HTTP #{outcome.status}" : outcome.message
     end
 
-    def read(name, query, company:)
+    def read(name, query, claims:, **path_params)
       operation = contract_operation(name)
-      response = http.get(operation.fetch("path"), query, identity_headers(company:, writer: WRITER))
+      response = http.get(path(operation, path_params), query, token_headers(claims))
       raise Unavailable, "Timekeeping #{name}: HTTP #{response.status}" if response.status >= 500
 
       answer(operation, response)

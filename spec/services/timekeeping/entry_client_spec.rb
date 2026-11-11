@@ -92,6 +92,58 @@ RSpec.describe Timekeeping::EntryClient do
     end
   end
 
+  describe "entry reads (§3.3 rule 1, §5.2)" do
+    let(:claims) do
+      Timekeeping::UserToken.system_claims(company:, writer: "web", request_id: "req-9")
+        .merge("sub" => "user:3", "role" => "employee", "actor" => { "type" => "user", "agent_id" => nil })
+    end
+    let(:november) { Date.new(2026, 11, 1)..Date.new(2026, 11, 30) }
+
+    it "lists the user's kept entries in the dates with the caller's claims, the owner's entry as stored" do
+      listed = seed(user_id: 3, work_date: "2026-11-03")
+      seed(user_id: 4, work_date: "2026-11-03")
+      seed(user_id: 3, work_date: "2026-10-31")
+      seed(user_id: 3, work_date: "2026-11-04", discarded_at: "2026-11-05T10:00:00.000000Z")
+      seed(company_id: other_company.id, user_id: 3, work_date: "2026-11-03")
+
+      expect(client.list_entries(user_id: 3, work_dates: november, claims:)).to eq([fake.entry(listed["id"])])
+      call = fake.calls.sole
+      expect(call.input).to eq("user_id" => "3", "from" => "2026-11-01", "to" => "2026-11-30")
+      expect(call.claims).to include("sub" => "user:3", "company_id" => company.id, "writer" => "web", "request_id" => "req-9")
+    end
+
+    it "follows next_cursor until the last page" do
+      fake = TimekeepingContracts::FakeTimekeeping.new(list_page_size: 2).install!
+      ids = Array.new(5) { fake.seed_entry(company_id: company.id, project_id: 7, user_id: 3, duration: 30.0, work_date: "2026-11-02")["id"] }
+
+      expect(client.list_entries(user_id: 3, work_dates: november, claims:).pluck("id")).to eq(ids)
+      expect(fake.calls.map { |call| call.input["cursor"] }).to eq([nil, "2", "4"])
+      expect(fake.violations).to be_empty
+    end
+
+    it "shows one kept entry of the token's tenant, and answers not-found for any other (§6.3)" do
+      shown = seed
+      discarded = seed(discarded_at: "2026-11-05T10:00:00.000000Z")
+      foreign = seed(company_id: other_company.id)
+
+      expect(client.show_entry(shown["id"], claims:)).to eq(fake.entry(shown["id"]))
+      [discarded, foreign].each do |entry|
+        expect { client.show_entry(entry["id"], claims:) }.to raise_error(described_class::Problem) { |problem|
+          expect([problem.status, problem.type]).to eq([404, "not-found"])
+        }
+      end
+      expect(fake.calls.map(&:params)).to eq([shown, discarded, foreign].map { |entry| { "id" => entry["id"].to_s } })
+    end
+
+    it "raises Unavailable when Timekeeping cannot answer a read" do
+      fake.lose_next_response(:list_entries)
+      expect { client.list_entries(user_id: 3, work_dates: november, claims:) }.to raise_error(described_class::Unavailable, /list_entries/)
+
+      fake.fail_next(:show_entry, status: 503, slug: "ownership-moving", retryable: true)
+      expect { client.show_entry(1, claims:) }.to raise_error(described_class::Unavailable, /show_entry: HTTP 503/)
+    end
+  end
+
   describe "entry writes (§5.1, §5.2, §9.4)" do
     subject(:client) do
       described_class.new(

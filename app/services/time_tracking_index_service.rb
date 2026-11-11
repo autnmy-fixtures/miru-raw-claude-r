@@ -3,11 +3,14 @@
 class TimeTrackingIndexService
   include EmployeeFetchingConcern
 
-  attr_reader :current_user, :user, :current_company, :entries, :from, :to, :year
+  attr_reader :current_user, :user, :current_company, :entries, :from, :to, :year, :writer
   attr_accessor :clients, :projects, :employees
 
-  def initialize(current_user:, user:, company:, from:, to:, year:)
+  # `writer` names the route reading, for the owner's claims
+  # (docs/architecture/timekeeping-soa.md §6.1).
+  def initialize(current_user:, user:, company:, from:, to:, year:, writer: "web")
     @current_user = current_user
+    @writer = writer
     @user = user
     @current_company = company
     @from = from
@@ -51,10 +54,10 @@ class TimeTrackingIndexService
       entries
     end
 
+    # Read from the owner of the entries (§3.3 rule 1), so an entry just
+    # written is listed before the projection holds it.
     def fetch_timesheet_entries
-      user.timesheet_entries.kept.includes(:user, project: :client)
-        .in_workspace(current_company)
-        .during(from, to)
+      Timekeeping::EntryReads.call(Timekeeping::EntryReads::List.new(user:, company: current_company, from:, to:, writer:))
     end
 
     def formatted_timesheet_entries

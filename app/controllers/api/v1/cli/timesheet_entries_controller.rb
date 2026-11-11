@@ -48,8 +48,12 @@ class Api::V1::Cli::TimesheetEntriesController < Api::V1::Cli::BaseController
       @_project ||= ProjectPolicy::Scope.new(current_user, current_company).resolve.find(cli_timesheet_entry_params[:project_id])
     end
 
+    # The caller's own entry (A7), read from the owner of the entries
+    # (§3.3 rule 1), so an entry just written can be edited at once.
     def current_timesheet_entry
-      @_current_timesheet_entry ||= current_user.timesheet_entries.kept.in_workspace(current_company).find(params[:id])
+      @_current_timesheet_entry ||= Timekeeping::EntryReads.call(
+        Timekeeping::EntryReads::FindOwn.new(id: params[:id], user: current_user, company: current_company, writer:)
+      )
     end
 
     def cli_timesheet_entry_params

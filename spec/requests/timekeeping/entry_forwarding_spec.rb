@@ -58,7 +58,11 @@ RSpec.describe "Timekeeping entry forwarding", type: :request do
     { timesheet_entry: { project_id: tenant_a.project.id, duration_minutes: 30, work_date: "2026-11-02", **overrides } }
   end
 
-  def writers = fake.calls.map { |call| call.claims.fetch("writer") }
+  # The writes that reached the owner; an update or discard first reads the
+  # entry from it (§3.3 rule 1, spec/requests/timekeeping/entry_reads_spec.rb).
+  def writes = fake.calls.reject { |call| call.operation == :show_entry }
+
+  def writers = writes.map { |call| call.claims.fetch("writer") }
 
   # Today's JSON for the owner's entry: the snippet the controllers render.
   def expect_rendered(entry_json, owned)
@@ -141,7 +145,7 @@ RSpec.describe "Timekeeping entry forwarding", type: :request do
         send_request :delete, api_v1_timesheet_entry_path(foreign.id), headers: auth_headers(employee)
 
         expect(response).to have_http_status(:not_found)
-        expect(fake.calls).to be_empty
+        expect(writes).to be_empty
         expect(fake.entry(foreign.id)["discarded_at"]).to be_nil
       end
     end
