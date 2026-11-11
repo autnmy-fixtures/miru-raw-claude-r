@@ -883,6 +883,7 @@ en:
       failure: Failed to update timesheet entries
       locked: "Only admins and owners can edit entries older than %{days} days"
       message: Timesheet updated
+    unavailable: Time tracking is unavailable, so time entries could not be read. Try again in a minute.
   totp:
     disable_passkey_first: Disable required passkey sign in before enabling authenticator
       app 2FA.
