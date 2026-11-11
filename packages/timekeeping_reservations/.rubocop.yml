@@ -1,0 +1,7 @@
+inherit_from: ../../.rubocop.yml
+
+# A plain Ruby library shared by Timekeeping, the write gateway and the
+# prepared rollback target. It loads no Rails, so ActiveSupport's
+# suggestions (index_with, present?, ...) would not run here.
+Rails:
+  Enabled: false
