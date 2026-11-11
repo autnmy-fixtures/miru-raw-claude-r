@@ -1,0 +1,87 @@
+# Seed disposition for the Timekeeping pre-flight
+# (docs/architecture/timekeeping-soa.md §10.4, §14 "Foundation, per lane").
+#
+# Recorded from the actual seeded data, not written by hand: db/seeds.rb run in
+# the miru-test container on main at 4fe942d, with the default
+# MIRU_SEED_AS_OF of 2026-10-23. Each invoice's referenced entries were read
+# straight from invoice_line_items and invoice_line_item_time_entries.
+#
+# What the seed produced (3,088 entries, 57 invoices, none discarded):
+#
+# - orphans: none. Every locked entry is on a kept invoice.
+# - conflicts: none. No entry is on two kept invoices.
+# - retained and released (F2): none. The seed discards no invoice.
+# - locked: 114 entries, exactly those on the three drafts FL-0054, FL-0055
+#   and FL-0056. They map to active reservations with the edit lock, and are
+#   not listed.
+# - unlocked links: every other invoice. The seed writes these invoices with a
+#   non-draft status from the start (paid, viewed, overdue or sent), so no draft
+#   save ever locked their entries (L1). All of their entries are unlocked.
+#
+# Disposition of the unlocked links: each entry maps to a committed, active
+# reservation with no edit lock, as §7.4 says for an entry on exactly one kept
+# invoice. This keeps today's behaviour: the entry stays off candidate
+# selection (it is on a kept invoice), and the seed marked it billed, so A3
+# already refuses edits for every role. No value changes.
+#
+# Entry ids are not recorded: they follow the database sequences, which differ
+# between runs. Invoice numbers are fixed by the seed.
+unlocked_links:
+  disposition: active_without_edit_lock
+  invoices:
+    Copper Kettle Bakery:
+      - CK-0001
+    Fork & Leaf Salads:
+      - FL-0001
+      - FL-0002
+      - FL-0003
+      - FL-0004
+      - FL-0005
+      - FL-0006
+      - FL-0007
+      - FL-0008
+      - FL-0009
+      - FL-0010
+      - FL-0011
+      - FL-0012
+      - FL-0013
+      - FL-0014
+      - FL-0015
+      - FL-0016
+      - FL-0017
+      - FL-0018
+      - FL-0019
+      - FL-0020
+      - FL-0021
+      - FL-0022
+      - FL-0023
+      - FL-0024
+      - FL-0025
+      - FL-0026
+      - FL-0027
+      - FL-0028
+      - FL-0029
+      - FL-0030
+      - FL-0031
+      - FL-0032
+      - FL-0033
+      - FL-0034
+      - FL-0035
+      - FL-0036
+      - FL-0037
+      - FL-0038
+      - FL-0039
+      - FL-0040
+      - FL-0041
+      - FL-0042
+      - FL-0043
+      - FL-0044
+      - FL-0045
+      - FL-0046
+      - FL-0047
+      - FL-0048
+      - FL-0049
+      - FL-0050
+      - FL-0051
+      - FL-0052
+      - FL-0053
