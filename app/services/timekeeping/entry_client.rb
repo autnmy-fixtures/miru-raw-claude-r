@@ -1,19 +1,31 @@
 # frozen_string_literal: true
 
 # The `timekeeping` owner's entry API (docs/architecture/timekeeping-soa.md
-# §5.2), over HTTP, for the reads that decide money (§3.3 rule 1). So far it
-# serves invoice candidate selection: kept, unbilled entries of the given
-# projects that hold no active or provisional reservation, read from the
-# owner instead of the projection, which may lag (§12.4 "relay paused").
+# §5.2), over HTTP.
 #
-# The call carries a system-actor token for the company (§6.1), which scopes
-# it to that tenant (§6.3); who may select candidates was already decided
-# here, by InvoiceLineItemPolicy. A transport failure or any 5xx raises
-# Unavailable, which the caller answers as a retryable 503. Anything else
-# Timekeeping answers outside the contract raises as in every client.
+# Reads that decide money (§3.3 rule 1): invoice candidate selection, kept,
+# unbilled entries of the given projects that hold no active or provisional
+# reservation, read from the owner instead of the projection, which may lag
+# (§12.4 "relay paused"). The call carries a system-actor token for the
+# company (§6.1), which scopes it to that tenant (§6.3); who may select
+# candidates was already decided here, by InvoiceLineItemPolicy.
+#
+# Entry writes, for the write gateway (§3.1): each carries the caller's
+# claims (§6.1), the admitted ownership generation and one Idempotency-Key
+# (§5.1). A request the contract cannot carry raises Invalid and is never
+# sent. A transport failure or a 5xx is retried at most twice with jitter,
+# with the same key, so a retry after a lost response replays the stored
+# result (§9.4).
+#
+# A transport failure or any 5xx that remains raises Unavailable, which the
+# caller answers as a retryable 503. A problem Timekeeping answered raises
+# Problem, and anything else it answers outside the contract raises as in
+# every client.
 class Timekeeping::EntryClient < Timekeeping::InternalApi
   CONTRACT = :entry_api
   WRITER = "invoice"
+  ATTEMPTS = 3 # total, so at most 2 retries (§9.4)
+  JITTER = 0.05..0.2 # seconds before a retry
 
   # What candidate selection reads of one entry.
   Candidate = Data.define(:id, :company_id, :project_id, :user_id, :note, :work_date, :duration)
@@ -21,6 +33,32 @@ class Timekeeping::EntryClient < Timekeeping::InternalApi
   # Timekeeping could not answer now: down, timed out, or a 5xx. Nothing was
   # read, and the same request may succeed later.
   class Unavailable < Timekeeping::InternalApi::Error; end
+
+  # The request breaks the entry API contract, so it was not sent.
+  class Invalid < Timekeeping::InternalApi::Error
+    attr_reader :errors
+
+    def initialize(operation, errors)
+      @errors = errors
+      super("Timekeeping #{operation}: #{errors.join('; ')}")
+    end
+  end
+
+  # One entry write: who is calling (the claims of §6.1), under which
+  # generation, and the key its retries share.
+  Write = Data.define(:claims, :generation, :idempotency_key)
+
+  def initialize(backoff: ->(seconds) { sleep(seconds) }, **)
+    super(**)
+    @backoff = backoff
+  end
+
+  # Each answers the owner's full entry (§5.2), as the contract states it.
+  def create_entry(entry, write:) = mutate(:create_entry, { "entry" => entry }, write:).fetch("entry")
+
+  def update_entry(id, entry, write:) = mutate(:update_entry, { "entry" => entry }, write:, id:).fetch("entry")
+
+  def discard_entry(id, write:) = mutate(:discard_entry, {}, write:, id:).fetch("entry")
 
   # `project_ids` and `user_ids` restrict the candidates to those ids; nil
   # `user_ids` is no restriction. An empty list selects nothing, as an empty
@@ -38,6 +76,42 @@ class Timekeeping::EntryClient < Timekeeping::InternalApi
   end
 
   private
+
+    def mutate(name, body, write:, id: nil)
+      operation = contract_operation(name)
+      errors = Timekeeping::Contracts.errors(CONTRACT, operation.fetch("request"), body)
+      raise Invalid.new(name, errors) if errors.any?
+
+      path = operation.fetch("path").sub("{id}", id.to_s)
+      headers = token_headers(write.claims).merge(
+        "Idempotency-Key" => write.idempotency_key,
+        "X-Ownership-Generation" => write.generation.to_s,
+        "Content-Type" => "application/json"
+      )
+      answer(operation, retrying(name) { http.run_request(operation.fetch("method").downcase.to_sym, path, JSON.generate(body), headers) })
+    end
+
+    # The response of the first attempt Timekeeping answered below 500, or
+    # Unavailable once every attempt failed.
+    def retrying(name, &request)
+      outcome = nil
+      ATTEMPTS.times do |attempt|
+        @backoff.call(rand(JITTER)) if attempt.positive?
+        outcome = attempt_once(&request)
+        return outcome if outcome.is_a?(Faraday::Response) && outcome.status < 500
+      end
+      raise Unavailable, "Timekeeping #{name}: #{failure(outcome)}"
+    end
+
+    def attempt_once
+      yield
+    rescue Faraday::Error => error
+      error
+    end
+
+    def failure(outcome)
+      outcome.is_a?(Faraday::Response) ? "HTTP #{outcome.status}" : outcome.message
+    end
 
     def read(name, query, company:)
       operation = contract_operation(name)

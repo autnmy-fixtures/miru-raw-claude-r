@@ -15,17 +15,31 @@
 # generation that was raised after it was read. Billing writes pass the same
 # fence through Timekeeping::BillingWriteFence.
 #
-# Only the legacy owner exists so far (§10.2 step 2): it runs today's model
-# code unchanged. The timekeeping and monolith owners arrive with their lanes.
-# Until then a command under either is refused, never written locally,
+# The legacy owner (§10.2 step 2) runs today's model code unchanged. The
+# timekeeping owner (Remote) forwards the single-entry commands to
+# Timekeeping's entry API; the commands it does not forward yet, and every
+# command under the monolith owner, are refused, never written locally,
 # because a local write there would be a second writer.
 module Timekeeping::Gateway
   class OwnerUnavailable < StandardError; end
 
+  # The owner refused the command. `status` and `message` are today's public
+  # error JSON for it (§5.1): the controller renders { errors: message }.
+  class Refused < StandardError
+    attr_reader :status
+
+    def initialize(status:, message:)
+      @status = status
+      super(message)
+    end
+  end
+
   # Entry commands (W1 web and mobile, W3 CLI and so W3a MCP, W4 agent).
-  CreateEntry = Data.define(:project, :user, :attributes)
-  UpdateEntry = Data.define(:entry, :project, :attributes)
-  DiscardEntry = Data.define(:entry)
+  # `writer` names the writer for the caller's claims (§6.1): "web",
+  # "mobile", "cli", "mcp" or "agent". Each answers the entry as written.
+  CreateEntry = Data.define(:project, :user, :attributes, :writer)
+  UpdateEntry = Data.define(:entry, :project, :attributes, :writer)
+  DiscardEntry = Data.define(:entry, :writer)
 
   # W2 bulk move and bulk delete. `entries` is the caller's relation, so the
   # response renders exactly the records the command touched (A9).
@@ -43,28 +57,30 @@ module Timekeeping::Gateway
   SetLocked = Data.define(:entries, :locked)
   MarkBilled = Data.define(:entries)
 
-  OWNERS = { "legacy" => Timekeeping::Gateway::Legacy }.freeze
+  OWNERS = { "legacy" => Timekeeping::Gateway::Legacy, "timekeeping" => Timekeeping::Gateway::Remote }.freeze
 
   COMMAND_KEY = :timekeeping_gateway_command
   private_constant :COMMAND_KEY
 
   def self.call(command)
     Timekeeping::Ownership.transaction do
-      handler = handler_for(Timekeeping::Ownership.admit!, command)
-      within(command) { handler.call(command) }
+      ownership = Timekeeping::Ownership.admit!
+      owner = owner_for(ownership, command)
+      within(command) { owner.call(command, ownership) }
     end
   end
 
-  # The handler for a command under the admitted ownership record, or the
-  # refusal of an owner not built yet. Admission closed was refused first,
-  # by Ownership.admit!.
-  def self.handler_for(ownership, command)
-    OWNERS.fetch(ownership.owner) do
-      raise OwnerUnavailable,
-        "Timekeeping gateway: owner #{ownership.owner} is not available yet, #{command.class.name.demodulize} refused"
-    end
+  # The owner that runs a command under the admitted ownership record, or the
+  # refusal of an owner, or of a command, not built yet. Admission closed was
+  # refused first, by Ownership.admit!.
+  def self.owner_for(ownership, command)
+    owner = OWNERS[ownership.owner]
+    return owner if owner&.handles?(command)
+
+    raise OwnerUnavailable,
+      "Timekeeping gateway: owner #{ownership.owner} is not available yet, #{command.class.name.demodulize} refused"
   end
-  private_class_method :handler_for
+  private_class_method :owner_for
 
   # The command this execution context is running, or nil. The single-writer
   # guard (§12.2) reads it to tell a gateway write from any other.

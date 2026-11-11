@@ -7,8 +7,9 @@ require "rails_helper"
 # it; this spec pins the gateway's own rules: one handler per command, the
 # owner taken from the ownership record read under the generation fence
 # (§10.1), no write while admission is closed, and no local write under an
-# owner that is not built yet. gateway_admission_spec.rb proves the fence's
-# locking across connections.
+# owner, or for a command, not built yet. gateway_admission_spec.rb proves the
+# fence's locking across connections, and gateway_remote_spec.rb the
+# timekeeping owner's forwarding.
 RSpec.describe Timekeeping::Gateway, type: :model do
   include TimekeepingCharacterization::Helpers
   include TimekeepingSingleWriterGuard
@@ -17,7 +18,12 @@ RSpec.describe Timekeeping::Gateway, type: :model do
   let!(:entry) { unbilled_entry(tenant) }
 
   def discard_command
-    described_class::DiscardEntry.new(entry:)
+    described_class::DiscardEntry.new(entry:, writer: "web")
+  end
+
+  # A command the timekeeping owner does not forward yet.
+  def bulk_discard_command
+    described_class::BulkDiscard.new(entries: TimesheetEntry.where(id: entry.id))
   end
 
   it "has exactly one legacy handler for every command it defines" do
@@ -25,6 +31,11 @@ RSpec.describe Timekeeping::Gateway, type: :model do
       .select { |constant| constant.is_a?(Class) && constant < Data }
 
     expect(described_class::Legacy::HANDLERS.keys).to match_array(commands)
+  end
+
+  it "forwards only the single-entry commands under the timekeeping owner" do
+    expect(described_class::Remote::REQUESTS.keys)
+      .to contain_exactly(described_class::CreateEntry, described_class::UpdateEntry, described_class::DiscardEntry)
   end
 
   context "with no ownership record (the initial legacy state)" do
@@ -55,12 +66,13 @@ RSpec.describe Timekeeping::Gateway, type: :model do
   end
 
   # The fence (§10.1): admission closed refuses every command, whoever the
-  # owner is; with admission open, only the legacy owner runs here so far.
+  # owner is; with admission open, the legacy owner runs every command and
+  # the timekeeping owner refuses the commands it does not forward yet.
   TimekeepingOwnershipStates::AFTER_HANDOFF_BEGUN.each do |state, attributes|
     refusal, pattern = if attributes[:state] != "open"
       [Timekeeping::Ownership::Moving, /being moved between services/]
     elsif attributes[:owner] != "legacy"
-      [described_class::OwnerUnavailable, /owner #{attributes[:owner]} .* DiscardEntry refused/]
+      [described_class::OwnerUnavailable, /owner #{attributes[:owner]} .* BulkDiscard refused/]
     end
 
     if refusal
@@ -68,7 +80,7 @@ RSpec.describe Timekeeping::Gateway, type: :model do
         set_timekeeping_ownership!(attributes)
 
         writes = timesheet_entry_writes do
-          expect { described_class.call(discard_command) }.to raise_error(refusal, pattern)
+          expect { described_class.call(bulk_discard_command) }.to raise_error(refusal, pattern)
         end
 
         expect(writes).to eq([])

@@ -25,12 +25,38 @@ module Timekeeping::UserToken
 
   # The system actor of §6.1, today's `Current.user == nil`: no user, no
   # role, and the company's own edit window.
-  def self.system_claims(company:, writer:, request_id:)
+  def self.system_claims(company:, writer:, request_id:, project: nil)
     {
       "sub" => "system", "company_id" => company.id, "role" => nil,
       "timesheet_edit_days" => company.timesheet_edit_days,
       "actor" => { "type" => "system", "agent_id" => nil },
-      "writer" => writer, "project" => nil, "request_id" => request_id
+      "writer" => writer, "project" => project_claim(project), "request_id" => request_id
     }
   end
+
+  # The caller of one entry command (§6.1): the facts `authorize` and the
+  # model's role checks read today (§2.2), resolved before the write. `user`
+  # is today's Current.user, so nil is the system actor, exactly where the
+  # model's checks skip today. A user signed in through an agent key acts as
+  # that agent (W4), whose id Timekeeping sets on the entry.
+  def self.caller_claims(user:, company:, writer:, request_id:, project: nil, agent: nil)
+    return system_claims(company:, writer:, request_id:, project:) if user.nil?
+
+    {
+      "sub" => "user:#{user.id}", "company_id" => company.id, "role" => user.primary_role(company),
+      "timesheet_edit_days" => company.timesheet_edit_days,
+      "actor" => { "type" => agent ? "agent" : "user", "agent_id" => agent&.id },
+      "writer" => writer, "project" => project_claim(project), "request_id" => request_id
+    }
+  end
+
+  # The reference facts of the command's project (§6.1), from the catalogue
+  # this application keeps.
+  def self.project_claim(project)
+    project && {
+      "id" => project.id, "company_id" => project.client.company_id,
+      "kept" => project.kept?, "billable" => project.billable
+    }
+  end
+  private_class_method :project_claim
 end

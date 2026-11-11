@@ -20,6 +20,43 @@ RSpec.describe Timekeeping::UserToken do
     end
   end
 
+  describe ".caller_claims (§6.1)" do
+    let(:client) { create(:client, company:) }
+    let(:project) { create(:project, client:, billable: false) }
+    let(:user) do
+      create(:user, current_workspace_id: company.id).tap do |user|
+        create(:employment, company:, user:)
+        user.add_role(:admin, company)
+      end
+    end
+
+    it "carries the user's role in the company, its edit window and the project's reference facts" do
+      claims = described_class.caller_claims(user:, company:, writer: "web", project:, request_id: "req-2")
+
+      expect(claims).to eq(
+        "sub" => "user:#{user.id}", "company_id" => company.id, "role" => "admin", "timesheet_edit_days" => 9,
+        "actor" => { "type" => "user", "agent_id" => nil }, "writer" => "web", "request_id" => "req-2",
+        "project" => { "id" => project.id, "company_id" => company.id, "kept" => true, "billable" => false }
+      )
+      expect { described_class.sign(claims, key: "key") }.not_to raise_error
+    end
+
+    it "acts as the agent a user is signed in through" do
+      agent = create(:agent, company:, user:)
+
+      claims = described_class.caller_claims(user:, company:, writer: "agent", project:, agent:, request_id: "req-3")
+
+      expect(claims).to include("sub" => "user:#{user.id}", "actor" => { "type" => "agent", "agent_id" => agent.id })
+    end
+
+    it "is the system actor without a user, as Current.user == nil is today" do
+      claims = described_class.caller_claims(user: nil, company:, writer: "web", project:, request_id: "req-4")
+
+      expect(claims).to include("sub" => "system", "role" => nil, "actor" => { "type" => "system", "agent_id" => nil })
+      expect(claims["project"]).to include("id" => project.id)
+    end
+  end
+
   it "never signs claims that break the contract" do
     expect { described_class.sign(claims.merge("writer" => "console"), key: "key") }
       .to raise_error(described_class::InvalidClaims, /writer/)

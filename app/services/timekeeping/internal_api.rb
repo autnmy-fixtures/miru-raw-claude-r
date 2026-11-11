@@ -16,12 +16,13 @@ class Timekeeping::InternalApi
 
   # Timekeeping answered application/problem+json (§5.1).
   class Problem < Error
-    attr_reader :status, :type, :retryable, :refused
+    attr_reader :status, :type, :retryable, :detail, :refused, :errors
 
     # `refused` lists, for reservation-refused only, every entry prepare
-    # refused and why (F1, L8), as the shared rule's Refusal.
-    def initialize(status:, type:, retryable:, detail: nil, refused: [])
-      @status, @type, @retryable, @refused = status, type, retryable, refused
+    # refused and why (F1, L8), as the shared rule's Refusal. `errors` is,
+    # for validation-failed only, the model's errors by attribute.
+    def initialize(status:, type:, retryable:, detail: nil, refused: [], errors: {})
+      @status, @type, @retryable, @detail, @refused, @errors = status, type, retryable, detail, refused, errors
       super(["#{status} #{type}", detail].compact.join(": "))
     end
   end
@@ -47,11 +48,14 @@ class Timekeeping::InternalApi
     # The headers every call carries (§5.1): a system-actor token for the
     # company (§6.1) and the request id it names.
     def identity_headers(company:, writer:)
-      request_id = SecureRandom.uuid
-      claims = Timekeeping::UserToken.system_claims(company:, writer:, request_id:)
+      token_headers(Timekeeping::UserToken.system_claims(company:, writer:, request_id: SecureRandom.uuid))
+    end
+
+    # The token for the claims, and the request id they name.
+    def token_headers(claims)
       {
         "Authorization" => "Bearer #{Timekeeping::UserToken.sign(claims, key: @token_key, now: @clock.call)}",
-        "X-Request-Id" => request_id
+        "X-Request-Id" => claims.fetch("request_id")
       }
     end
 
@@ -80,7 +84,7 @@ class Timekeeping::InternalApi
     def problem(body)
       Problem.new(
         status: body.fetch("status"), type: body.fetch("type").delete_prefix(Timekeeping::Contracts::PROBLEM_BASE),
-        retryable: body.fetch("retryable"), detail: body["detail"],
+        retryable: body.fetch("retryable"), detail: body["detail"], errors: body.fetch("errors", {}),
         refused: body.fetch("refused", []).map { |refusal| TimekeepingReservations::Refusal.new(entry_id: refusal.fetch("entry_id"), reason: refusal.fetch("reason").to_sym) }
       )
     end

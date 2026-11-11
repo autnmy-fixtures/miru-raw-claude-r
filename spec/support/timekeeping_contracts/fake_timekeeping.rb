@@ -78,8 +78,10 @@ module TimekeepingContracts
     def holding(entry_id) = @holdings[entry_id]
 
     # The next call of operation answers this problem instead of running.
-    def fail_next(operation, status:, slug:, retryable:)
-      @scripted << [operation, :fail, problem(status, slug, retryable:)]
+    # `extensions` adds the problem's own members, such as validation-failed's
+    # errors.
+    def fail_next(operation, status:, slug:, retryable:, **extensions)
+      @scripted << [operation, :fail, problem(status, slug, retryable:, **extensions)]
     end
 
     # The next call of operation runs, then its response is lost on the way
