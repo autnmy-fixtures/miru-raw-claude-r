@@ -26,9 +26,13 @@ options = {
   failures_log: ENV.fetch("PARALLEL_FAILURES_LOG", "tmp/failing_specs.txt")
 }
 
+# The app's specs, and those of each shared package (packages/*/spec), which
+# test plain Ruby libraries in their own package.
+DEFAULT_SPEC_DIRS = ["spec", *Dir["packages/*/spec"].sort].freeze
+
 def spec_files_for(paths, exclude_system:)
   spec_files = if paths.empty?
-    Dir["spec/**/*_spec.rb"]
+    DEFAULT_SPEC_DIRS.flat_map { |dir| Dir["#{dir}/**/*_spec.rb"] }
   else
     paths.flat_map do |path|
       File.directory?(path) ? Dir["#{path}/**/*_spec.rb"] : path
@@ -114,12 +118,8 @@ end
 
 # Add spec files or directories
 if ARGV.empty?
-  if options[:exclude_system]
-    command << "spec"
-    command.concat(["--exclude-pattern", "spec/(system|system_skip)/"])
-  else
-    command << "spec"
-  end
+  command.concat(DEFAULT_SPEC_DIRS)
+  command.concat(["--exclude-pattern", "spec/(system|system_skip)/"]) if options[:exclude_system]
 else
   command.concat(ARGV)
 end
