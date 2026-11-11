@@ -43,6 +43,19 @@ RSpec.describe "Timekeeping invoice writes through the reservation boundary", ty
     end
   end
 
+  # An entry Timekeeping owns that the relay has not projected yet: no
+  # timesheet_entries row holds it (§3.3, §12.4 "relay paused").
+  UnprojectedEntry = Data.define(:id, :work_date)
+
+  def unprojected_entry(tenant)
+    id = TimesheetEntry.maximum(:id).to_i + 1_000 + (@unprojected = @unprojected.to_i + 1)
+    fake.seed_entry(
+      company_id: tenant.company.id, id:, project_id: tenant.project.id, user_id: tenant.employee.id,
+      duration: 90.7, work_date: Date.current.iso8601
+    )
+    UnprojectedEntry.new(id:, work_date: Date.current)
+  end
+
   def cut_over!
     set_timekeeping_ownership!(TimekeepingOwnershipStates::AFTER_HANDOFF_BEGUN.fetch("cut over to Timekeeping"))
   end
@@ -127,6 +140,63 @@ RSpec.describe "Timekeeping invoice writes through the reservation boundary", ty
       expect(response).to have_http_status(:no_content)
       expect(intents.map { |intent| [intent.kind, intent.state] }).to eq([%w[save succeeded], %w[save succeeded], %w[discard succeeded], %w[destroy succeeded]])
       expect(writes).to eq([])
+    end
+
+    describe "an entry the projection does not hold yet (§3.3 rule 1, L8)" do
+      let(:fresh) { unprojected_entry(tenant_a) }
+      let(:fresher) { unprojected_entry(tenant_a) }
+
+      def lines_of(invoice)
+        invoice.invoice_line_items.order(:id).map { |line| [line.timesheet_entry_id, line.linked_timesheet_entry_ids.sort] }
+      end
+
+      it "is invoiced at once, directly and through a grouped line, on the owner's prepare answer" do
+        expect(TimesheetEntry.where(id: [fresh.id, fresher.id])).to be_empty
+
+        create_invoice(lines: [direct(fresh), grouped(fresh, fresher, entry_x)])
+
+        expect(response).to have_http_status(:ok)
+        invoice = Invoice.find(json_response["id"])
+        aggregate_failures do
+          expect(lines_of(invoice)).to eq([[fresh.id, []], [nil, [entry_x.id, fresh.id, fresher.id].sort]])
+          expect(json_response["invoiceLineItems"].map { |line| line["linkedTimesheetEntryIds"].sort })
+            .to eq([[], [entry_x.id, fresh.id, fresher.id].sort])
+          expect(intents.sole).to have_attributes(state: "succeeded", entry_ids: [entry_x.id, fresh.id, fresher.id].sort)
+          expect(TimesheetEntry.where(id: [fresh.id, fresher.id])).to be_empty
+        end
+
+        worker.run
+        expect([fresh, fresher, entry_x].map { |entry| fake.holding(entry.id).state }).to eq([:committed, :committed, :committed])
+      end
+
+      it "is linked to and unlinked from a saved grouped line, keeping the links the line already held" do
+        create_invoice(lines: [grouped(entry_x, fresh)])
+        invoice = Invoice.find(json_response["id"])
+        worker.run
+        line = invoice.invoice_line_items.sole
+        kept_link = line.invoice_line_item_time_entries.find_by!(timesheet_entry_id: fresh.id)
+
+        update_invoice(invoice, invoice_line_items_attributes: [{ id: line.id, linked_timesheet_entry_ids: [fresh.id, fresher.id] }])
+
+        expect(response).to have_http_status(:ok)
+        expect(lines_of(invoice)).to eq([[nil, [fresh.id, fresher.id].sort]])
+        expect(line.invoice_line_item_time_entries.find_by!(timesheet_entry_id: fresh.id).id).to eq(kept_link.id)
+        expect(intents.last).to have_attributes(state: "succeeded", entry_ids: [fresh.id, fresher.id].sort)
+
+        worker.run
+        expect(fake.holding(entry_x.id)).to be_nil
+        expect([fresh, fresher].map { |entry| fake.holding(entry.id).state }).to eq([:committed, :committed])
+      end
+
+      it "is refused when Timekeeping does not hold it either, and nothing is written" do
+        missing = UnprojectedEntry.new(id: TimesheetEntry.maximum(:id).to_i + 5_000, work_date: Date.current)
+
+        expect { create_invoice(lines: [grouped(entry_x, missing)]) }.not_to change { [Invoice.count, InvoiceLineItemTimeEntry.count] }
+
+        expect(response).to have_http_status(:unprocessable_entity)
+        expect(json_response["errors"]).to eq(I18n.t("invoices.reservation.refused.not_found", entry_id: missing.id))
+        expect(intents.sole.state).to eq("failed")
+      end
     end
 
     it "prepares a save of a non-draft as non-draft" do
