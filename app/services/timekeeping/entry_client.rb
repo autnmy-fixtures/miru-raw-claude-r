@@ -10,10 +10,10 @@
 # company (§6.1), which scopes it to that tenant (§6.3); who may select
 # candidates was already decided here, by InvoiceLineItemPolicy.
 #
-# Entry writes, for the write gateway (§3.1): each carries the caller's
-# claims (§6.1), the admitted ownership generation and one Idempotency-Key
-# (§5.1). A request the contract cannot carry raises Invalid and is never
-# sent. A transport failure or a 5xx is retried at most twice with jitter,
+# Entry writes, single and bulk, for the write gateway (§3.1): each carries
+# the caller's claims (§6.1), the admitted ownership generation and one
+# Idempotency-Key (§5.1). A request the contract cannot carry raises Invalid
+# and is never sent. A transport failure or a 5xx is retried at most twice with jitter,
 # with the same key, so a retry after a lost response replays the stored
 # result (§9.4).
 #
@@ -59,6 +59,22 @@ class Timekeeping::EntryClient < Timekeeping::InternalApi
   def update_entry(id, entry, write:) = mutate(:update_entry, { "entry" => entry }, write:, id:).fetch("entry")
 
   def discard_entry(id, write:) = mutate(:discard_entry, {}, write:, id:).fetch("entry")
+
+  # W2 (§5.2). Each takes the ids the caller's policy scope selected. A bulk
+  # move answers every entry it moved or skipped (A9), as the owner holds it
+  # after the move; a bulk discard answers the ids it discarded. No ids
+  # selects nothing, which the contract cannot carry, so no call is made.
+  def bulk_move(ids, project_id, write:)
+    return [] if ids.empty?
+
+    mutate(:bulk_move, { "ids" => ids, "project_id" => project_id }, write:).fetch("entries")
+  end
+
+  def bulk_discard(ids, write:)
+    return [] if ids.empty?
+
+    mutate(:bulk_discard, { "ids" => ids }, write:).fetch("discarded_ids")
+  end
 
   # `project_ids` and `user_ids` restrict the candidates to those ids; nil
   # `user_ids` is no restriction. An empty list selects nothing, as an empty

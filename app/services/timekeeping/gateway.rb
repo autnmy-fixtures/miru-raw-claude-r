@@ -16,7 +16,7 @@
 # fence through Timekeeping::BillingWriteFence.
 #
 # The legacy owner (§10.2 step 2) runs today's model code unchanged. The
-# timekeeping owner (Remote) forwards the single-entry commands to
+# timekeeping owner (Remote) forwards the single-entry and bulk commands to
 # Timekeeping's entry API; the commands it does not forward yet, and every
 # command under the monolith owner, are refused, never written locally,
 # because a local write there would be a second writer.
@@ -34,6 +34,11 @@ module Timekeeping::Gateway
     end
   end
 
+  # The owner refused the command because an entry it names is locked
+  # against the caller (A3, A4, A9). A writer with its own locked answer
+  # today, such as W2 bulk, renders that answer for it.
+  class Locked < Refused; end
+
   # Entry commands (W1 web and mobile, W3 CLI and so W3a MCP, W4 agent).
   # `writer` names the writer for the caller's claims (§6.1): "web",
   # "mobile", "cli", "mcp" or "agent". Each answers the entry as written.
@@ -41,10 +46,13 @@ module Timekeeping::Gateway
   UpdateEntry = Data.define(:entry, :project, :attributes, :writer)
   DiscardEntry = Data.define(:entry, :writer)
 
-  # W2 bulk move and bulk delete. `entries` is the caller's relation, so the
-  # response renders exactly the records the command touched (A9).
+  # W2 bulk move and bulk delete. `entries` is the caller's relation, already
+  # scoped by policy; `company` is the tenant the command runs in (§6.3).
+  # BulkMove answers the entries it moved or skipped, for rendering (A9: a
+  # skipped entry is answered, never refused); BulkDiscard answers what it
+  # discarded.
   BulkMove = Data.define(:entries, :project)
-  BulkDiscard = Data.define(:entries)
+  BulkDiscard = Data.define(:entries, :company)
 
   # W5 Harvest import, one row. `billed` rows are created unbilled and then
   # marked billed, as today (§1.3).

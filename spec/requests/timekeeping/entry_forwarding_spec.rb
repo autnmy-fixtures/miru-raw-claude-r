@@ -3,8 +3,9 @@
 require "rails_helper"
 
 # Entry writes forwarded to Timekeeping (docs/architecture/timekeeping-soa.md
-# §3.1, §5.2, §6.1), through the real entry points of W1 web and mobile, W3
-# CLI, W3a MCP and W4 agent, against the consumer-side fake of Timekeeping.
+# §3.1, §5.2, §6.1), through the real entry points of W1 web and mobile, W2
+# bulk, W3 CLI, W3a MCP and W4 agent, against the consumer-side fake of
+# Timekeeping.
 # Under `timekeeping` each write reaches the owner with its writer's claims,
 # answers today's public JSON from the owner's entry, and writes nothing to
 # timesheet_entries, which is the projection with one writer (§3.2, §12.2).
@@ -205,6 +206,80 @@ RSpec.describe "Timekeeping entry forwarding", type: :request do
       expect(json_response["entry"]).to include("agent_id" => agent.id, "agent_name" => agent.name, "source" => "automation")
       expect(fake.entry(json_response.dig("entry", "id"))).to include("agent_id" => agent.id, "user_id" => employee.id)
       expect(fake.calls.sole.claims).to include("writer" => "agent", "actor" => { "type" => "agent", "agent_id" => agent.id })
+    end
+
+    describe "W2 bulk" do
+      let!(:first) { owned_entry(tenant_a, note: "First") }
+      let!(:second) { owned_entry(tenant_a, note: "Second") }
+      let(:other_project) do
+        create(:project, client: tenant_a.client, billable: true).tap do |project|
+          create(:project_member, project:, user: employee)
+        end
+      end
+
+      before { sign_in employee }
+
+      def bulk_move(*entries)
+        send_request :patch, api_v1_bulk_action_path,
+          params: { ids: entries.map(&:id), project_id: other_project.id }, headers: auth_headers(employee)
+      end
+
+      def bulk_discard(*entries)
+        send_request :delete, api_v1_bulk_action_path, params: { source: { ids: entries.map(&:id) } }, headers: auth_headers(employee)
+      end
+
+      it "moves through the owner and renders the owner's entries as today" do
+        without_projection_writes { bulk_move(first, second) }
+
+        expect(response).to have_http_status(:ok)
+        expect(json_response["notice"]).to eq(I18n.t("timesheet_entry.update.message"))
+        rendered = json_response["entries"].values.flatten
+        expect(rendered.map { |entry| [entry["id"], entry["project_id"], entry["project"]] })
+          .to contain_exactly([first.id, other_project.id, other_project.name], [second.id, other_project.id, other_project.name])
+        expect([first, second].map { |entry| fake.entry(entry.id)["project_id"] }).to all(eq(other_project.id))
+        expect([first, second].map { |entry| entry.reload.project_id }).to all(eq(tenant_a.project.id))
+        expect(fake.calls.sole.claims).to include(
+          "sub" => "user:#{employee.id}", "role" => "employee", "writer" => "bulk",
+          "project" => include("id" => other_project.id)
+        )
+      end
+
+      it "discards through the owner" do
+        without_projection_writes { bulk_discard(first) }
+
+        expect(response).to have_http_status(:ok)
+        expect(json_response["notice"]).to eq(I18n.t("timesheet_entry.destroy.message"))
+        expect(fake.entry(first.id)["discarded_at"]).to be_present
+        expect(fake.entry(second.id)["discarded_at"]).to be_nil
+        expect(first.reload).not_to be_discarded
+        expect(writers).to eq(%w[bulk])
+      end
+
+      it "answers the owner's lock refusal with today's locked JSON, for move and for discard (A9, §6.2)" do
+        days = tenant_a.company.timesheet_edit_days
+        fake.fail_next(:bulk_move, status: 403, slug: "entry-locked", retryable: false)
+        fake.fail_next(:bulk_discard, status: 403, slug: "entry-locked", retryable: false)
+
+        bulk_move(first)
+        expect(response).to have_http_status(:forbidden)
+        expect(json_response).to eq("error" => I18n.t("timesheet_entry.update.locked", days:))
+
+        bulk_discard(first)
+        expect(response).to have_http_status(:forbidden)
+        expect(json_response).to eq("error" => I18n.t("timesheet_entry.destroy.locked", days:))
+
+        expect(fake.entry(first.id)).to include("project_id" => tenant_a.project.id, "discarded_at" => nil)
+      end
+
+      it "never reaches tenant B's entries (§6.3)" do
+        foreign = owned_entry(tenant_b)
+
+        bulk_discard(foreign)
+
+        expect(response).to have_http_status(:unprocessable_entity)
+        expect(fake.calls).to be_empty
+        expect(fake.entry(foreign.id)["discarded_at"]).to be_nil
+      end
     end
   end
 

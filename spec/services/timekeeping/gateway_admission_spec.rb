@@ -16,7 +16,7 @@ RSpec.describe "Timekeeping gateway admission across connections", type: :model 
 
   gateway = Timekeeping::Gateway
 
-  let(:command) { gateway::BulkDiscard.new(entries: TimesheetEntry.none) }
+  let(:command) { gateway::BulkDiscard.new(entries: TimesheetEntry.none, company: nil) }
   let(:raise_generation) { { generation: 1, state: "closed" } }
 
   before { run_on_own_connection { Timekeeping::Ownership.create!(TimekeepingOwnershipStates::BEFORE_FIRST_HANDOFF) } }
@@ -34,7 +34,7 @@ RSpec.describe "Timekeeping gateway admission across connections", type: :model 
       finish.pop(timeout: 5)
       []
     end
-    writer = on_own_connection { gateway.call(gateway::BulkDiscard.new(entries: pausing_entries)) }
+    writer = on_own_connection { gateway.call(gateway::BulkDiscard.new(entries: pausing_entries, company: nil)) }
 
     begin
       take(admitted)
