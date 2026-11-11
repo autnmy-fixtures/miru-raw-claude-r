@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_11_11_140000) do
+ActiveRecord::Schema[8.1].define(version: 2026_11_11_150000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
   enable_extension "pg_stat_statements"
@@ -564,6 +564,26 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_11_140000) do
     t.index ["invoice_id"], name: "index_invoice_line_items_on_invoice_id"
     t.index ["timesheet_entry_id", "date"], name: "index_invoice_line_items_on_timesheet_entry_date"
     t.index ["timesheet_entry_id"], name: "index_invoice_line_items_on_timesheet_entry_id"
+  end
+
+  create_table "invoice_operations", force: :cascade do |t|
+    t.bigint "company_id", null: false
+    t.datetime "created_at", null: false
+    t.datetime "delivered_at"
+    t.bigint "entry_ids", default: [], null: false, array: true
+    t.bigint "generation", null: false
+    t.bigint "invoice_id", null: false
+    t.string "kind", null: false
+    t.uuid "operation_id", null: false
+    t.string "state", default: "pending", null: false
+    t.datetime "updated_at", null: false
+    t.index ["created_at"], name: "index_invoice_operations_undelivered", where: "(((state)::text <> 'pending'::text) AND (delivered_at IS NULL))"
+    t.index ["invoice_id"], name: "index_invoice_operations_one_pending_per_invoice", unique: true, where: "((state)::text = 'pending'::text)"
+    t.index ["operation_id"], name: "index_invoice_operations_on_operation_id", unique: true
+    t.check_constraint "generation >= 0", name: "invoice_operations_generation_non_negative"
+    t.check_constraint "kind::text = ANY (ARRAY['save'::character varying, 'discard'::character varying, 'destroy'::character varying]::text[])", name: "invoice_operations_kind"
+    t.check_constraint "state::text <> 'pending'::text OR delivered_at IS NULL", name: "invoice_operations_pending_undelivered"
+    t.check_constraint "state::text = ANY (ARRAY['pending'::character varying, 'succeeded'::character varying, 'failed'::character varying]::text[])", name: "invoice_operations_state"
   end
 
   create_table "invoice_taxes", force: :cascade do |t|
