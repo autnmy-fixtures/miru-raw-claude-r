@@ -4,9 +4,9 @@
 # §3.2): the existing application's timesheet_entries row, with the tenant it
 # belongs to (§6.3) and its version (§3.2).
 #
-# A writer's rules (§2.1, §6.2) run only in the writer's validation context,
-# CREATE: a row a checkpoint loads (§10.5 step 4) or a spec writes directly is
-# copied, never normalized or re-validated (§8 item 1).
+# A writer's rules (§2.1, §6.2) run only in a writer's validation context,
+# CREATE or UPDATE: a row a checkpoint loads (§10.5 step 4) or a spec writes
+# directly is copied, never normalized or re-validated (§8 item 1).
 class Entry < ApplicationRecord
   # The entry's fields as common.json#/$defs/entry_fields names them, in
   # order, apart from the derived `locked`.
@@ -26,8 +26,17 @@ class Entry < ApplicationRecord
     "updated_at" => ->(time) { time.utc.iso8601(6) }
   }.freeze
 
-  # The validation context of a writer's create (EntryCreate).
+  # The validation contexts of a writer's create (EntryCreate) and update
+  # (EntryUpdate), and the rules both run.
   CREATE = :writer_create
+  UPDATE = :writer_update
+  WRITES = [CREATE, UPDATE].freeze
+
+  # TimesheetEntry's own wording for a locked entry an employee edits
+  # (app/models/timesheet_entry.rb, prevent_edit_if_locked). It is a literal
+  # there, not a locale key; spec/models/entry_update_rules_spec.rb checks it
+  # still matches.
+  LOCKED_EDIT = "Cannot edit a locked timesheet entry. Please contact admin."
 
   # The entry's columns `audited` records on TimesheetEntry today, so an
   # entry audit row records the same changes (§3.4).
@@ -56,17 +65,26 @@ class Entry < ApplicationRecord
   # through `project` today. Timekeeping holds no catalogue (§3.2).
   attr_accessor :project_facts
 
+  # The caller's primary role in the company, from the token (§6.1): what
+  # TimesheetEntry reads as Current.user's role inside the write today (§2.2).
+  attr_accessor :caller_role
+
   # In TimesheetEntry's order, so the errors come in its order and the
   # gateway's first full message is today's message (§5.1).
-  before_validation :ensure_bill_status_is_set, :ensure_review_status_is_set, on: CREATE
+  #
+  # TimesheetEntry's update check that an employee cannot change bill_status
+  # away from billed is not here: A3 refuses every update of a billed entry
+  # before the rules run (EntryPolicy), so it can never fire.
+  before_validation :ensure_bill_status_is_set, :ensure_review_status_is_set, on: WRITES
   before_validation :ensure_bill_status_is_not_billed, on: CREATE
-  before_validation :normalize_source_fields, :normalize_proof_metadata, on: CREATE
+  before_validation :normalize_source_fields, :normalize_proof_metadata, on: WRITES
 
-  validates :duration, :work_date, :bill_status, :review_status, presence: true, on: CREATE
-  validates :duration, numericality: { less_than_or_equal_to: MAX_DURATION, greater_than_or_equal_to: 0.0 }, on: CREATE
-  validates :source, inclusion: { in: SOURCES }, on: CREATE
-  validates :proof_url, length: { maximum: MAX_PROOF_URL_LENGTH }, allow_blank: true, on: CREATE
-  validate :validate_billable_project, on: CREATE
+  validates :duration, :work_date, :bill_status, :review_status, presence: true, on: WRITES
+  validates :duration, numericality: { less_than_or_equal_to: MAX_DURATION, greater_than_or_equal_to: 0.0 }, on: WRITES
+  validates :source, inclusion: { in: SOURCES }, on: WRITES
+  validates :proof_url, length: { maximum: MAX_PROOF_URL_LENGTH }, allow_blank: true, on: WRITES
+  validate :validate_billable_project, on: WRITES
+  validate :prevent_edit_if_locked, on: UPDATE
 
   scope :of_company, ->(company_id) { where(company_id:) }
   scope :kept, -> { where(discarded_at: nil) }
@@ -76,8 +94,17 @@ class Entry < ApplicationRecord
   # its own.
   def to_contract
     { "id" => id, "company_id" => company_id, "version" => version }
-      .merge(FIELDS.index_with { |field| FORMATS.fetch(field, :itself.to_proc).call(public_send(field)) })
+      .merge(FIELDS.index_with { |field| self.class.contract_value(field, public_send(field)) })
       .merge("locked" => locked?)
+  end
+
+  # One field's value as the contracts carry it (FORMATS).
+  def self.contract_value(field, value) = FORMATS.fetch(field, :itself.to_proc).call(value)
+
+  # What `audited` records for the update just saved: each audited column it
+  # changed, as [before, after] in contract form (§3.4).
+  def audited_update_changes
+    saved_changes.slice(*AUDITED).to_h { |field, values| [field, values.map { |value| self.class.contract_value(field, value) }] }
   end
 
   # True exactly when the entry holds a reservation with edit_lock (§7.1),
@@ -112,6 +139,12 @@ class Entry < ApplicationRecord
       return unless !project_facts&.fetch("billable") && bill_status == "unbilled"
 
       errors.add(:base, I18n.t("errors.validate_billable_project"))
+    end
+
+    # The edit lock stops employees only (L1), as the reservation it comes
+    # from decides it (§7.1).
+    def prevent_edit_if_locked
+      errors.add(:base, LOCKED_EDIT) if caller_role == "employee" && locked?
     end
 
     # A10's source rewrite among them: mcp when the metadata names an MCP server.
