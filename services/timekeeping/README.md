@@ -7,8 +7,8 @@ their billing reservations, and serve them only on its internal API (§5).
 It boots, connects to its own database, reads the shared library in
 `packages/timekeeping_reservations`, answers every error as a contract problem, and holds its copy
 of the ownership record (§10.1). It holds entries and their reservations and serves the entry API's
-two reads, list and show (§5.2). Its writes, candidate selection, the reservation API and the relay
-land lane by lane (§14).
+reads: list, show and invoice candidate selection (§5.2). Its writes, the reservation API and the
+relay land lane by lane (§14).
 
 ## What is here
 
@@ -27,6 +27,7 @@ land lane by lane (§14).
 | `app/models/contracts.rb` | Checks a payload against the shared contracts. Endpoints use it for what they accept; the specs use it for what they answer. |
 | `app/controllers/internal/base_controller.rb` | Every internal endpoint: a valid token or `401 unauthenticated`, the contract's required headers or `400 invalid-request`, input checked against the contract, and any `Problem::Raised` answered as its problem. |
 | `GET /internal/v1/entries`, `GET /internal/v1/entries/{id}` | The entry API's reads (§5.2, §3.3 rule 1): the kept entries of the token's company only (§6.3). The list takes the contract's filters and pages by id (`app/services/entry_list.rb`, 500 per page, the cursor is the last id answered). Another company's entry, a discarded one or a missing one is `404 not-found`. A read needs no admission (§10.1). |
+| `GET /internal/v1/candidates` | Invoice candidate selection (§5.2, §3.3 rule 1), `app/services/candidate_list.rb`: the kept, unbilled entries of the token's company in the query's `project_ids`, narrowed by `user_ids`, `exclude_ids`, `from`/`to` and `search_term`, leaving out every entry the shared rule finds not selectable (an active or provisional reservation; a retained one does not count, L3, L4). `search_term` is the existing application's `TimesheetEntry.pg_search`, written out as the SQL pg_search builds: english tsearch over `note`, each word a prefix, every word required, ordered by rank and then id. `client_id` narrows nothing: the gateway resolves the client's kept projects into `project_ids`. |
 | `GET /up` | Liveness, 200 once booted. |
 
 ## Configuration (§11.2)

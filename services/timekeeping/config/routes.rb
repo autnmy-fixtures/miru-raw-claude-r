@@ -9,6 +9,7 @@ Rails.application.routes.draw do
   namespace :internal do
     namespace :v1 do
       resources :entries, only: %i[index show], constraints: { id: /[1-9][0-9]*/ }
+      resources :candidates, only: :index
     end
   end
 end
