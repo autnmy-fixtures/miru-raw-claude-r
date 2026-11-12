@@ -17,7 +17,9 @@ require "rails_helper"
 RSpec.describe "Timekeeping billing-write admission across connections", type: :model do
   include TimekeepingConnections
 
-  let(:raise_generation) { { generation: 1, state: "closed" } }
+  def close_admission!(lock_timeout: Timekeeping::HandoffFence::DRAIN_TIMEOUT)
+    Timekeeping::HandoffFence.call(:close, generation: 0, lock_timeout:)
+  end
 
   # A sent invoice and its payment, saved in a transaction that is rolled
   # back once `pause` returns.
@@ -47,10 +49,7 @@ RSpec.describe "Timekeeping billing-write admission across connections", type: :
     begin
       take(admitted)
       handoff_while_admitted = on_own_connection do |connection|
-        connection.transaction do
-          connection.execute("SET LOCAL lock_timeout = '300ms'")
-          Timekeeping::Ownership.lock.find(Timekeeping::Ownership::SINGLETON_ID).update!(raise_generation)
-        end
+        close_admission!(lock_timeout: 0.3.seconds)
       end
       expect { handoff_while_admitted.value }.to raise_error(ActiveRecord::LockWaitTimeout)
     ensure
@@ -58,7 +57,7 @@ RSpec.describe "Timekeeping billing-write admission across connections", type: :
       writer.join
     end
 
-    run_on_own_connection { Timekeeping::Ownership.find(Timekeeping::Ownership::SINGLETON_ID).update!(raise_generation) }
+    run_on_own_connection { close_admission! }
     expect(run_on_own_connection { Timekeeping::Ownership.current.summary }).to eq("generation 1, owner legacy, state closed")
   end
 
@@ -67,7 +66,7 @@ RSpec.describe "Timekeeping billing-write admission across connections", type: :
     writer_pid = Queue.new
     handoff = on_own_connection do |connection|
       connection.transaction do
-        Timekeeping::Ownership.lock.find(Timekeeping::Ownership::SINGLETON_ID).update!(raise_generation)
+        close_admission!
         handoff_locked << true
         wait_until_waiting_on_lock(connection, take(writer_pid))
       end

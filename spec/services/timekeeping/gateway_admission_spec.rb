@@ -17,7 +17,10 @@ RSpec.describe "Timekeeping gateway admission across connections", type: :model 
   gateway = Timekeeping::Gateway
 
   let(:command) { gateway::BulkDiscard.new(entries: TimesheetEntry.none, company: nil) }
-  let(:raise_generation) { { generation: 1, state: "closed" } }
+
+  def close_admission!(lock_timeout: Timekeeping::HandoffFence::DRAIN_TIMEOUT)
+    Timekeeping::HandoffFence.call(:close, generation: 0, lock_timeout:)
+  end
 
   before { run_on_own_connection { Timekeeping::Ownership.create!(TimekeepingOwnershipStates::BEFORE_FIRST_HANDOFF) } }
 
@@ -39,10 +42,7 @@ RSpec.describe "Timekeeping gateway admission across connections", type: :model 
     begin
       take(admitted)
       handoff_while_admitted = on_own_connection do |connection|
-        connection.transaction do
-          connection.execute("SET LOCAL lock_timeout = '300ms'")
-          Timekeeping::Ownership.lock.find(Timekeeping::Ownership::SINGLETON_ID).update!(raise_generation)
-        end
+        close_admission!(lock_timeout: 0.3.seconds)
       end
       expect { handoff_while_admitted.value }.to raise_error(ActiveRecord::LockWaitTimeout)
     ensure
@@ -50,7 +50,7 @@ RSpec.describe "Timekeeping gateway admission across connections", type: :model 
       writer.join
     end
 
-    run_on_own_connection { Timekeeping::Ownership.find(Timekeeping::Ownership::SINGLETON_ID).update!(raise_generation) }
+    run_on_own_connection { close_admission! }
     expect(run_on_own_connection { Timekeeping::Ownership.current.summary }).to eq("generation 1, owner legacy, state closed")
   end
 
@@ -59,7 +59,7 @@ RSpec.describe "Timekeeping gateway admission across connections", type: :model 
     writer_pid = Queue.new
     handoff = on_own_connection do |connection|
       connection.transaction do
-        Timekeeping::Ownership.lock.find(Timekeeping::Ownership::SINGLETON_ID).update!(raise_generation)
+        close_admission!
         handoff_locked << true
         wait_until_waiting_on_lock(connection, take(writer_pid))
       end
