@@ -7,7 +7,8 @@ require "rails_helper"
 # through the real entry points, against the consumer-side fake of
 # Timekeeping. Under `timekeeping` the time-tracking list of W1 web and
 # mobile (and MCP's miru.time.list) and the lookup before a W1 or W3 update
-# or discard read the owner, never the projection, which may lag: an entry
+# or discard, and W2's selection of the entries a bulk move or discard
+# names, read the owner, never the projection, which may lag: an entry
 # the relay has not projected yet is listed and edited at once (§12.4 "relay
 # paused"), and an edit is authorized on the owner's current state. The
 # public JSON is today's. Under `legacy` nothing changes: no call, today's
@@ -245,6 +246,109 @@ RSpec.describe "Timekeeping entry reads", type: :request do
         expect(fake.entry(theirs["id"])["discarded_at"]).to be_nil
       end
     end
+
+    describe "W2 bulk move and bulk discard" do
+      let(:other_project) do
+        create(:project, client: tenant_a.client, billable: true).tap do |project|
+          create(:project_member, project:, user: employee)
+        end
+      end
+
+      before do
+        sign_in employee
+        cut_over!
+      end
+
+      def bulk_move(ids, user: employee)
+        send_request :patch, api_v1_bulk_action_path, params: { ids:, project_id: other_project.id }, headers: auth_headers(user)
+      end
+
+      def bulk_discard(ids, user: employee)
+        send_request :delete, api_v1_bulk_action_path, params: { source: { ids: } }, headers: auth_headers(user)
+      end
+
+      it "moves and discards entries the projection does not hold yet, selected from the owner" do
+        first, second = 2.times.map { unprojected_entry(tenant_a, work_date: Date.current.iso8601) }
+
+        writes = timesheet_entry_writes do
+          without_projection_reads { bulk_move([first["id"], second["id"]]) }
+          expect(response).to have_http_status(:ok)
+          expect(json_response["entries"].values.flatten.map { |entry| [entry["id"], entry["project_id"]] })
+            .to contain_exactly([first["id"], other_project.id], [second["id"], other_project.id])
+
+          without_projection_reads { bulk_discard([first["id"]]) }
+          expect(response).to have_http_status(:ok)
+          expect(json_response["notice"]).to eq(I18n.t("timesheet_entry.destroy.message"))
+        end
+
+        expect(writes).to eq([])
+        expect(fake.entry(first["id"])).to include("project_id" => other_project.id, "discarded_at" => be_present)
+        expect(fake.entry(second["id"])).to include("project_id" => other_project.id, "discarded_at" => nil)
+        expect(fake.calls.map(&:operation)).to eq(%i[list_entries bulk_move list_entries bulk_discard])
+        expect(calls(:list_entries).map(&:input)).to eq([
+          { "ids" => [first["id"], second["id"]].map(&:to_s), "user_id" => employee.id.to_s },
+          { "ids" => [first["id"].to_s], "user_id" => employee.id.to_s }
+        ])
+        expect(calls(:list_entries).map(&:claims)).to all(include(
+          "sub" => "user:#{employee.id}", "company_id" => tenant_a.company.id, "role" => "employee", "writer" => "bulk"
+        ))
+      end
+
+      it "judges A9's lock on the owner's state: an entry billed in Timekeeping is refused" do
+        entry = unbilled_entry(tenant_a, work_date: Date.current)
+        copy_to_owner(entry, bill_status: "billed")
+        days = tenant_a.company.timesheet_edit_days
+
+        bulk_move([entry.id])
+        expect(response).to have_http_status(:forbidden)
+        expect(json_response).to eq("error" => I18n.t("timesheet_entry.update.locked", days:))
+        bulk_discard([entry.id])
+        expect(response).to have_http_status(:forbidden)
+        expect(json_response).to eq("error" => I18n.t("timesheet_entry.destroy.locked", days:))
+
+        expect(fake.calls.map(&:operation)).to eq(%i[list_entries list_entries])
+        expect(fake.entry(entry.id)).to include("project_id" => tenant_a.project.id, "discarded_at" => nil)
+      end
+
+      it "selects an employee's own entries only, and any member's for an admin (A6)" do
+        admin = tenant_a.admin
+        mine = unprojected_entry(tenant_a, work_date: Date.current.iso8601)
+        theirs = unprojected_entry(tenant_a, user: admin, work_date: Date.current.iso8601)
+
+        bulk_discard([theirs["id"]])
+        expect(response).to have_http_status(:unprocessable_entity)
+        expect(fake.calls.map(&:operation)).to eq(%i[list_entries])
+        expect(fake.entry(theirs["id"])["discarded_at"]).to be_nil
+
+        sign_in admin
+        bulk_discard([mine["id"], theirs["id"]], user: admin)
+        expect(response).to have_http_status(:ok)
+        expect([mine, theirs].map { |entry| fake.entry(entry["id"])["discarded_at"] }).to all(be_present)
+        expect(calls(:list_entries).last.input).to eq("ids" => [mine["id"], theirs["id"]].map(&:to_s))
+        expect(calls(:list_entries).last.claims).to include("sub" => "user:#{admin.id}", "role" => "admin")
+      end
+
+      it "never selects tenant B's entries (§6.3)" do
+        foreign = unprojected_entry(tenant_b, user: tenant_b.employee, work_date: Date.current.iso8601)
+
+        bulk_move([foreign["id"]])
+
+        expect(response).to have_http_status(:unprocessable_entity)
+        expect(json_response).to eq("error" => I18n.t("timesheet_entry.update.failure", default: "No entries found"))
+        expect(fake.calls.map(&:operation)).to eq(%i[list_entries])
+        expect(calls(:list_entries).sole.claims.fetch("company_id")).to eq(tenant_a.company.id)
+        expect(fake.entry(foreign["id"])).to include("project_id" => tenant_b.project.id, "discarded_at" => nil)
+      end
+
+      it "answers a retryable 503 when Timekeeping cannot be reached" do
+        WebMock::API.stub_request(:get, %r{/internal/v1/entries}).to_raise(Faraday::ConnectionFailed.new("refused"))
+
+        bulk_discard([unprojected_entry(tenant_a)["id"]])
+
+        expect(response).to have_http_status(:service_unavailable)
+        expect(json_response["errors"]).to eq(I18n.t("timesheet_entry.unavailable"))
+      end
+    end
   end
 
   it "makes no call under the legacy owner, which still reads the table" do
@@ -253,9 +357,12 @@ RSpec.describe "Timekeeping entry reads", type: :request do
 
     expect(listed_ids(list)).to eq([entry.id])
     send_request :delete, api_v1_timesheet_entry_path(entry.id), headers: auth_headers(employee)
-
     expect(response).to have_http_status(:ok)
-    expect(entry.reload).to be_discarded
+    bulk = unbilled_entry(tenant_a, work_date: Date.current)
+    send_request :delete, api_v1_bulk_action_path, params: { source: { ids: [bulk.id] } }, headers: auth_headers(employee)
+    expect(response).to have_http_status(:ok)
+
+    expect([entry.reload, bulk.reload]).to all(be_discarded)
     expect(fake.calls).to be_empty
   end
 

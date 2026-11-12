@@ -60,11 +60,18 @@ class TimesheetEntryPolicy < ApplicationPolicy
       end
 
       def resolve
-        if user_owner_role? || user_admin_role?
-          user.current_workspace.timesheet_entries.kept
-        else
+        if own_entries_only?
           user.timesheet_entries.kept.in_workspace(user.current_workspace)
+        else
+          user.current_workspace.timesheet_entries.kept
         end
+      end
+
+      # A6: owner and admin see every kept entry of the workspace, everyone
+      # else their own. Timekeeping::EntryReads applies the same rule to the
+      # owner of the entries.
+      def own_entries_only?
+        !has_owner_or_admin_role?
       end
     end
 end

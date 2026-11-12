@@ -2,10 +2,14 @@
 
 class Api::V1::TimesheetEntry::BulkActionController < Api::V1::ApplicationController
   skip_after_action :verify_authorized, only: [:update, :destroy]
-  after_action :verify_policy_scoped, only: [:update, :destroy]
 
-  # The owner of the entries checks A9's lock again in its write transaction
-  # (docs/architecture/timekeeping-soa.md §6.2); its refusal is today's
+  # The entries a request names are selected from their owner, under the
+  # policy scope (A6): Timekeeping::EntryReads::Select applies
+  # TimesheetEntryPolicy::Scope under every owner, so no Pundit scope is
+  # resolved here. That way an entry the relay has not projected yet is found
+  # and A9's lock is judged on the owner's state
+  # (docs/architecture/timekeeping-soa.md §3.3 rule 1). The owner checks
+  # A9's lock again in its write transaction (§6.2); its refusal is today's
   # locked answer.
   rescue_from Timekeeping::Gateway::Locked, with: :render_locked
 
@@ -16,13 +20,12 @@ class Api::V1::TimesheetEntry::BulkActionController < Api::V1::ApplicationContro
 
   def update
     authorize TimesheetEntry, :bulk_update?
-    timesheet_entries = policy_scope(TimesheetEntry)
 
     ids = Array(params[:ids]).reject(&:blank?)
     return render json: { error: I18n.t("timesheet_entry.update.failure", default: "No entries selected") }, status: :unprocessable_entity if ids.empty?
 
     target_project = ProjectPolicy::Scope.new(current_user, current_company).resolve.find(params[:project_id])
-    updated_entries = timesheet_entries.where(id: ids)
+    updated_entries = selected_entries(ids)
     return render json: { error: I18n.t("timesheet_entry.update.failure", default: "No entries found") }, status: :unprocessable_entity if updated_entries.empty?
     return render_locked if updated_entries.any? { |entry| entry_locked?(entry) }
 
@@ -34,8 +37,7 @@ class Api::V1::TimesheetEntry::BulkActionController < Api::V1::ApplicationContro
   def destroy
     authorize TimesheetEntry, :bulk_destroy?
 
-    timesheet_entries = policy_scope(TimesheetEntry)
-    entries_to_discard = timesheet_entries.where(id: ids_params)
+    entries_to_discard = selected_entries(ids_params)
     return render_locked if entries_to_discard.any? { |entry| entry_locked?(entry) }
 
     discarded_entries = Timekeeping::Gateway.call(
@@ -52,6 +54,14 @@ class Api::V1::TimesheetEntry::BulkActionController < Api::V1::ApplicationContro
 
     def ids_params
       params.require(:source).require(:ids)
+    end
+
+    # The kept entries among `ids` the caller's policy scope admits (A6),
+    # from the owner of the entries.
+    def selected_entries(ids)
+      Timekeeping::EntryReads.call(
+        Timekeeping::EntryReads::Select.new(ids:, user: current_user, company: current_company, writer: "bulk")
+      )
     end
 
     def privileged_user?
