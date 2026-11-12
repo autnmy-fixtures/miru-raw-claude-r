@@ -11,6 +11,8 @@ Rails.application.routes.draw do
       # PATCH only: the contract has no PUT (entry_api.json update_entry).
       resources :entries, only: %i[index show create destroy], constraints: { id: /[1-9][0-9]*/ }
       patch "entries/:id", to: "entries#update", constraints: { id: /[1-9][0-9]*/ }
+      post "entries/bulk_move", to: "entries#bulk_move"
+      post "entries/bulk_discard", to: "entries#bulk_discard"
       resources :candidates, only: :index
     end
   end

@@ -54,4 +54,32 @@ RSpec.describe EntryPolicy do
   it "refuses a caller with no user, which today's policy never has" do
     expect(refusal(entry, claims(role: nil, sub: "system"))).to have_attributes(slug: "forbidden", detail: include("no user"))
   end
+
+  describe ".lock!, BulkActionController#entry_locked? (A9)" do
+    def lock(entries, claims)
+      described_class.lock!(entries, claims)
+      nil
+    rescue Problem::Raised => raised
+      raised.problem
+    end
+
+    it "locks the whole set for one billed entry, for every role (A3)" do
+      entries = [entry, entry(bill_status: "billed").tap { |billed| billed.id = 2 }]
+
+      %w[owner admin employee].each do |role|
+        expect(lock(entries, claims(role:))).to have_attributes(slug: "entry-locked", status: 403, detail: include("entry 2", "(A3)"))
+      end
+    end
+
+    it "locks an entry older than the edit window for a non-privileged caller only (A4)" do
+      expect(lock([entry(work_date: today - 7)], claims(role: "employee"))).to be_nil
+      expect(lock([entry(work_date: today - 8)], claims(role: "employee"))).to have_attributes(slug: "entry-locked", detail: include("(A4)"))
+      expect(lock([entry(work_date: today - 80)], claims(role: "owner"))).to be_nil
+    end
+
+    it "does not lock someone else's entry, which the caller's policy scope already chose (A6), nor nothing at all" do
+      expect(lock([entry(user_id: 9)], claims(role: "employee"))).to be_nil
+      expect(lock([], claims(role: "employee"))).to be_nil
+    end
+  end
 end
