@@ -101,6 +101,29 @@ RSpec.describe Timekeeping::HandoffFence, type: :model do
       expect(ownership).to eq(generation: 2, owner: "timekeeping", state: "closed")
     end
 
+    it "refuses to freeze while the invoice operation ledger is not settled, and changes nothing (§10.5 step 2)" do
+      set_timekeeping_ownership!(generation: 2, owner: "timekeeping", state: "closed")
+      pending, undelivered = [%w[pending 701], %w[failed 702]].map do |state, invoice_id|
+        Timekeeping::InvoiceOperation.create!(
+          operation_id: SecureRandom.uuid, invoice_id:, company_id: 1, kind: "save", entry_ids: [], state:, generation: 1
+        )
+      end
+      Timekeeping::InvoiceOperation.create!(
+        operation_id: SecureRandom.uuid, invoice_id: 703, company_id: 1, kind: "save", entry_ids: [], state: "succeeded", generation: 1,
+        delivered_at: Time.current
+      )
+
+      expect { described_class.call(:freeze, generation: 2) }.to raise_error(
+        described_class::Unsettled,
+        "Timekeeping handoff: freeze refused, 2 invoice operation(s) not settled " \
+        "(pending #{pending.operation_id}; failed #{undelivered.operation_id}); nothing changed"
+      )
+      expect(ownership).to eq(generation: 2, owner: "timekeeping", state: "closed")
+
+      [pending, undelivered].each { |intent| intent.update!(state: "failed", delivered_at: Time.current) }
+      expect(step(:freeze, 2)).to eq(states.fetch("rollback, frozen"))
+    end
+
     it "refuses a step the procedure does not have" do
       expect { described_class.call(:settle, generation: 0) }.to raise_error(KeyError)
       expect(Timekeeping::Ownership.current).to be_new_record

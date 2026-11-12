@@ -27,9 +27,10 @@
 # Time only decides when .recover! looks.
 #
 # The ledger's own transitions pass no billing-write fence: during a handoff,
-# settle (§10.5 step 2) resolves every pending intent from its durable
-# outcome, and delivery must still run. Opening an intent is admitted like
-# any other write, because it starts a reservation change.
+# settle (§10.5 step 2, Timekeeping::HandoffSettle) resolves every pending
+# intent from its durable outcome, and delivery must still run. The fence
+# refuses to freeze while any intent is .unsettled. Opening an intent is
+# admitted like any other write, because it starts a reservation change.
 class Timekeeping::InvoiceOperation < ApplicationRecord
   # Retryable: another operation of this invoice is still pending (§9.1).
   # Recovery resolves it; the client retries.
@@ -65,6 +66,10 @@ class Timekeeping::InvoiceOperation < ApplicationRecord
   RECONCILIATIONS = RECEIPTS.to_h { |state, receipt| [[receipt, state], state.to_sym] }.freeze
 
   scope :undelivered, -> { where(state: DELIVERIES.keys, delivered_at: nil) }
+  # Not yet settled (§10.5 step 2): pending, or with an outcome its owner has
+  # not confirmed. A pending intent is never delivered, so this is every row
+  # with no delivered_at.
+  scope :unsettled, -> { where(delivered_at: nil) }
   scope :pending_before, ->(time) { state_pending.where(created_at: ...time) }
 
   # §9.2 step 1. Admitted under the ownership fence (§10.1), so a handoff
@@ -91,6 +96,17 @@ class Timekeeping::InvoiceOperation < ApplicationRecord
   # no save has recorded success for. Answers each one's durable outcome.
   def self.recover!(before:)
     pending_before(before).order(:id).to_h { |intent| [intent.operation_id, intent.record_failure!] }
+  end
+
+  # Why the handoff may not freeze yet (Timekeeping::HandoffFence), or nil
+  # once every intent is settled: the unsettled intents by state, with their
+  # operation ids.
+  def self.unsettled_summary
+    unsettled = self.unsettled.order(:id).pluck(:state, :operation_id)
+    return if unsettled.empty?
+
+    listed = unsettled.group_by(&:first).map { |state, rows| "#{state} #{rows.map(&:last).join(', ')}" }
+    "#{unsettled.size} invoice operation(s) not settled (#{listed.join('; ')})"
   end
 
   # Whether the caller is inside a transaction the application opened. A
