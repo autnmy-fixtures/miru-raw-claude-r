@@ -29,6 +29,7 @@ AllCops:
     - "bin/**/*"
     - "config/webpack/**/*"
     - "db/schema.rb"
+    - "services/*/db/schema.rb"
 
 Performance:
   Exclude:

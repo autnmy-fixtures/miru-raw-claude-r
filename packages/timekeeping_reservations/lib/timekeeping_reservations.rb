@@ -11,6 +11,9 @@
 # hold, calls prepare, commit or abort, and persists the reservations it gets
 # back. Receipts, generations and the one-unresolved-operation rule are the
 # protocol's (§5.3), not the table's.
+#
+# The handoff's state machine over the ownership record, which both copies of
+# that record move through, is TimekeepingReservations::Handoff.
 module TimekeepingReservations
   KINDS = %i[save discard destroy].freeze
   INVOICE_STATES = %i[draft non_draft].freeze
@@ -176,3 +179,5 @@ module TimekeepingReservations
       end
   end
 end
+
+require_relative "timekeeping_reservations/handoff"
