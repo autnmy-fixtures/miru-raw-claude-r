@@ -13,14 +13,7 @@ class Ownership < ApplicationRecord
 
   # Raised by .admit! when this copy refuses a mutating call. Nothing was
   # written; `problem` is the contract's answer (§5.1).
-  class Refused < StandardError
-    attr_reader :problem
-
-    def initialize(problem)
-      @problem = problem
-      super(problem.detail)
-    end
-  end
+  class Refused < Problem::Raised; end
 
   # Why a mutating call is refused; the first that holds wins (§5.1, §9.3).
   #
