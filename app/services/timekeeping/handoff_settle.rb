@@ -32,7 +32,7 @@ module Timekeeping::HandoffSettle
   STATES = %w[closed].freeze
 
   def self.call(generation:, worker: Timekeeping::InvoiceOperationWorker.new(time_limit: 0.seconds))
-    Timekeeping::HandoffFence.ensure_in_step!(:settle, STATES, Timekeeping::Ownership.current, generation)
+    TimekeepingReservations::Handoff.ensure_in_step!(:settle, STATES, Timekeeping::Ownership.current, generation)
     worker.run
   end
 end

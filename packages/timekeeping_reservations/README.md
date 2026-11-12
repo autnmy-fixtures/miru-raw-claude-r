@@ -3,7 +3,8 @@
 The shared library of `docs/architecture/timekeeping-soa.md` §11.1. Timekeeping (`services/timekeeping`), the
 write gateway and the prepared rollback target all read it; nobody keeps a second copy.
 
-It holds the **reservation decision table** (§7.2) and the **contracts** (§5, §12.3).
+It holds the **reservation decision table** (§7.2), the **handoff state machine** over the ownership
+record (§10.1, §10.5), and the **contracts** (§5, §12.3).
 
 ## The reservation rule
 
@@ -46,6 +47,25 @@ gives the same reservations.
   Today that entry stays locked, because nothing unlocks it. This follows the table as written.
 - **Commit of an entry its operation never prepared** raises `ProtocolError`. The provider answers an
   unprepared operation (`404`, see below) before it reaches the table.
+
+## The handoff state machine
+
+`lib/timekeeping_reservations/handoff.rb` (`TimekeepingReservations::Handoff`, loaded with the rule) is
+the one copy of the handoff's steps. §10.1 keeps a copy of the ownership record in each database; both
+fences move theirs through these steps, so the copies cannot follow different rules:
+`Timekeeping::HandoffFence` in the existing application and `HandoffFence` in `services/timekeeping`.
+
+| Step | From | To | Also changes |
+|---|---|---|---|
+| `close` | `open` | `closed` | raises the generation |
+| `freeze` | `closed` | `frozen` | — |
+| `flip` | `frozen` | `open` | the owner, to its one successor (`SUCCESSORS`: legacy → timekeeping → monolith → timekeeping) |
+| `abort` | `closed`, `frozen` | `open` | — (the raised generation stays) |
+
+`STEPS.fetch(name).apply(record, generation:)` returns the attributes to write, or raises `OutOfStep`
+unless the record is at `generation` in one of the step's states. It is pure: each fence locks its
+record, applies the step and persists the result, and adds its own checks (the existing application's
+freeze waits for settle). `spec/handoff_spec.rb` tests it once.
 
 ## Contracts, v1
 

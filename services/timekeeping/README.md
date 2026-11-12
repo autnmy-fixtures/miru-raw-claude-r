@@ -4,9 +4,10 @@ The new service of `docs/architecture/timekeeping-soa.md` (§3, §11.1): a Rails
 application on Ruby 4.0.1, with its own bundle and its own database. It will own time entries and
 their billing reservations, and serve them only on its internal API (§5).
 
-This is the **service shell**. It boots, connects to its own database, reads the shared library in
-`packages/timekeeping_reservations`, and answers every error as a contract problem. It serves no
-entry, reservation or relay route yet; those land lane by lane (§14).
+It boots, connects to its own database, reads the shared library in
+`packages/timekeeping_reservations`, answers every error as a contract problem, and holds its copy
+of the ownership record (§10.1). It serves no entry, reservation or relay route yet; those land lane
+by lane (§14).
 
 ## What is here
 
@@ -17,6 +18,8 @@ entry, reservation or relay route yet; those land lane by lane (§14).
 | `config/initializers/timekeeping.rb` | Loads the reservation decision table and points at the contracts in `../../packages/timekeeping_reservations`. Reads `TIMEKEEPING_TOKEN_KEY` and `EXISTING_APP_URL` from the environment. |
 | `app/models/problem.rb` | One `application/problem+json` body. Its types are read from `common.json`, so only a type the contract lists can be built. |
 | `app/controllers/problems_controller.rb` | The exceptions app: an unknown route is `404 not-found`; an unparseable body, unknown method or format is `invalid-request`. A status with no problem type answers with no body. |
+| `db/migrate/*_create_ownerships.rb`, `app/models/ownership.rb` | Timekeeping's copy of the ownership record (§10.1): one row, `(generation, owner, state)`, defaults the initial legacy state. `Ownership.admit!(generation)` is the admission every mutating call runs inside its own write transaction: it holds the row `FOR SHARE` and refuses with a contract problem, `409 stale-generation` when the call carries another generation or Timekeeping does not own entries, and a retryable `503 ownership-moving` while a handoff has admission closed or frozen. |
+| `app/services/handoff_fence.rb` | The only code that changes the copy: close, freeze, flip and abort (§10.5), each in one transaction that takes the row `FOR UPDATE`, so close waits for every admitted call. The steps are the shared state machine, `TimekeepingReservations::Handoff`, which the existing application's copy moves through too. |
 | `GET /up` | Liveness, 200 once booted. |
 
 ## Configuration (§11.2)

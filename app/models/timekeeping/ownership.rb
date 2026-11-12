@@ -101,7 +101,5 @@ class Timekeeping::Ownership < ApplicationRecord
     !state_open? || generation > INITIAL_GENERATION
   end
 
-  def summary
-    "generation #{generation}, owner #{owner}, state #{state}"
-  end
+  def summary = TimekeepingReservations::Handoff.summary(self)
 end
