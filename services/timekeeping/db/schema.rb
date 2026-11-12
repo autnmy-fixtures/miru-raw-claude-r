@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_11_11_140100) do
+ActiveRecord::Schema[8.1].define(version: 2026_11_11_150200) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -41,6 +41,42 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_11_140100) do
     t.check_constraint "review_status::text = ANY (ARRAY['not_required'::character varying, 'pending_review'::character varying, 'approved'::character varying, 'rejected'::character varying]::text[])", name: "entries_review_status"
     t.check_constraint "source::text = ANY (ARRAY['manual'::character varying, 'cli'::character varying, 'mcp'::character varying, 'automation'::character varying, 'import'::character varying]::text[])", name: "entries_source"
     t.check_constraint "version >= 1", name: "entries_version_positive"
+  end
+
+  create_table "entry_audits", force: :cascade do |t|
+    t.string "action", null: false
+    t.string "actor", null: false
+    t.bigint "agent_id"
+    t.jsonb "audited_changes", null: false
+    t.bigint "company_id", null: false
+    t.datetime "created_at", null: false
+    t.bigint "entry_id", null: false
+    t.string "request_id", null: false
+    t.bigint "version", null: false
+    t.string "writer", null: false
+    t.index ["company_id"], name: "index_entry_audits_on_company_id"
+    t.index ["entry_id"], name: "index_entry_audits_on_entry_id"
+    t.check_constraint "action::text = ANY (ARRAY['create'::character varying, 'update'::character varying]::text[])", name: "entry_audits_action"
+  end
+
+  create_table "idempotency_receipts", force: :cascade do |t|
+    t.bigint "company_id", null: false
+    t.datetime "created_at", null: false
+    t.string "key", null: false
+    t.string "request_digest", null: false
+    t.jsonb "response", null: false
+    t.integer "status", null: false
+    t.index ["company_id", "key"], name: "index_idempotency_receipts_on_company_id_and_key", unique: true
+  end
+
+  create_table "outbox_snapshots", force: :cascade do |t|
+    t.bigint "company_id", null: false
+    t.datetime "created_at", null: false
+    t.bigint "entry_id", null: false
+    t.string "request_id", null: false
+    t.jsonb "snapshot", null: false
+    t.bigint "version", null: false
+    t.index ["entry_id", "version"], name: "index_outbox_snapshots_on_entry_id_and_version", unique: true
   end
 
   create_table "ownerships", force: :cascade do |t|
@@ -74,5 +110,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_11_140100) do
     t.check_constraint "state::text = ANY (ARRAY['provisional'::character varying, 'committed'::character varying]::text[])", name: "reservations_state"
   end
 
+  add_foreign_key "entry_audits", "entries"
+  add_foreign_key "outbox_snapshots", "entries"
   add_foreign_key "reservations", "entries"
 end
