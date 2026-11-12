@@ -2,7 +2,8 @@
 
 # The one ownership record of docs/architecture/timekeeping-soa.md §10.1:
 # which owner holds entries, under which generation, and whether admission is
-# open. The handoff tool changes it; everything else only reads it.
+# open. The handoff fence (Timekeeping::HandoffFence) changes it; everything
+# else only reads it.
 #
 # No row means no handoff has ever run here. The column defaults are the
 # initial legacy state, so .current returns them unsaved instead of keeping a
@@ -56,9 +57,20 @@ class Timekeeping::Ownership < ApplicationRecord
   # row is written first; concurrent writers race safely on ON CONFLICT DO
   # NOTHING and all lock the one row.
   def self.lock_shared!
-    insert({ id: SINGLETON_ID }) unless exists?(id: SINGLETON_ID)
-    lock("FOR SHARE").find(SINGLETON_ID)
+    locked_row("FOR SHARE")
   end
+
+  # The handoff's lock (§10.5): the record read FOR UPDATE, which waits for
+  # every write holding it FOR SHARE. Only Timekeeping::HandoffFence takes it.
+  def self.lock_exclusive!
+    locked_row("FOR UPDATE")
+  end
+
+  def self.locked_row(clause)
+    insert({ id: SINGLETON_ID }) unless exists?(id: SINGLETON_ID)
+    lock(clause).find(SINGLETON_ID)
+  end
+  private_class_method :locked_row
 
   # The fence every write passes (§10.1): entry writes through the gateway and
   # billing writes through Timekeeping::BillingWriteFence. Returns the record
