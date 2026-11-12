@@ -101,17 +101,13 @@ RSpec.describe PdfGeneration::InvoiceService do
       service.process
     end
 
-    it "calculates the correct subtotal" do
-      subtotal = service.send(:calculate_subtotal)
-
-      expect(subtotal).to eq(1000.0)
+    it "prints the subtotal recomputed from the line items" do
+      expect(described_class.printed_totals(invoice.reload)[:sub_total]).to eq("$1,000.00")
     end
 
-    it "calculates the correct total" do
-      total = service.send(:calculate_total)
-
+    it "prints the total as subtotal + tax - discount" do
       # total = subtotal + tax - discount = 1000 + 100 - 50 = 1050
-      expect(total).to eq(1050.0)
+      expect(described_class.printed_totals(invoice.reload)[:total]).to eq("$1,050.00")
     end
 
     it "formats currency correctly" do
