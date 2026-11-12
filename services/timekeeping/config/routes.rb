@@ -8,7 +8,9 @@ Rails.application.routes.draw do
   # contract operation as it lands. Ids are the contract's id_param.
   namespace :internal do
     namespace :v1 do
-      resources :entries, only: %i[index show create], constraints: { id: /[1-9][0-9]*/ }
+      # PATCH only: the contract has no PUT (entry_api.json update_entry).
+      resources :entries, only: %i[index show create destroy], constraints: { id: /[1-9][0-9]*/ }
+      patch "entries/:id", to: "entries#update", constraints: { id: /[1-9][0-9]*/ }
       resources :candidates, only: :index
     end
   end

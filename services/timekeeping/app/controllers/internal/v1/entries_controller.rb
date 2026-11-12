@@ -8,13 +8,24 @@
 # decided by the caller, before the call (§6.2), so neither checks a role. A
 # read writes nothing, so it needs no admission (§10.1).
 #
-# Its writes: create (EntryCreate), one mutating call each (EntryWrite).
+# Its writes: create (EntryCreate), update (EntryUpdate) and discard
+# (EntryDiscard), one mutating call each (EntryWrite).
 class Internal::V1::EntriesController < Internal::BaseController
   CONTRACT = :entry_api
 
   def create
     input = contract_input!("#/$defs/entry_create_request", request.request_parameters)
     write!(input) { EntryCreate.call(input.fetch("entry"), claims) }
+  end
+
+  def update
+    input = contract_input!("#/$defs/entry_update_request", request.request_parameters)
+    write!(input) { EntryUpdate.call(params[:id], input.fetch("entry"), claims) }
+  end
+
+  def destroy
+    input = contract_input!("#/$defs/empty_request", request.request_parameters)
+    write!(input) { EntryDiscard.call(params[:id], claims) }
   end
 
   def index
