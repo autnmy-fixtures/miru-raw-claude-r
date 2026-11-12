@@ -131,6 +131,24 @@ RSpec.describe Timekeeping::EntryClient do
       expect(fake.calls).to be_empty
     end
 
+    it "lists the kept entries of the projects in the dates (W5)" do
+      on_seven = seed(project_id: 7, work_date: "2026-11-03")
+      on_eight = seed(project_id: 8, work_date: "2026-11-04")
+      seed(project_id: 9, work_date: "2026-11-03")
+      seed(project_id: 7, work_date: "2026-10-31")
+      seed(company_id: other_company.id, project_id: 7, work_date: "2026-11-03")
+
+      expect(client.list_entries(project_ids: [7, 8], work_dates: november, claims:).pluck("id")).to eq([on_seven["id"], on_eight["id"]])
+      expect(fake.calls.sole.input).to eq("project_ids" => %w[7 8], "from" => "2026-11-01", "to" => "2026-11-30")
+    end
+
+    it "makes no call for an empty project list, which selects nothing" do
+      seed
+
+      expect(client.list_entries(project_ids: [], work_dates: november, claims:)).to eq([])
+      expect(fake.calls).to be_empty
+    end
+
     it "follows next_cursor until the last page" do
       fake = TimekeepingContracts::FakeTimekeeping.new(list_page_size: 2).install!
       ids = Array.new(5) { fake.seed_entry(company_id: company.id, project_id: 7, user_id: 3, duration: 30.0, work_date: "2026-11-02")["id"] }

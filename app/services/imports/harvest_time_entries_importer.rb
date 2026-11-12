@@ -168,19 +168,19 @@ module Imports
         @imported_rows = 0
       end
 
+      # The rows earlier imports wrote, read from the owner of the entries
+      # (docs/architecture/timekeeping-soa.md §3.3 rule 1), so a re-run right
+      # after a partial import skips what the owner holds but has not
+      # projected yet.
       def load_database_duplicates
         project_ids = @project_plans.values.filter_map { |plan| plan[:existing]&.id }.uniq
         work_dates = @rows.filter_map { |row| parse_date(row[:date]) }
         @database_duplicates = if project_ids.empty? || work_dates.empty?
           Set.new
         else
-          TimesheetEntry.kept.joins(project: :client)
-            .merge(Project.kept)
-            .merge(Client.kept)
-            .where(project_id: project_ids, work_date: work_dates.min..work_dates.max, source: "import")
-            .pluck(:user_id, :project_id, :work_date, :duration, :note)
-            .map { |values| duplicate_key(*values) }
-            .to_set
+          Timekeeping::EntryReads.call(
+            Timekeeping::EntryReads::Imported.new(company:, project_ids:, work_dates: work_dates.min..work_dates.max)
+          ).map { |values| duplicate_key(*values) }.to_set
         end
       end
 
