@@ -250,7 +250,9 @@ module TimekeepingContracts
 
       def list_entries(_params, query, claims)
         entries = kept(claims).select do |entry|
-          (query["user_id"].nil? || entry["user_id"] == Integer(query["user_id"])) && within?(entry, query)
+          (query["user_id"].nil? || entry["user_id"] == Integer(query["user_id"])) &&
+            (query["ids"].nil? || query["ids"].map { |id| Integer(id) }.include?(entry["id"])) &&
+            within?(entry, query)
         end
         offset = Integer(query.fetch("cursor", "0"))
         size = @list_page_size || entries.size

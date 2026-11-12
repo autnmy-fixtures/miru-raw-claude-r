@@ -112,6 +112,25 @@ RSpec.describe Timekeeping::EntryClient do
       expect(call.claims).to include("sub" => "user:3", "company_id" => company.id, "writer" => "web", "request_id" => "req-9")
     end
 
+    it "lists the kept entries among ids, of the user when one is named (W2)" do
+      mine = seed(user_id: 3)
+      theirs = seed(user_id: 4)
+      seed(user_id: 3)
+      foreign = seed(company_id: other_company.id, user_id: 3)
+      ids = [mine, theirs, foreign].pluck("id")
+
+      expect(client.list_entries(ids:, claims:).pluck("id")).to eq([mine["id"], theirs["id"]])
+      expect(client.list_entries(ids:, user_id: 3, claims:).pluck("id")).to eq([mine["id"]])
+      expect(fake.calls.map(&:input)).to eq([{ "ids" => ids.map(&:to_s) }, { "ids" => ids.map(&:to_s), "user_id" => "3" }])
+    end
+
+    it "makes no call for an empty id list, which selects nothing" do
+      seed
+
+      expect(client.list_entries(ids: [], claims:)).to eq([])
+      expect(fake.calls).to be_empty
+    end
+
     it "follows next_cursor until the last page" do
       fake = TimekeepingContracts::FakeTimekeeping.new(list_page_size: 2).install!
       ids = Array.new(5) { fake.seed_entry(company_id: company.id, project_id: 7, user_id: 3, duration: 30.0, work_date: "2026-11-02")["id"] }

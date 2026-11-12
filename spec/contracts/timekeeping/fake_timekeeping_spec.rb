@@ -81,6 +81,16 @@ RSpec.describe TimekeepingContracts::FakeTimekeeping do
       expect(listed["next_cursor"]).to be_nil
     end
 
+    it "lists by ids, alone or with a user (W2's selection)" do
+      mine = create_entry(work_date: "2026-11-03")
+      theirs = create_entry(user_id: 4, work_date: "2026-11-03")
+      create_entry(work_date: "2026-11-04")
+      ids = [mine, theirs].map { |entry| entry["id"].to_s }
+
+      expect(request(:list_entries, query: { "ids" => ids }).body["entries"].pluck("id")).to eq([mine["id"], theirs["id"]])
+      expect(request(:list_entries, query: { "ids" => ids, "user_id" => "3" }).body["entries"].pluck("id")).to eq([mine["id"]])
+    end
+
     it "replays a retried write and refuses a reused key with another body" do
       first = request(:create_entry, key: "retry-1", body: { "entry" => row })
       retried = request(:create_entry, key: "retry-1", body: { "entry" => row })

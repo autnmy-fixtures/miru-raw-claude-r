@@ -222,10 +222,11 @@
     "id_param": { "type": "string", "pattern": "^[1-9][0-9]*$" },
     "date_param": { "type": "string", "format": "date" },
     "list_query": {
-      "description": "The entry list (§3.3 rule 1): the kept entries of the token's company, of user_id when given, with work_date from `from` to `to` inclusive, in no stated order. An answer with a next_cursor is followed by asking again with that cursor; a null next_cursor is the last page.",
+      "description": "The entry list (§3.3 rule 1): the kept entries of the token's company, of user_id when given, among ids when given, with work_date from `from` to `to` inclusive, in no stated order. W2 bulk selects the entries it names with ids (§5.2). An answer with a next_cursor is followed by asking again with that cursor; a null next_cursor is the last page.",
       "type": "object",
       "properties": {
         "user_id": { "$ref": "#/$defs/id_param" },
+        "ids": { "type": "array", "items": { "$ref": "#/$defs/id_param" }, "minItems": 1 },
         "from": { "$ref": "#/$defs/date_param" },
         "to": { "$ref": "#/$defs/date_param" },
         "cursor": { "type": "string", "minLength": 1 }

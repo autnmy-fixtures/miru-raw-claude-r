@@ -110,11 +110,19 @@ class Timekeeping::EntryClient < Timekeeping::InternalApi
     read(:candidates, query, claims:).fetch("entries").map { |entry| candidate(entry) }
   end
 
-  # The kept entries of the claims' company for the user, with work dates in
-  # the inclusive Range of Dates, as the owner holds them (§5.2), every page
-  # of them: the owner answers a next_cursor until the last page.
-  def list_entries(user_id:, work_dates:, claims:)
-    query = { "user_id" => user_id.to_s, "from" => work_dates.begin.iso8601, "to" => work_dates.end.iso8601 }
+  # The kept entries of the claims' company, as the owner holds them (§5.2),
+  # every page of them: the owner answers a next_cursor until the last page.
+  # Each filter is optional: `user_id` restricts them to that user's,
+  # `ids` to those ids, and `work_dates`, an inclusive Range of Dates, to
+  # those work dates. An empty `ids` selects nothing, as an empty IN list
+  # does in SQL, and a query string cannot carry one, so no call is made.
+  def list_entries(claims:, user_id: nil, ids: nil, work_dates: nil)
+    return [] if ids&.empty?
+
+    query = {
+      "user_id" => user_id&.to_s, "ids" => ids&.map(&:to_s),
+      "from" => work_dates&.begin&.iso8601, "to" => work_dates&.end&.iso8601
+    }.compact
     entries, cursor = [], nil
     loop do
       page = read(:list_entries, query.merge("cursor" => cursor).compact, claims:)

@@ -59,8 +59,9 @@ RSpec.describe "Timekeeping entry forwarding", type: :request do
   end
 
   # The writes that reached the owner; an update or discard first reads the
-  # entry from it (§3.3 rule 1, spec/requests/timekeeping/entry_reads_spec.rb).
-  def writes = fake.calls.reject { |call| call.operation == :show_entry }
+  # entry from it, and a bulk move or discard the entries it names (§3.3
+  # rule 1, spec/requests/timekeeping/entry_reads_spec.rb).
+  def writes = fake.calls.reject { |call| %i[show_entry list_entries].include?(call.operation) }
 
   def writers = writes.map { |call| call.claims.fetch("writer") }
 
@@ -242,7 +243,7 @@ RSpec.describe "Timekeeping entry forwarding", type: :request do
           .to contain_exactly([first.id, other_project.id, other_project.name], [second.id, other_project.id, other_project.name])
         expect([first, second].map { |entry| fake.entry(entry.id)["project_id"] }).to all(eq(other_project.id))
         expect([first, second].map { |entry| entry.reload.project_id }).to all(eq(tenant_a.project.id))
-        expect(fake.calls.sole.claims).to include(
+        expect(writes.sole.claims).to include(
           "sub" => "user:#{employee.id}", "role" => "employee", "writer" => "bulk",
           "project" => include("id" => other_project.id)
         )
@@ -281,7 +282,7 @@ RSpec.describe "Timekeeping entry forwarding", type: :request do
         bulk_discard(foreign)
 
         expect(response).to have_http_status(:unprocessable_entity)
-        expect(fake.calls).to be_empty
+        expect(writes).to be_empty
         expect(fake.entry(foreign.id)["discarded_at"]).to be_nil
       end
     end
