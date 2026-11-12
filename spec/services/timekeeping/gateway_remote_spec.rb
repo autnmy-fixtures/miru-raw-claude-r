@@ -300,7 +300,7 @@ RSpec.describe Timekeeping::Gateway::Remote, type: :model do
       detached = forwarded { gateway::DetachAgent.new(agent:) }
 
       expect(detached).to eq([named["id"]])
-      expect(fake.entry(named["id"])).to include("agent_id" => nil, "version" => 2)
+      expect(fake.entry(named["id"])).to include("agent_id" => nil, "version" => 2, "updated_at" => named["updated_at"])
       expect(fake.entry(unnamed["id"])).to eq(unnamed)
       expect(fake.calls.sole.claims).to include(
         "writer" => "agent_destroy", "company_id" => tenant.company.id, "project" => nil,

@@ -64,11 +64,12 @@ module EntryCommand
   # Saves the change made to the held `entry`, already checked, as its next
   # version with its audit and outbox rows (EntryChange), and answers
   # [200, entry_response]. A change that changes nothing writes nothing, as
-  # an update with no changes saves nothing today.
-  def self.saved!(entry, claims)
+  # an update with no changes saves nothing today. `touch: false` keeps
+  # updated_at, for a change that today's code makes with update_all.
+  def self.saved!(entry, claims, touch: true)
     if entry.changed?
       entry.version += 1
-      entry.save!(validate: false)
+      entry.save!(validate: false, touch:)
       EntryChange.record!(entry, action: "update", audited_changes: entry.audited_update_changes, claims:)
     end
     [200, { "entry" => entry.to_contract }]
