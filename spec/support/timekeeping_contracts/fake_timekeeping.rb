@@ -252,6 +252,7 @@ module TimekeepingContracts
         entries = kept(claims).select do |entry|
           (query["user_id"].nil? || entry["user_id"] == Integer(query["user_id"])) &&
             (query["ids"].nil? || query["ids"].map { |id| Integer(id) }.include?(entry["id"])) &&
+            (query["project_ids"].nil? || query["project_ids"].map { |id| Integer(id) }.include?(entry["project_id"])) &&
             within?(entry, query)
         end
         offset = Integer(query.fetch("cursor", "0"))

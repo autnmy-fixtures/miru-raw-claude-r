@@ -8,9 +8,10 @@ require "rails_helper"
 # Timekeeping. Under `timekeeping` the time-tracking list of W1 web and
 # mobile (and MCP's miru.time.list) and the lookup before a W1 or W3 update
 # or discard, and W2's selection of the entries a bulk move or discard
-# names, read the owner, never the projection, which may lag: an entry
-# the relay has not projected yet is listed and edited at once (§12.4 "relay
-# paused"), and an edit is authorized on the owner's current state. The
+# names, and W5's duplicate check, read the owner, never the projection,
+# which may lag: an entry the relay has not projected yet is listed and
+# edited at once (§12.4 "relay paused"), an edit is authorized on the
+# owner's current state, and a re-run import skips what the owner holds. The
 # public JSON is today's. Under `legacy` nothing changes: no call, today's
 # queries.
 RSpec.describe "Timekeeping entry reads", type: :request do
@@ -67,6 +68,27 @@ RSpec.describe "Timekeeping entry reads", type: :request do
   def listed_ids(entries) = entries.values.flatten.pluck("id")
 
   def calls(operation) = fake.calls.select { |call| call.operation == operation }
+
+  # The member a Harvest file names: Paul Connors, employed by the tenant.
+  def import_user(tenant)
+    create(:user, first_name: "Paul", last_name: "Connors", current_workspace_id: tenant.company.id).tap do |user|
+      create(:employment, company: tenant.company, user:)
+    end
+  end
+
+  # A Harvest import of `rows` one-hour rows for Paul on the tenant's project,
+  # noted "Row 0", "Row 1" and on, all worked on 2026-11-03.
+  def harvest_import(tenant, rows:)
+    contents = CSV.generate do |csv|
+      csv << ["Date", "Client", "Project", "Hours", "First Name", "Last Name", "Notes"]
+      rows.times { |index| csv << ["2026-11-03", tenant.client.name, tenant.project.name, 1, "Paul", "Connors", "Row #{index}"] }
+    end
+    create(:data_import, company: tenant.company, user: tenant.admin, options: {}).tap do |data_import|
+      data_import.file.attach(io: StringIO.new(contents), filename: "harvest.csv", content_type: "text/csv")
+    end
+  end
+
+  def import!(data_import) = Imports::HarvestTimeEntriesImporter.new(data_import).process
 
   describe "under the timekeeping owner" do
     describe "W1 time-tracking list" do
@@ -349,6 +371,71 @@ RSpec.describe "Timekeeping entry reads", type: :request do
         expect(json_response["errors"]).to eq(I18n.t("timesheet_entry.unavailable"))
       end
     end
+    describe "W5 Harvest import's duplicate check" do
+      let(:paul) { import_user(tenant_a) }
+
+      # An entry an earlier import wrote, which the owner holds and the relay
+      # has not projected yet.
+      def imported_entry(tenant, note:, user: paul, project_id: tenant.project.id, **attributes)
+        unprojected_entry(
+          tenant, user:, project_id:, work_date: "2026-11-03", duration: 60.0, note:, source: "import", **attributes
+        )
+      end
+
+      it "skips the rows the owner already holds, though the projection does not hold them yet" do
+        held = imported_entry(tenant_a, note: "Row 0")
+        imported_entry(tenant_a, note: "Row 1", source: "manual")
+        imported_entry(tenant_a, note: "Row 2", discarded_at: "2026-11-04T10:00:00.000000Z")
+        imported_entry(tenant_b, user: tenant_b.employee, project_id: tenant_a.project.id, note: "Row 3")
+        data_import = harvest_import(tenant_a, rows: 4)
+        cut_over!
+
+        writes = timesheet_entry_writes { without_projection_reads { import!(data_import) } }
+
+        expect(writes).to eq([])
+        expect(TimesheetEntry.where(id: held["id"])).to be_empty
+        expect(data_import.reload).to have_attributes(status: "completed", imported_rows: 3, skipped_rows: 1)
+        expect(data_import.summary["duplicates_skipped"]).to eq(1)
+        expect(fake.calls.map(&:operation)).to eq(%i[list_entries import_batch])
+        expect(calls(:import_batch).sole.input.fetch("rows").pluck("note")).to eq(["Row 1", "Row 2", "Row 3"])
+        read = calls(:list_entries).sole
+        expect(read.input).to eq("project_ids" => [tenant_a.project.id.to_s], "from" => "2026-11-03", "to" => "2026-11-03")
+        expect(read.claims).to include("sub" => "system", "company_id" => tenant_a.company.id, "writer" => "import")
+      end
+
+      it "asks nothing of the owner for a discarded project, whose entries are no duplicates, as today" do
+        imported_entry(tenant_a, note: "Row 0")
+        tenant_a.project.discard!
+        data_import = harvest_import(tenant_a, rows: 1)
+        cut_over!
+
+        import!(data_import)
+
+        expect(data_import.reload).to have_attributes(status: "completed", imported_rows: 1, skipped_rows: 0)
+        expect(fake.calls.map(&:operation)).to eq(%i[import_batch])
+      end
+
+      it "fails the import and writes nothing when Timekeeping cannot be reached" do
+        data_import = harvest_import(tenant_a, rows: 1)
+        cut_over!
+        WebMock::API.stub_request(:get, %r{/internal/v1/entries}).to_raise(Faraday::ConnectionFailed.new("refused"))
+
+        expect { import!(data_import) }.to raise_error(Timekeeping::EntryClient::Unavailable)
+        expect(data_import.reload).to have_attributes(status: "failed", error_message: I18n.t("imports.errors.unexpected"))
+        expect(calls(:import_batch)).to be_empty
+      end
+    end
+  end
+
+  it "reads the table under the legacy owner for W5's duplicate check, as today" do
+    import_user(tenant_a)
+    import!(harvest_import(tenant_a, rows: 2))
+    again = harvest_import(tenant_a, rows: 2)
+
+    import!(again)
+
+    expect(again.reload).to have_attributes(status: "completed", imported_rows: 0, skipped_rows: 2)
+    expect(fake.calls).to be_empty
   end
 
   it "makes no call under the legacy owner, which still reads the table" do

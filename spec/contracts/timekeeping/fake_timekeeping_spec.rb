@@ -91,6 +91,16 @@ RSpec.describe TimekeepingContracts::FakeTimekeeping do
       expect(request(:list_entries, query: { "ids" => ids, "user_id" => "3" }).body["entries"].pluck("id")).to eq([mine["id"]])
     end
 
+    it "lists by projects and dates (W5's duplicate check)" do
+      on_seven = create_entry(work_date: "2026-11-03")
+      on_eight = create_entry(project_id: 8, work_date: "2026-11-04")
+      create_entry(project_id: 9, work_date: "2026-11-03")
+      create_entry(work_date: "2026-10-01")
+      query = { "project_ids" => %w[7 8], "from" => "2026-11-01", "to" => "2026-11-30" }
+
+      expect(request(:list_entries, query:).body["entries"].pluck("id")).to eq([on_seven["id"], on_eight["id"]])
+    end
+
     it "replays a retried write and refuses a reused key with another body" do
       first = request(:create_entry, key: "retry-1", body: { "entry" => row })
       retried = request(:create_entry, key: "retry-1", body: { "entry" => row })

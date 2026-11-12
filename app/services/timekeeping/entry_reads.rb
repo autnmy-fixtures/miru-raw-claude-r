@@ -8,7 +8,8 @@
 # make before an update or discard, and the selection W2 bulk move and bulk
 # discard make of the entries they name, so an entry the relay has not
 # projected yet can be edited at once, and is authorized on the owner's
-# current state.
+# current state. W5's duplicate check reads the owner too, so a re-run right
+# after an import skips the rows the owner already holds, projected or not.
 #
 # Under `legacy` each read is today's query, moved here unchanged. Under
 # `timekeeping` it is the entry API (§5.2), with the caller's claims (§6.1),
@@ -20,6 +21,8 @@
 # The caller decided who may read, as today: the policy, the company and,
 # for W3, the caller's own entries (A7). W2's selection applies the policy
 # scope itself (A6), under every owner, through TimesheetEntryPolicy::Scope.
+# W5 runs as the system actor, as its batches do: an import has no
+# Current.user (§6.1).
 # The owner is read without the generation fence: a read writes nothing, so
 # it needs no admission (§10.1).
 module Timekeeping::EntryReads
@@ -38,6 +41,17 @@ module Timekeeping::EntryReads
   # else.
   Select = Data.define(:ids, :user, :company, :writer)
 
+  # What W5's duplicate check compares a row with: of every kept entry an
+  # earlier import wrote (source "import") on the kept projects of kept
+  # clients among `project_ids`, with work dates in the inclusive Range of
+  # Dates `work_dates`, the values of IMPORTED_KEY.
+  Imported = Data.define(:company, :project_ids, :work_dates) do
+    def writer = "import"
+  end
+
+  # The entry values an import's duplicate key is made of, in order.
+  IMPORTED_KEY = %i[user_id project_id work_date duration note].freeze
+
   # What the time-tracking list renders of each entry (TimesheetEntry#snippet).
   LISTED = [:user, :agent, { project: :client }].freeze
 
@@ -49,7 +63,14 @@ module Timekeeping::EntryReads
       },
       Find => ->(read) { read.company.timesheet_entries.kept.find(read.id) },
       FindOwn => ->(read) { read.user.timesheet_entries.kept.in_workspace(read.company).find(read.id) },
-      Select => ->(read) { policy_scope(read).resolve.where(id: read.ids) }
+      Select => ->(read) { policy_scope(read).resolve.where(id: read.ids) },
+      Imported => ->(read) {
+        TimesheetEntry.kept.joins(project: :client)
+          .merge(Project.kept)
+          .merge(Client.kept)
+          .where(project_id: read.project_ids, work_date: read.work_dates, source: "import")
+          .pluck(*IMPORTED_KEY)
+      }
     },
     "timekeeping" => {
       List => ->(read) {
@@ -68,6 +89,14 @@ module Timekeeping::EntryReads
           ids: Array(read.ids).filter_map { |id| entry_id(id) },
           user_id: (read.user.id if policy_scope(read).own_entries_only?), claims: claims(read)
         ).map { |entry| Timekeeping::Gateway::Remote.record(entry) }
+      },
+      # The catalogue stays here, so which projects are kept is decided here,
+      # as candidate selection decides it; the owner answers their entries.
+      Imported => ->(read) {
+        project_ids = Project.kept.joins(:client).merge(Client.kept).where(id: read.project_ids).ids
+        Timekeeping::EntryClient.new.list_entries(project_ids:, work_dates: read.work_dates, claims: claims(read))
+          .map { |entry| Timekeeping::Gateway::Remote.record(entry) }
+          .filter_map { |entry| IMPORTED_KEY.map { |name| entry.public_send(name) } if entry.source == "import" }
       }
     }
   }.freeze

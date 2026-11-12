@@ -113,14 +113,15 @@ class Timekeeping::EntryClient < Timekeeping::InternalApi
   # The kept entries of the claims' company, as the owner holds them (§5.2),
   # every page of them: the owner answers a next_cursor until the last page.
   # Each filter is optional: `user_id` restricts them to that user's,
-  # `ids` to those ids, and `work_dates`, an inclusive Range of Dates, to
-  # those work dates. An empty `ids` selects nothing, as an empty IN list
-  # does in SQL, and a query string cannot carry one, so no call is made.
-  def list_entries(claims:, user_id: nil, ids: nil, work_dates: nil)
-    return [] if ids&.empty?
+  # `ids` to those ids, `project_ids` to those projects' entries, and
+  # `work_dates`, an inclusive Range of Dates, to those work dates. An empty
+  # `ids` or `project_ids` selects nothing, as an empty IN list does in SQL,
+  # and a query string cannot carry one, so no call is made.
+  def list_entries(claims:, user_id: nil, ids: nil, project_ids: nil, work_dates: nil)
+    return [] if ids&.empty? || project_ids&.empty?
 
     query = {
-      "user_id" => user_id&.to_s, "ids" => ids&.map(&:to_s),
+      "user_id" => user_id&.to_s, "ids" => ids&.map(&:to_s), "project_ids" => project_ids&.map(&:to_s),
       "from" => work_dates&.begin&.iso8601, "to" => work_dates&.end&.iso8601
     }.compact
     entries, cursor = [], nil
