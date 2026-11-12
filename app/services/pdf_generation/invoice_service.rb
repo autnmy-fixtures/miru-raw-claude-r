@@ -4,6 +4,18 @@ module PdfGeneration
   class InvoiceService < HtmlTemplateService
     attr_reader :invoice, :company_logo_url, :root_url
 
+    # The subtotal and total the PDF prints. Both are recomputed from the line
+    # items, not read from the stored amount: the subtotal with round(3), the
+    # total unrounded, so the printed total can differ from invoice.amount
+    # (docs/architecture/timekeeping-soa.md §2.4 M1). The template prints
+    # these values, and Timekeeping::FinancialSnapshot reads the same ones.
+    def self.printed_totals(invoice)
+      sub_total = invoice.invoice_line_items.total_cost_of_all_line_items
+      total = sub_total + (invoice.tax || 0) - (invoice.discount || 0)
+
+      { sub_total:, total: }.transform_values { |amount| FormatAmountService.new(invoice.currency, amount).process }
+    end
+
     def initialize(invoice, company_logo_url = nil, root_url = nil)
       @invoice = invoice
       @company_logo_url = company_logo_url
@@ -21,9 +33,6 @@ module PdfGeneration
     private
 
       def build_invoice_locals
-        subtotal = calculate_subtotal
-        total = calculate_total(subtotal)
-
         {
           invoice: invoice,
           **formatted_invoice_amounts,
@@ -31,8 +40,7 @@ module PdfGeneration
           client: invoice.client,
           invoice_line_items: build_line_items,
           invoice_taxes: build_invoice_taxes,
-          sub_total: format_currency(subtotal),
-          total: format_currency(total),
+          **self.class.printed_totals(invoice),
           signature_url: resolve_signature_url
         }
       end
@@ -41,16 +49,6 @@ module PdfGeneration
         invoice.invoice_line_items.map do |item|
           InvoiceLineItemPresenter.new(item).pdf_row(invoice.currency)
         end
-      end
-
-      def calculate_subtotal
-        invoice.invoice_line_items.total_cost_of_all_line_items
-      end
-
-      def calculate_total(subtotal = calculate_subtotal)
-        tax = invoice.tax || 0
-        discount = invoice.discount || 0
-        subtotal + tax - discount
       end
 
       def build_invoice_taxes
