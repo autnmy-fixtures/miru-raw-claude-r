@@ -1,7 +1,7 @@
 # timekeeping_reservations
 
-The shared library of `docs/architecture/timekeeping-soa.md` §11.1. Timekeeping, the write gateway and
-the prepared rollback target all read it; nobody keeps a second copy.
+The shared library of `docs/architecture/timekeeping-soa.md` §11.1. Timekeeping (`services/timekeeping`), the
+write gateway and the prepared rollback target all read it; nobody keeps a second copy.
 
 It holds the **reservation decision table** (§7.2) and the **contracts** (§5, §12.3).
 
@@ -102,4 +102,5 @@ includes every `packages/*/spec` by default.
   examples, and refuse what they should.
 - `fake_timekeeping_spec.rb` and `fake_relay_spec.rb`: the fakes hold to the contracts, over HTTP.
 
-Provider tests against these schemas run in Timekeeping's CI once the service exists (§12.3).
+Provider tests against these schemas run in Timekeeping's own suite (`services/timekeeping/spec`),
+through `services/timekeeping/spec/support/contracts.rb` (§12.3).

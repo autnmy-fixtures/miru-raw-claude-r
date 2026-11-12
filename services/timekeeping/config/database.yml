@@ -1,0 +1,26 @@
+# Timekeeping's own database (docs/architecture/timekeeping-soa.md §11.1). It
+# shares no database and no database credential with the existing application
+# (§11.2). DATABASE_URL, a credential read from this process's environment,
+# overrides these settings when it is set.
+default: &default
+  adapter: postgresql
+  encoding: unicode
+  host: <%= ENV.fetch("DB_HOST") { "localhost" } %>
+  pool: <%= ENV.fetch("RAILS_MAX_THREADS", 3) %>
+  user: <%= ENV.fetch("DB_USER") { "" } %>
+  password: <%= ENV.fetch("DB_PASS") { "" } %>
+  gssencmode: disable
+
+development:
+  <<: *default
+  database: timekeeping_development
+
+test:
+  <<: *default
+  database: timekeeping_test
+
+production:
+  adapter: postgresql
+  encoding: unicode
+  pool: <%= ENV.fetch("RAILS_MAX_THREADS", 3) %>
+  url: <%= ENV["DATABASE_URL"] %>
