@@ -22,9 +22,8 @@ module EntryCreate
 
     entry = Entry.new(attributes.merge("company_id" => claims.fetch("company_id"), "agent_id" => claims.dig("actor", "agent_id")))
     entry.project_facts = project
-    raise Problem::Raised, EntryCommand.invalid(entry) unless entry.save(context: Entry::CREATE)
+    raise Problem::Raised, EntryCommand.invalid(entry) unless EntryCommand.created?(entry, claims)
 
-    EntryChange.record!(entry, action: "create", audited_changes: entry.to_contract.slice(*Entry::AUDITED), claims:)
     [201, { "entry" => entry.to_contract }]
   end
 end

@@ -85,24 +85,29 @@
         "writer": { "enum": ["web", "mobile", "bulk", "cli", "mcp", "agent", "import", "agent_destroy", "invoice"] },
         "project": {
           "description": "The reference facts of the target project, or null when the command names none.",
-          "anyOf": [
-            {
-              "type": "object",
-              "properties": {
-                "id": { "$ref": "common.json#/$defs/id" },
-                "company_id": { "$ref": "common.json#/$defs/id" },
-                "kept": { "type": "boolean" },
-                "billable": { "type": "boolean" }
-              },
-              "required": ["id", "company_id", "kept", "billable"],
-              "additionalProperties": false
-            },
-            { "type": "null" }
-          ]
+          "anyOf": [{ "$ref": "#/$defs/project_facts" }, { "type": "null" }]
+        },
+        "projects": {
+          "description": "The reference facts of each project a command's rows name, once each, for a command whose rows name their own projects: W5's import batch (§3.4), whose `project` is null. Absent from every other command's token.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/project_facts" },
+          "uniqueItems": true
         },
         "request_id": { "type": "string", "minLength": 1 }
       },
       "required": ["sub", "aud", "iat", "exp", "company_id", "role", "timesheet_edit_days", "actor", "writer", "project", "request_id"],
+      "additionalProperties": false
+    },
+    "project_facts": {
+      "description": "What the gateway resolved of one project in its catalogue (§3.2): what TimesheetEntry reads through `project` today.",
+      "type": "object",
+      "properties": {
+        "id": { "$ref": "common.json#/$defs/id" },
+        "company_id": { "$ref": "common.json#/$defs/id" },
+        "kept": { "type": "boolean" },
+        "billable": { "type": "boolean" }
+      },
+      "required": ["id", "company_id", "kept", "billable"],
       "additionalProperties": false
     },
     "entry_attributes": {
@@ -184,7 +189,7 @@
       "additionalProperties": false
     },
     "import_batch_request": {
-      "description": "One Harvest batch: at most 500 rows, one transaction, idempotent by import_id:batch_no (§3.4). A row with bill_status billed is created unbilled and then marked billed, as the import does today (§1.3). A row the provider's rules reject fails alone, in failed_rows; the rest of the batch is kept.",
+      "description": "One Harvest batch: at most 500 rows, one transaction, idempotent by import_id:batch_no (§3.4). A row with bill_status billed is created unbilled and then marked billed, as the import does today (§1.3). A row the provider's rules reject fails alone, in failed_rows; the rest of the batch is kept. Each row's project is one of the token's `projects`, in the token's company; a batch naming any other is refused whole as forbidden.",
       "type": "object",
       "properties": {
         "rows": { "type": "array", "items": { "$ref": "#/$defs/new_entry" }, "minItems": 1, "maxItems": 500 }

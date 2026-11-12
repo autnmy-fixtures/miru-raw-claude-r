@@ -12,6 +12,7 @@ RSpec.describe TimekeepingContracts::FakeTimekeeping do
   let(:company_b) { 43 }
   let(:http) { Faraday.new(url: described_class::URL) { |connection| connection.response :json } }
   let(:row) { { "project_id" => 7, "user_id" => 3, "duration" => 90.7, "work_date" => "2026-11-02" } }
+  let(:project_facts) { { "id" => 7, "company_id" => company_a, "kept" => true, "billable" => true } }
 
   def request(operation_name, company_id: company_a, generation: 3, key: SecureRandom.uuid, body: nil, query: nil, token: nil, **params)
     operation = TimekeepingContracts.operation(operation_name)
@@ -58,7 +59,8 @@ RSpec.describe TimekeepingContracts::FakeTimekeeping do
       fake.seed_entry(company_id: company_a, **row.symbolize_keys, agent_id: 9)
 
       moved = request(:bulk_move, body: { "ids" => [first["id"]], "project_id" => 8 }).body
-      imported = request(:import_batch, import_id: "harvest-1", n: 1, body: { "rows" => [row, row] }).body
+      import_token = TimekeepingContracts.user_token(company_id: company_a, writer: "import", projects: [project_facts])
+      imported = request(:import_batch, token: import_token, import_id: "harvest-1", n: 1, body: { "rows" => [row, row] }).body
       detached = request(:detach_agent, agent_id: 9, body: {}).body
       discarded = request(:bulk_discard, body: { "ids" => [second["id"]] }).body
 
@@ -68,6 +70,18 @@ RSpec.describe TimekeepingContracts::FakeTimekeeping do
       expect(imported["failed_rows"]).to eq([])
       expect(detached["detached_ids"].size).to eq(1)
       expect(discarded["discarded_ids"]).to eq([second["id"]])
+    end
+
+    it "refuses an import batch whose rows name a project the token's projects do not, in its company, writing nothing" do
+      foreign = TimekeepingContracts.user_token(company_id: company_a, writer: "import", projects: [project_facts.merge("company_id" => company_b)])
+
+      [TimekeepingContracts.user_token(company_id: company_a, writer: "import"), foreign].each do |token|
+        refused = request(:import_batch, token:, import_id: "harvest-1", n: 1, body: { "rows" => [row] })
+
+        expect(refused.status).to eq(403)
+        expect(refused.body["type"]).to eq(TimekeepingContracts.problem_type("forbidden"))
+      end
+      expect(fake.entry(1)).to be_nil
     end
 
     it "lists by user and date" do

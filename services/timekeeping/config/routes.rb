@@ -13,6 +13,7 @@ Rails.application.routes.draw do
       patch "entries/:id", to: "entries#update", constraints: { id: /[1-9][0-9]*/ }
       post "entries/bulk_move", to: "entries#bulk_move"
       post "entries/bulk_discard", to: "entries#bulk_discard"
+      post "imports/:import_id/batches/:n", to: "import_batches#create", constraints: { n: /[1-9][0-9]*/ }
       resources :candidates, only: :index
     end
   end

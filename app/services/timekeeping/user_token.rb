@@ -25,13 +25,17 @@ module Timekeeping::UserToken
 
   # The system actor of §6.1, today's `Current.user == nil`: no user, no
   # role, and the company's own edit window.
-  def self.system_claims(company:, writer:, request_id:, project: nil)
+  #
+  # `projects` are the projects a command's rows name, for a command that
+  # names its project per row (W5's import batch); nil for every other
+  # command, whose token then carries no `projects` claim.
+  def self.system_claims(company:, writer:, request_id:, project: nil, projects: nil)
     {
       "sub" => "system", "company_id" => company.id, "role" => nil,
       "timesheet_edit_days" => company.timesheet_edit_days,
       "actor" => { "type" => "system", "agent_id" => nil },
       "writer" => writer, "project" => project_claim(project), "request_id" => request_id
-    }
+    }.merge(projects_claim(projects))
   end
 
   # The caller of one entry command (§6.1): the facts `authorize` and the
@@ -39,15 +43,15 @@ module Timekeeping::UserToken
   # is today's Current.user, so nil is the system actor, exactly where the
   # model's checks skip today. A user signed in through an agent key acts as
   # that agent (W4), whose id Timekeeping sets on the entry.
-  def self.caller_claims(user:, company:, writer:, request_id:, project: nil, agent: nil)
-    return system_claims(company:, writer:, request_id:, project:) if user.nil?
+  def self.caller_claims(user:, company:, writer:, request_id:, project: nil, projects: nil, agent: nil)
+    return system_claims(company:, writer:, request_id:, project:, projects:) if user.nil?
 
     {
       "sub" => "user:#{user.id}", "company_id" => company.id, "role" => user.primary_role(company),
       "timesheet_edit_days" => company.timesheet_edit_days,
       "actor" => { "type" => agent ? "agent" : "user", "agent_id" => agent&.id },
       "writer" => writer, "project" => project_claim(project), "request_id" => request_id
-    }
+    }.merge(projects_claim(projects))
   end
 
   # The reference facts of the command's project (§6.1), from the catalogue
@@ -59,4 +63,10 @@ module Timekeeping::UserToken
     }
   end
   private_class_method :project_claim
+
+  # The `projects` claim: each project's facts once, or no claim at all.
+  def self.projects_claim(projects)
+    { "projects" => projects&.uniq&.map { |project| project_claim(project) } }.compact
+  end
+  private_class_method :projects_claim
 end

@@ -14,10 +14,19 @@ module EntryCommand
     project = claims.fetch("project")
     return project if project.present? && project.fetch("id") == project_id && project.fetch("company_id") == claims.fetch("company_id")
 
-    raise Problem::Raised, Problem.new(
-      slug: "forbidden", status: 403,
-      detail: "project #{project_id} is not the token's project in company #{claims.fetch('company_id')}"
-    )
+    raise Problem::Raised, not_the_tokens([project_id], claims)
+  end
+
+  # The facts of each of `project_ids` by id, when every one is among the
+  # token's `projects` in the token's company (§6.1): a command whose rows
+  # name their own projects (W5). Forbidden otherwise, naming the rest.
+  def self.projects!(project_ids, claims)
+    company_id = claims.fetch("company_id")
+    projects = claims.fetch("projects", []).select { |project| project.fetch("company_id") == company_id }.index_by { |project| project.fetch("id") }
+    others = project_ids.uniq - projects.keys
+    raise Problem::Raised, not_the_tokens(others, claims) if others.any?
+
+    projects
   end
 
   # The kept entry `id` of the token's company, held FOR UPDATE until the
@@ -41,6 +50,17 @@ module EntryCommand
     )
   end
 
+  # Creates the new `entry` under TimesheetEntry's create rules (Entry::CREATE)
+  # with its create audit row and its outbox row (EntryChange). Answers false
+  # with the model's errors on the entry, and nothing written, when the rules
+  # reject it.
+  def self.created?(entry, claims)
+    return false unless entry.save(context: Entry::CREATE)
+
+    EntryChange.record!(entry, action: "create", audited_changes: entry.to_contract.slice(*Entry::AUDITED), claims:)
+    true
+  end
+
   # Saves the change made to the held `entry`, already checked, as its next
   # version with its audit and outbox rows (EntryChange), and answers
   # [200, entry_response]. A change that changes nothing writes nothing, as
@@ -53,4 +73,12 @@ module EntryCommand
     end
     [200, { "entry" => entry.to_contract }]
   end
+
+  def self.not_the_tokens(project_ids, claims)
+    Problem.new(
+      slug: "forbidden", status: 403,
+      detail: "project #{project_ids.join(', ')} is not named by the token in company #{claims.fetch('company_id')}"
+    )
+  end
+  private_class_method :not_the_tokens
 end

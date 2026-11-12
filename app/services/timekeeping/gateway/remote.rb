@@ -26,9 +26,11 @@ module Timekeeping::Gateway::Remote
   # What one command asks of the entry API. `forward` makes the call and
   # answers the command's result. The Idempotency-Key is shared by the
   # retries of this one command (§9.4); a command that is idempotent by its
-  # own name, such as an import batch, names it.
-  Request = Data.define(:company, :project, :agent, :writer, :forward, :idempotency_key) do
-    def initialize(idempotency_key: SecureRandom.uuid, **) = super
+  # own name, such as an import batch, names it. `projects` are the projects
+  # a command's rows name when it names its project per row, signed as the
+  # token's `projects` claim (§6.1); nil for every other command.
+  Request = Data.define(:company, :project, :agent, :writer, :forward, :idempotency_key, :projects) do
+    def initialize(idempotency_key: SecureRandom.uuid, projects: nil, **) = super
   end
 
   # The legacy owner sets the command's project and user after the writer's
@@ -39,8 +41,9 @@ module Timekeeping::Gateway::Remote
   # answers the ids it detached; the agent row is deleted only after that
   # answer, by the destroy that sent it (§3.4). W5 runs in the importing
   # company as the import writer, names no one project (each row names its
-  # own), and is idempotent by import_id:batch_no (§3.4); a billed row
-  # travels billed, and the owner applies today's create-then-mark (§1.3).
+  # own, and the token carries each one's facts), and is idempotent by
+  # import_id:batch_no (§3.4); a billed row travels billed, and the owner
+  # applies today's create-then-mark (§1.3).
   REQUESTS = {
     gateway::CreateEntry => ->(command) {
       entry = entry_attributes(command.attributes).compact
@@ -88,6 +91,7 @@ module Timekeeping::Gateway::Remote
       end
       Request.new(
         company: command.company, project: nil, agent: nil, writer: "import",
+        projects: command.rows.map { |row| row.fetch(:project) },
         idempotency_key: "#{command.import_id}:#{command.batch_no}",
         forward: ->(client, write) { import_result(client.import_batch(command.import_id, command.batch_no, rows, write:)) }
       )
@@ -130,7 +134,7 @@ module Timekeeping::Gateway::Remote
   def self.claims(request)
     Timekeeping::UserToken.caller_claims(
       user: Current.user, company: request.company, writer: request.writer,
-      project: request.project, agent: request.agent,
+      project: request.project, projects: request.projects, agent: request.agent,
       request_id: Rails.event.context[:request_id] || SecureRandom.uuid
     )
   end

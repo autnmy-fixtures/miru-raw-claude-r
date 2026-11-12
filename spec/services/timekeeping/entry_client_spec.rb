@@ -251,7 +251,10 @@ RSpec.describe Timekeeping::EntryClient do
     end
 
     it "writes an import batch named by import id and batch number, and answers what it created (W5)" do
-      answer = client.import_batch("41-run", 2, [new_entry, new_entry.merge("bill_status" => "billed")], write:)
+      projects = [{ "id" => 7, "company_id" => company.id, "kept" => true, "billable" => true }]
+      import = write.with(claims: claims.merge("writer" => "import", "projects" => projects))
+
+      answer = client.import_batch("41-run", 2, [new_entry, new_entry.merge("bill_status" => "billed")], write: import)
 
       expect(answer).to eq("created_ids" => [1, 2], "failed_rows" => [])
       expect(fake.calls.sole).to have_attributes(operation: :import_batch, params: { "import_id" => "41-run", "n" => "2" })
