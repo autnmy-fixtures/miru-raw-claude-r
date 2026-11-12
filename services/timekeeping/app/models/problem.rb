@@ -32,3 +32,14 @@ Problem = Data.define(:slug, :status, :detail, :retryable) do
     }.compact
   end
 end
+
+# A problem raised where it is decided, answered by the endpoint that called
+# it (Internal::BaseController). Nothing was written.
+class Problem::Raised < StandardError
+  attr_reader :problem
+
+  def initialize(problem)
+    @problem = problem
+    super(problem.detail)
+  end
+end
