@@ -14,6 +14,7 @@ Rails.application.routes.draw do
       post "entries/bulk_move", to: "entries#bulk_move"
       post "entries/bulk_discard", to: "entries#bulk_discard"
       post "imports/:import_id/batches/:n", to: "import_batches#create", constraints: { n: /[1-9][0-9]*/ }
+      post "agents/:agent_id/detach", to: "agent_detaches#create", constraints: { agent_id: /[1-9][0-9]*/ }
       resources :candidates, only: :index
     end
   end

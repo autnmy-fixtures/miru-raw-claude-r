@@ -250,7 +250,11 @@ module TimekeepingContracts
 
       def detach_agent(params, _input, claims)
         agent_id = Integer(params.fetch("agent_id"))
-        detached = scoped(claims).filter_map { |entry| change(entry, "agent_id" => nil) if entry["agent_id"] == agent_id }
+        # Today's nullify is update_all, which keeps updated_at, and so does
+        # the provider: only agent_id and the version change.
+        detached = scoped(claims).filter_map do |entry|
+          store(entry.merge("agent_id" => nil, "version" => entry.fetch("version") + 1)) if entry["agent_id"] == agent_id
+        end
         [200, { "detached_ids" => detached.pluck("id") }]
       end
 
