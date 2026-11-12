@@ -1,13 +1,21 @@
 # frozen_string_literal: true
 
-# The entry API's reads (docs/architecture/timekeeping-soa.md §5.2, §3.3 rule
-# 1): the list and show a user makes right after writing, which read the owner
-# of the entries, never the projection. Both answer only the kept entries of
-# the token's company (§6.3). Who may read was decided by the caller, before
-# the call (§6.2), so neither checks a role. A read writes nothing, so it
-# needs no admission (§10.1).
+# The entry API (docs/architecture/timekeeping-soa.md §5.2).
+#
+# Its reads (§3.3 rule 1): the list and show a user makes right after
+# writing, which read the owner of the entries, never the projection. Both
+# answer only the kept entries of the token's company (§6.3). Who may read was
+# decided by the caller, before the call (§6.2), so neither checks a role. A
+# read writes nothing, so it needs no admission (§10.1).
+#
+# Its writes: create (EntryCreate), one mutating call each (EntryWrite).
 class Internal::V1::EntriesController < Internal::BaseController
   CONTRACT = :entry_api
+
+  def create
+    input = contract_input!("#/$defs/entry_create_request", request.request_parameters)
+    write!(input) { EntryCreate.call(input.fetch("entry"), claims) }
+  end
 
   def index
     query = contract_input!("#/$defs/list_query", request.query_parameters)

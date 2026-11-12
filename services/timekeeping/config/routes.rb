@@ -8,7 +8,7 @@ Rails.application.routes.draw do
   # contract operation as it lands. Ids are the contract's id_param.
   namespace :internal do
     namespace :v1 do
-      resources :entries, only: %i[index show], constraints: { id: /[1-9][0-9]*/ }
+      resources :entries, only: %i[index show create], constraints: { id: /[1-9][0-9]*/ }
       resources :candidates, only: :index
     end
   end

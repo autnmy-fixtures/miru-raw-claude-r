@@ -7,8 +7,8 @@ their billing reservations, and serve them only on its internal API (§5).
 It boots, connects to its own database, reads the shared library in
 `packages/timekeeping_reservations`, answers every error as a contract problem, and holds its copy
 of the ownership record (§10.1). It holds entries and their reservations and serves the entry API's
-reads: list, show and invoice candidate selection (§5.2). Its writes, the reservation API and the
-relay land lane by lane (§14).
+reads: list, show and invoice candidate selection (§5.2), and its first write, entry create. Its
+other writes, the reservation API and the relay land lane by lane (§14).
 
 ## What is here
 
@@ -25,9 +25,13 @@ relay land lane by lane (§14).
 | `db/migrate/*_create_reservations.rb`, `app/models/reservation.rb` | Each entry's reservations (§7.1), with the same constraints and indexes as the prepared application's `timekeeping_reservations`, and a foreign key to the entry. Nothing writes them yet; the reservation API will. |
 | `app/models/user_token.rb` | Verifies the user token (§6.1): HS256 with the shared key, unexpired, claims valid against `entry_api.json#/$defs/token_claims`. |
 | `app/models/contracts.rb` | Checks a payload against the shared contracts. Endpoints use it for what they accept; the specs use it for what they answer. |
-| `app/controllers/internal/base_controller.rb` | Every internal endpoint: a valid token or `401 unauthenticated`, the contract's required headers or `400 invalid-request`, input checked against the contract, and any `Problem::Raised` answered as its problem. |
+| `app/controllers/internal/base_controller.rb` | Every internal endpoint: a valid token or `401 unauthenticated`, the contract's required headers, its mutating ones too for every call that is not a GET, or `400 invalid-request`, input checked against the contract, and any `Problem::Raised` answered as its problem. |
 | `GET /internal/v1/entries`, `GET /internal/v1/entries/{id}` | The entry API's reads (§5.2, §3.3 rule 1): the kept entries of the token's company only (§6.3). The list takes the contract's filters and pages by id (`app/services/entry_list.rb`, 500 per page, the cursor is the last id answered). Another company's entry, a discarded one or a missing one is `404 not-found`. A read needs no admission (§10.1). |
 | `GET /internal/v1/candidates` | Invoice candidate selection (§5.2, §3.3 rule 1), `app/services/candidate_list.rb`: the kept, unbilled entries of the token's company in the query's `project_ids`, narrowed by `user_ids`, `exclude_ids`, `from`/`to` and `search_term`, leaving out every entry the shared rule finds not selectable (an active or provisional reservation; a retained one does not count, L3, L4). `search_term` is the existing application's `TimesheetEntry.pg_search`, written out as the SQL pg_search builds: english tsearch over `note`, each word a prefix, every word required, ordered by rank and then id. `client_id` narrows nothing: the gateway resolves the client's kept projects into `project_ids`. |
+| `POST /internal/v1/entries` | Entry create (§5.2) for W1, W3 and W4, `app/services/entry_create.rb`: the entry in the token's company, for the project the token names (any other is `403 forbidden`), with the acting agent from the token. TimesheetEntry's create rules run in `Entry`, in its order and only in the writer's context `Entry::CREATE`: bill status from the project, A10's pending review and source rewrite, metadata normalized, and a billed entry, an unbilled one on a non-billable project, a duration out of range or a proof URL too long refused as `422 validation-failed` with the model's errors by attribute, worded as `config/locales/errors.en.yml` there. Two of today's checks stay with the gateway, which holds the directory: the agent's company and user, and that the user and project exist. |
+| `app/services/entry_write.rb` | One mutating call (§3.4, §9.4): in one transaction, admission under `X-Ownership-Generation`, then the stored answer for the call's `Idempotency-Key` or the change and its receipt. A refusal rolls everything back and stores no receipt. Calls carrying one key in one tenant are serialized by an advisory lock until the first commits, so a retry that overtakes its first attempt replays it. |
+| `app/services/entry_change.rb` | What every entry change writes beside the entry, in its transaction: an `entry_audits` row (the columns `audited` records on TimesheetEntry today, the actor, agent, writer and request id) and an `outbox_snapshots` row, the contract's entry snapshot, whose id is the outbox position (§5.4, §10.5 step 3). The relay that delivers them is not here yet. |
+| `db/migrate/*_create_idempotency_receipts.rb`, `app/models/idempotency_receipt.rb` | `(key, request hash, response)` per tenant (§9.4): the same key and request replay the answer, the same key and another request is `409 idempotency-conflict`, another company's same key is its own call. |
 | `GET /up` | Liveness, 200 once booted. |
 
 ## Configuration (§11.2)

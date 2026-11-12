@@ -1,0 +1,7 @@
+# The model errors Timekeeping answers in validation-failed (§5.1), as the
+# existing application's config/locales/errors.en.yml words them today.
+# spec/models/entry_create_rules_spec.rb checks they still match.
+en:
+  errors:
+    create_billed_entry: You can't create a billed timesheet entry
+    validate_billable_project: You can't create an unbilled entry for non-billable projects
