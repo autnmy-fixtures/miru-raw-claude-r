@@ -1,0 +1,20 @@
+# frozen_string_literal: true
+
+ENV["RAILS_ENV"] ||= "test"
+require_relative "../config/environment"
+abort("The Rails environment is running in production mode!") if Rails.env.production?
+
+require "rspec/rails"
+require "json_schemer"
+
+ActiveRecord::Migration.maintain_test_schema!
+
+Dir[Rails.root.join("spec/support/**/*.rb")].each { |file| require file }
+
+RSpec.configure do |config|
+  config.use_transactional_fixtures = true
+  config.infer_spec_type_from_file_location!
+  config.disable_monkey_patching!
+  config.order = :random
+  Kernel.srand config.seed
+end
