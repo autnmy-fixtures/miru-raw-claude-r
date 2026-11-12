@@ -10,8 +10,12 @@
 #           the operation intent all admit through Ownership.admit!), so the
 #           exclusive lock waits for the writes already admitted, and every
 #           write after it is refused as moving or stale.
-#   freeze  step 3, closed -> frozen, once settle has resolved every
-#           registered invoice operation.
+#   freeze  step 3, closed -> frozen, only once settle
+#           (Timekeeping::HandoffSettle) has resolved every registered invoice
+#           operation and its owner has confirmed the outcome. While any
+#           intent is pending or undelivered, freeze is refused as Unsettled
+#           and nothing changes: no pending billing operation crosses the
+#           handoff.
 #   flip    step 7, frozen -> open under the incoming owner, once the
 #           checkpoint is loaded and reconciled.
 #   abort   closed or frozen -> open under the outgoing owner. The raised
@@ -29,8 +33,8 @@
 # undone: ActiveRecord::LockWaitTimeout, and the record is unchanged.
 #
 # This is the local record only. The copy in Timekeeping's database, and the
-# settle, drain, checkpoint and reconcile steps between, belong to the
-# handoff tool that calls these steps in order.
+# drain, checkpoint and reconcile steps between, belong to the handoff tool
+# that calls these steps in order.
 module Timekeeping::HandoffFence
   DRAIN_TIMEOUT = 60.seconds
 
@@ -38,18 +42,26 @@ module Timekeeping::HandoffFence
   # handoff to be. Nothing changed.
   class OutOfStep < StandardError; end
 
+  # Freeze was asked while the invoice operation ledger still holds an intent
+  # that is pending or whose outcome its owner has not confirmed (§10.5 step
+  # 2). Nothing changed; settle again, or abort.
+  class Unsettled < StandardError; end
+
   # Every owner has exactly one incoming owner (§3.1, §10.2): the first
   # cutover leaves legacy for good, rollback goes to the prepared
   # application, and re-cutover goes back to Timekeeping.
   SUCCESSORS = { "legacy" => "timekeeping", "timekeeping" => "monolith", "monolith" => "timekeeping" }.freeze
 
-  # One row per step: the states it starts from, the state it leaves, and
-  # what else it changes on the record it locked.
-  Step = Data.define(:from, :to, :change)
+  # One row per step: the states it starts from, the state it leaves, what
+  # else it changes on the record it locked, and what must already hold
+  # before it may run (nil when it may, else why not).
+  Step = Data.define(:from, :to, :change, :blocker) do
+    def initialize(blocker: -> { }, **rest) = super
+  end
 
   STEPS = {
     close: Step.new(from: %w[open], to: "closed", change: ->(ownership) { { generation: ownership.generation + 1 } }),
-    freeze: Step.new(from: %w[closed], to: "frozen", change: ->(_) { {} }),
+    freeze: Step.new(from: %w[closed], to: "frozen", change: ->(_) { {} }, blocker: -> { Timekeeping::InvoiceOperation.unsettled_summary }),
     flip: Step.new(from: %w[frozen], to: "open", change: ->(ownership) { { owner: SUCCESSORS.fetch(ownership.owner) } }),
     abort: Step.new(from: %w[closed frozen], to: "open", change: ->(_) { {} })
   }.freeze
@@ -62,17 +74,26 @@ module Timekeeping::HandoffFence
     Timekeeping::Ownership.transaction(requires_new: true) do
       Timekeeping::Ownership.connection.execute("SET LOCAL lock_timeout = '#{lock_timeout.in_milliseconds.to_i}ms'")
       ownership = Timekeeping::Ownership.lock_exclusive!
-      ensure_in_step!(name, step, ownership, generation)
+      ensure_in_step!(name, step.from, ownership, generation)
+      ensure_ready!(name, step)
       ownership.tap { |locked| locked.update!(step.change.call(locked).merge(state: step.to)) }
     end
   end
 
-  def self.ensure_in_step!(name, step, ownership, generation)
-    return if ownership.generation == generation && step.from.include?(ownership.state)
+  # Refuses with OutOfStep unless the record is at `generation` in one of the
+  # `from` states. Settle, which changes no record, checks its place with it
+  # too.
+  def self.ensure_in_step!(name, from, ownership, generation)
+    return if ownership.generation == generation && from.include?(ownership.state)
 
     raise OutOfStep,
-      "Timekeeping handoff: #{name} expects generation #{generation} in state #{step.from.join(' or ')}, " \
+      "Timekeeping handoff: #{name} expects generation #{generation} in state #{from.join(' or ')}, " \
       "found #{ownership.summary}; nothing changed"
   end
-  private_class_method :ensure_in_step!
+
+  def self.ensure_ready!(name, step)
+    blocker = step.blocker.call
+    raise Unsettled, "Timekeeping handoff: #{name} refused, #{blocker}; nothing changed" if blocker
+  end
+  private_class_method :ensure_ready!
 end
