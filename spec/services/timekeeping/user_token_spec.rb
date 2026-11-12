@@ -49,6 +49,22 @@ RSpec.describe Timekeeping::UserToken do
       expect(claims).to include("sub" => "user:#{user.id}", "actor" => { "type" => "agent", "agent_id" => agent.id })
     end
 
+    it "carries no projects claim unless the command names its projects per row" do
+      expect(described_class.caller_claims(user:, company:, writer: "web", project:, request_id: "req-5")).not_to have_key("projects")
+    end
+
+    it "carries each named project's reference facts once, as the projects claim (W5)" do
+      other = create(:project, client:, billable: true)
+
+      claims = described_class.caller_claims(user: nil, company:, writer: "import", projects: [project, other, project], request_id: "req-6")
+
+      expect(claims).to include("project" => nil, "projects" => [
+        { "id" => project.id, "company_id" => company.id, "kept" => true, "billable" => false },
+        { "id" => other.id, "company_id" => company.id, "kept" => true, "billable" => true }
+      ])
+      expect { described_class.sign(claims, key: "key") }.not_to raise_error
+    end
+
     it "is the system actor without a user, as Current.user == nil is today" do
       claims = described_class.caller_claims(user: nil, company:, writer: "web", project:, request_id: "req-4")
 

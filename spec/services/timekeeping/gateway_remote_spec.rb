@@ -353,6 +353,17 @@ RSpec.describe Timekeeping::Gateway::Remote, type: :model do
       )
     end
 
+    it "signs the facts of each project the rows name, once each, as the token's projects (§6.1)" do
+      other = create(:project, client: tenant.project.client, billable: false)
+
+      forwarded { batch(row, row(project: other, bill_status: "non_billable"), row) }
+
+      expect(fake.calls.sole.claims.fetch("projects")).to eq([
+        { "id" => tenant.project.id, "company_id" => tenant.company.id, "kept" => true, "billable" => tenant.project.billable },
+        { "id" => other.id, "company_id" => tenant.company.id, "kept" => true, "billable" => false }
+      ])
+    end
+
     it "is idempotent by import_id:batch_no, so a retry after a lost response replays the batch (§3.4, §9.4)" do
       fake.lose_next_response(:import_batch)
 

@@ -237,7 +237,13 @@ module TimekeepingContracts
         [200, { "discarded_ids" => discarded.pluck("id") }]
       end
 
+      # Each row's project is one of the token's `projects` in its company, or
+      # the whole batch is forbidden, as the provider refuses it.
       def import_batch(_params, input, claims)
+        named = claims.fetch("projects", []).filter_map { |project| project.fetch("id") if project.fetch("company_id") == claims.fetch("company_id") }
+        others = input.fetch("rows").pluck("project_id").uniq - named
+        return problem(403, "forbidden", detail: "project #{others.join(', ')} is not named by the token") if others.any?
+
         created = input.fetch("rows").map { |row| store(new_entry(row, claims)) }
         [200, { "created_ids" => created.pluck("id"), "failed_rows" => [] }]
       end
