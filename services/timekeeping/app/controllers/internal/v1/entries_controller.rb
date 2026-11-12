@@ -9,7 +9,8 @@
 # read writes nothing, so it needs no admission (§10.1).
 #
 # Its writes: create (EntryCreate), update (EntryUpdate) and discard
-# (EntryDiscard), one mutating call each (EntryWrite).
+# (EntryDiscard), and W2's bulk move and bulk discard (EntryBulk), one
+# mutating call each (EntryWrite).
 class Internal::V1::EntriesController < Internal::BaseController
   CONTRACT = :entry_api
 
@@ -26,6 +27,16 @@ class Internal::V1::EntriesController < Internal::BaseController
   def destroy
     input = contract_input!("#/$defs/empty_request", request.request_parameters)
     write!(input) { EntryDiscard.call(params[:id], claims) }
+  end
+
+  def bulk_move
+    input = contract_input!("#/$defs/bulk_move_request", request.request_parameters)
+    write!(input) { EntryBulk.move(input.fetch("ids"), input.fetch("project_id"), claims) }
+  end
+
+  def bulk_discard
+    input = contract_input!("#/$defs/bulk_discard_request", request.request_parameters)
+    write!(input) { EntryBulk.discard(input.fetch("ids"), claims) }
   end
 
   def index
