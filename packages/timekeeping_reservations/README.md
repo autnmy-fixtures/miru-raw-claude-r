@@ -31,6 +31,11 @@ The prepared application's provider is `Timekeeping::LocalReservations`
 `timekeeping_reservations` and keeps the protocol in `timekeeping_reservation_operations`. The existing
 application loads this file from `config/initializers/timekeeping.rb`.
 
+Timekeeping's provider is `ReservationProtocol` (`services/timekeeping/app/services/reservation_protocol.rb`),
+behind the reservation API's three endpoints. It keeps the same protocol on tables with the same shape,
+`reservations` and `reservation_operations`, so a checkpoint carries reservations and receipts either way
+unchanged (§10.5 step 4).
+
 Receipts, generations and the one-unresolved-operation rule belong to the protocol (§5.3), so they are
 not in the table. Prepare, commit and abort are idempotent on their own anyway: applying one twice
 gives the same reservations.

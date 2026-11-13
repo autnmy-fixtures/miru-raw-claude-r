@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_11_11_150200) do
+ActiveRecord::Schema[8.1].define(version: 2026_11_12_120000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -89,6 +89,24 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_11_150200) do
     t.check_constraint "id = 1", name: "ownerships_singleton"
     t.check_constraint "owner::text = ANY (ARRAY['legacy'::character varying, 'timekeeping'::character varying, 'monolith'::character varying]::text[])", name: "ownerships_owner"
     t.check_constraint "state::text = ANY (ARRAY['open'::character varying, 'closed'::character varying, 'frozen'::character varying]::text[])", name: "ownerships_state"
+  end
+
+  create_table "reservation_operations", force: :cascade do |t|
+    t.bigint "company_id"
+    t.datetime "created_at", null: false
+    t.bigint "entry_ids", default: [], null: false, array: true
+    t.bigint "invoice_id", null: false
+    t.string "invoice_state"
+    t.string "kind"
+    t.uuid "operation_id", null: false
+    t.string "state", null: false
+    t.datetime "updated_at", null: false
+    t.index ["invoice_id", "operation_id"], name: "index_reservation_operations_identity", unique: true
+    t.index ["invoice_id"], name: "index_reservation_operations_one_unresolved", unique: true, where: "((state)::text = 'prepared'::text)"
+    t.check_constraint "invoice_state::text = ANY (ARRAY['draft'::character varying, 'non_draft'::character varying]::text[])", name: "reservation_operations_invoice_state"
+    t.check_constraint "kind::text = ANY (ARRAY['save'::character varying, 'discard'::character varying, 'destroy'::character varying]::text[])", name: "reservation_operations_kind"
+    t.check_constraint "state::text = 'aborted'::text OR company_id IS NOT NULL AND kind IS NOT NULL AND invoice_state IS NOT NULL", name: "reservation_operations_prepared_described"
+    t.check_constraint "state::text = ANY (ARRAY['prepared'::character varying, 'committed'::character varying, 'aborted'::character varying]::text[])", name: "reservation_operations_state"
   end
 
   create_table "reservations", force: :cascade do |t|
