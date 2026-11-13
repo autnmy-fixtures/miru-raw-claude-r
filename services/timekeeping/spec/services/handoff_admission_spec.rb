@@ -89,4 +89,34 @@ RSpec.describe "Timekeeping admission across connections" do
     expect(close.value).to be(true), "the call never waited on the close's lock"
     expect { call.value }.to raise_error(Ownership::Refused) { |refused| expect(refused.problem.slug).to eq("stale-generation") }
   end
+
+  # §10.5 step 2: a commit or abort admitted under the old generation by the
+  # settle step's exception is drained by freeze as close drains a call, so
+  # nothing settle applies can commit after the checkpoint's freeze.
+  it "makes freeze wait for a settle call admitted under the old generation, then refuses the next as stale" do
+    HandoffFence.call(:close, generation: 1)
+    admitted = Queue.new
+    finish = Queue.new
+    call = on_own_connection do
+      Ownership.transaction do
+        Ownership.admit!(1, settle: true)
+        admitted << true
+        finish.pop(timeout: wait_seconds)
+      end
+    end
+
+    begin
+      take(admitted)
+      freeze_while_admitted = on_own_connection { HandoffFence.call(:freeze, generation: 2, lock_timeout: 0.3.seconds) }
+      expect { freeze_while_admitted.value }.to raise_error(ActiveRecord::LockWaitTimeout)
+      expect(Ownership.current.summary).to eq("generation 2, owner timekeeping, state closed")
+    ensure
+      finish << true
+      call.join
+    end
+
+    on_own_connection { HandoffFence.call(:freeze, generation: 2) }.join
+    late = on_own_connection { Ownership.transaction { Ownership.admit!(1, settle: true) } }
+    expect { late.value }.to raise_error(Ownership::Refused) { |refused| expect(refused.problem.slug).to eq("stale-generation") }
+  end
 end

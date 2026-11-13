@@ -62,6 +62,40 @@ RSpec.describe Ownership do
     end
   end
 
+  describe "the settle step's exception (§10.5 step 2)" do
+    def settle_problem_of(generation)
+      described_class.admit!(generation, settle: true)
+      nil
+    rescue described_class::Refused => refused
+      refused.problem
+    end
+
+    it "admits an older generation while Timekeeping is the outgoing owner of a closed handoff, only when asked to" do
+      record!(generation: 3, owner: "timekeeping", state: "closed")
+
+      expect(settle_problem_of(2)).to be_nil
+      expect(settle_problem_of(1)).to be_nil
+      expect(described_class.current).to be_settling(2)
+      expect(problem_of(2)).to have_attributes(slug: "stale-generation")
+    end
+
+    {
+      "admission is open" => [{ generation: 3, owner: "timekeeping", state: "open" }, 2, "stale-generation"],
+      "the handoff is frozen" => [{ generation: 3, owner: "timekeeping", state: "frozen" }, 2, "stale-generation"],
+      "Timekeeping is the incoming owner of a rollback's re-cutover" => [{ generation: 3, owner: "monolith", state: "closed" }, 2, "stale-generation"],
+      "Timekeeping is the incoming owner of the first cutover" => [{ generation: 1, owner: "legacy", state: "closed" }, 0, "stale-generation"],
+      "the call carries the raised generation" => [{ generation: 3, owner: "timekeeping", state: "closed" }, 3, "ownership-moving"],
+      "the call carries a newer generation" => [{ generation: 3, owner: "timekeeping", state: "closed" }, 4, "stale-generation"]
+    }.each do |name, (attributes, carried, slug)|
+      it "does not cover a call when #{name}" do
+        record!(**attributes)
+
+        expect(described_class.current).not_to be_settling(carried)
+        expect(settle_problem_of(carried)).to have_attributes(slug:)
+      end
+    end
+  end
+
   it "answers each refusal as a problem the contract accepts, naming what it carried and what this copy holds" do
     record!(generation: 2, owner: "timekeeping", state: "closed")
 

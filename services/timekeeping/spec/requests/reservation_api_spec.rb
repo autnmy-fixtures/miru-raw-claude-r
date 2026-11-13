@@ -472,6 +472,147 @@ RSpec.describe "Reservation API" do
     end
   end
 
+  # "During this step only, the outgoing owner still applies a commit or
+  # abort that carries the old generation, and only for an operation it
+  # registered." The handoff closes Timekeeping's copy from `generation` to
+  # the next; the existing application's settle then delivers each outcome
+  # under the generation its intent was admitted under, the old one.
+  describe "settle (§10.5 step 2)" do
+    def close_handoff = HandoffFence.call(:close, generation:)
+    def raised = { body: { "generation" => generation + 1 }, carried: generation + 1 }
+
+    it "commits an operation it registered under the old generation, with its versions and snapshots" do
+      entry = entry!(company_id: fork_and_leaf)
+      prepare([entry.id])
+      close_handoff
+
+      commit
+
+      expect_answer(:ok, "#/$defs/terminal_receipt")
+      expect(body).to eq("status" => "committed")
+      expect(holdings(entry)).to eq([[invoice_id, "committed", "active", true]])
+      expect(ReservationOperation.sole.state).to eq("committed")
+      expect(entry.reload.version).to eq(3)
+      expect(OutboxSnapshot.order(:id).last).to have_attributes(entry_id: entry.id, version: 3)
+      expect(OutboxSnapshot.order(:id).last.snapshot.dig("data", "locked")).to be(true)
+    end
+
+    it "aborts an operation it registered under the old generation, dropping only its provisional reservations" do
+      added, kept = entry!(company_id: fork_and_leaf), entry!(company_id: fork_and_leaf)
+      reservation!(kept, invoice_id:)
+      prepare([added.id, kept.id])
+      close_handoff
+
+      abort_operation
+
+      expect(body).to eq("status" => "aborted")
+      expect(holdings(added)).to be_empty
+      expect(holdings(kept)).to eq([[invoice_id, "committed", "active", true]])
+    end
+
+    it "answers a terminal operation's receipt again under the old generation, with no second change" do
+      entry = entry!(company_id: fork_and_leaf)
+      prepare([entry.id])
+      commit
+      close_handoff
+
+      commit
+      expect(body).to eq("status" => "committed")
+      abort_operation
+      expect(body).to eq("status" => "committed")
+
+      expect(entry.reload.version).to eq(3)
+    end
+
+    it "answers the abort of a prepare that never arrived with its no-op receipt, so settle can finish (§9.3)" do
+      entry = entry!(company_id: fork_and_leaf)
+      close_handoff
+
+      abort_operation
+
+      expect_answer(:ok, "#/$defs/terminal_receipt")
+      expect(body).to eq("status" => "aborted")
+      expect(ReservationOperation.sole).to have_attributes(state: "aborted", company_id: fork_and_leaf, kind: nil)
+      expect([entry.reload.version, OutboxSnapshot.count, Reservation.count]).to eq([1, 0, 0])
+    end
+
+    it "refuses the commit of an operation it never registered as stale-generation, with nothing written" do
+      close_handoff
+
+      commit
+
+      expect_problem(409, "stale-generation")
+      expect(ReservationOperation.count).to eq(0)
+    end
+
+    it "still refuses a prepare under the old generation as stale, and under the raised one as moving" do
+      entry = entry!(company_id: fork_and_leaf)
+      close_handoff
+
+      prepare([entry.id])
+      expect_problem(409, "stale-generation")
+      post path("prepare"), params: JSON.generate(prepare_body([entry.id]).merge("generation" => generation + 1)),
+        headers: mutating_headers(carried: generation + 1)
+      expect_problem(503, "ownership-moving")
+
+      expect_nothing_written(entry)
+    end
+
+    it "refuses a commit carrying the raised generation as moving: no operation was admitted under it" do
+      entry = entry!(company_id: fork_and_leaf)
+      prepare([entry.id])
+      close_handoff
+
+      commit(**raised)
+
+      expect_problem(503, "ownership-moving")
+      expect(ReservationOperation.sole.state).to eq("prepared")
+    end
+
+    it "keeps tenant isolation: another company's old-generation call naming the invoice is not-found" do
+      entry = entry!(company_id: fork_and_leaf)
+      prepare([entry.id])
+      close_handoff
+
+      commit(company_id: copper_kettle)
+      expect_problem(404, "not-found")
+      abort_operation(company_id: copper_kettle)
+      expect_problem(404, "not-found")
+
+      expect(holdings(entry)).to eq([[invoice_id, "provisional", "active", true]])
+    end
+
+    {
+      "freeze" => -> { HandoffFence.call(:freeze, generation: generation + 1) },
+      "an aborted handoff" => -> { HandoffFence.call(:abort, generation: generation + 1) }
+    }.each do |after, step|
+      it "ends with #{after}: an old-generation commit or abort is stale again, with nothing written" do
+        entry = entry!(company_id: fork_and_leaf)
+        prepare([entry.id])
+        close_handoff
+        instance_exec(&step)
+
+        commit
+        expect_problem(409, "stale-generation")
+        abort_operation
+        expect_problem(409, "stale-generation")
+
+        expect(holdings(entry)).to eq([[invoice_id, "provisional", "active", true]])
+        expect(ReservationOperation.sole.state).to eq("prepared")
+      end
+    end
+
+    it "does not apply while Timekeeping is the incoming owner: it registered nothing to settle" do
+      Ownership.current.update!(owner: "monolith")
+      close_handoff
+
+      abort_operation
+
+      expect_problem(409, "stale-generation")
+      expect(ReservationOperation.count).to eq(0)
+    end
+  end
+
   describe "contract refusals" do
     it "refuses an Idempotency-Key that is not the operation_id" do
       prepare([], headers: { key: SecureRandom.uuid })
