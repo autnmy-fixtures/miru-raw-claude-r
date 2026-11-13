@@ -1,0 +1,28 @@
+# Timekeeping's jobs (docs/architecture/timekeeping-soa.md §11.1): one
+# dedicated worker for the `timekeeping_relay` queue and nothing else, on this
+# service's own Solid Queue tables. The dispatcher enqueues the relay every
+# second; one thread keeps the runs in order, and two runs at once would only
+# deliver different rows (OutboxRelay). Start it with
+# `bin/rails solid_queue:start`; stop it to pause the relay.
+default: &default
+  dispatchers:
+    - polling_interval: 1
+      batch_size: 500
+      recurring_tasks:
+        outbox_relay:
+          class: OutboxRelayJob
+          schedule: "* * * * * *"
+  workers:
+    - queues: timekeeping_relay
+      threads: 1
+      processes: 1
+      polling_interval: 0.1
+
+development:
+  <<: *default
+
+test:
+  <<: *default
+
+production:
+  <<: *default
