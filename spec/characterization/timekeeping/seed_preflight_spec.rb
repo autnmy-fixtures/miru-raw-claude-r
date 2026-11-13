@@ -45,13 +45,15 @@ RSpec.describe "Timekeeping characterization: pre-flight on the seeded businesse
   # §10.4: "the cutover checks every list again on the live data". With the
   # recorded disposition, the first cutover's checkpoint (§10.5 step 4) is
   # taken with nothing listed, and carries every entry and one reservation for
-  # each entry on a kept invoice, locked exactly as today.
-  it "takes the first cutover's checkpoint with the recorded disposition" do
+  # each entry on a kept invoice, locked exactly as today. This application's
+  # side of the reconcile (§10.5 step 6) then passes on it.
+  it "takes the first cutover's checkpoint with the recorded disposition, and reconciles it" do
     seed_both_businesses!
     recorded = disposition.fetch("unlocked_links").fetch("invoices").flat_map do |company, numbers|
       Invoice.joins(:company).where(companies: { name: company }, invoice_number: numbers).ids
     end
     on_kept_invoices = Timekeeping::Preflight.process.entries.select { |entry| entry.mapping == :active }
+    money_before = Timekeeping::FinancialSnapshot.process
     set_timekeeping_ownership!(generation: 1, owner: "legacy", state: "frozen")
 
     checkpoint = Timekeeping::LegacyCheckpoint.take(generation: 1, unlocked_link_invoice_ids: recorded)
@@ -64,5 +66,20 @@ RSpec.describe "Timekeeping characterization: pre-flight on the seeded businesse
       expect(checkpoint.entries.to_h { |entry| [entry.fetch("id"), entry.fetch("locked")] })
         .to eq(TimesheetEntry.pluck(:id, :locked).to_h)
     end
+
+    # §10.5 step 6 on this side: once the relay has delivered the snapshot the
+    # load writes for every entry, this application's tables reconcile with
+    # the checkpoint exactly, and no billing value has moved.
+    relay = TimekeepingContracts::FakeRelay.new
+    snapshots = checkpoint.entries.map do |entry|
+      relay.snapshot(
+        entry_id: entry.fetch("id"), version: entry.fetch("version"), company_id: entry.fetch("company_id"),
+        **entry.except("id", "version", "company_id").symbolize_keys
+      )
+    end
+    Timekeeping::ProjectionConsumer.process(snapshots)
+
+    expect(Timekeeping::CheckpointReconcile.call(generation: 1, entries: checkpoint.entries, reservations: checkpoint.reservations, financial_snapshot: money_before))
+      .to eq(Timekeeping::CheckpointReconcile::Reconciled.new(entries: TimesheetEntry.count, reservations: on_kept_invoices.size))
   end
 end

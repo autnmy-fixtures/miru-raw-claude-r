@@ -25,7 +25,6 @@
 # timestamps keep their microseconds, and no model callback runs.
 class Timekeeping::LegacyCheckpoint
   OutOfStep = TimekeepingReservations::Handoff::OutOfStep
-  STATES = %w[frozen].freeze
 
   # The pre-flight listed an item with no recorded disposition (§10.4). Nothing
   # was taken. `lists` names each list and the entry ids on it.
@@ -54,39 +53,16 @@ class Timekeeping::LegacyCheckpoint
     none: ->(_) { nil }
   }.freeze
 
-  # The entry's fields as common.json#/$defs/entry_fields names them, apart
-  # from the derived `locked`, read from the contract itself.
-  FIELDS = (Timekeeping::Contracts.document(:common).dig("$defs", "entry_fields", "properties").keys - ["locked"]).freeze
-
-  # How each field that is not already JSON is carried, as Timekeeping's
-  # Entry::FORMATS carries it: dates as ISO 8601, timestamps in UTC to the
-  # microsecond.
-  FORMATS = {
-    "work_date" => :iso8601.to_proc,
-    "discarded_at" => ->(time) { time&.utc&.iso8601(6) },
-    "created_at" => ->(time) { time.utc.iso8601(6) },
-    "updated_at" => ->(time) { time.utc.iso8601(6) }
-  }.freeze
-
   def self.take(generation:, unlocked_link_invoice_ids: [])
     Timekeeping::Ownership.transaction do
-      ensure_frozen_legacy!(Timekeeping::Ownership.lock_shared!, generation)
+      Timekeeping::Ownership.lock_frozen_legacy!(:checkpoint, generation)
       report = Timekeeping::Preflight.process
       ensure_disposed!(report, unlocked_link_invoice_ids.to_set)
 
       reservations = report.entries.filter_map { |entry| reservation_for(entry) }
-      Checkpoint.new(generation:, entries: entries(report, reservations), reservations:)
+      Checkpoint.new(generation:, entries: entries(reservations), reservations:)
     end
   end
-
-  def self.ensure_frozen_legacy!(ownership, generation)
-    TimekeepingReservations::Handoff.ensure_in_step!(:checkpoint, STATES, ownership, generation)
-    return if ownership.owner_legacy?
-
-    raise OutOfStep, "Timekeeping handoff: the legacy checkpoint expects owner legacy, found " \
-      "#{TimekeepingReservations::Handoff.summary(ownership)}; nothing taken"
-  end
-  private_class_method :ensure_frozen_legacy!
 
   def self.ensure_disposed!(report, unlocked_link_invoice_ids)
     lists = {
@@ -108,20 +84,17 @@ class Timekeeping::LegacyCheckpoint
   end
   private_class_method :reservation_for
 
-  # Every entry, discarded ones included, as common.json#/$defs/entry. Its
-  # version is the next one, the first Timekeeping holds: a legacy row is at
-  # 0, so the incoming owner's snapshot of it replaces the projection's row
-  # (§3.2). `locked` is derived from its reservation by the shared rule
-  # (§7.1), so an F2 release reads unlocked. An entry the pre-flight did not
-  # classify raises KeyError: a checkpoint never leaves an entry out.
-  def self.entries(report, reservations)
-    company_ids = report.entries.to_h { |entry| [entry.entry_id, entry.company_id] }
+  # Every entry, discarded ones included, as common.json#/$defs/entry
+  # (Timekeeping::StoredEntries). Its version is the next one, the first
+  # Timekeeping holds: a legacy row is at 0, so the incoming owner's snapshot
+  # of it replaces the projection's row (§3.2). `locked` is derived from its
+  # reservation by the shared rule (§7.1), so an F2 release reads unlocked.
+  def self.entries(reservations)
     by_entry = reservations.group_by(&:entry_id)
 
-    TimesheetEntry.order(:id).map do |row|
-      { "id" => row.id, "company_id" => company_ids.fetch(row.id), "version" => row.version + 1 }
-        .merge(FIELDS.index_with { |field| FORMATS.fetch(field, :itself.to_proc).call(row.public_send(field)) })
-        .merge("locked" => TimekeepingReservations.locked?(row.id, by_entry.fetch(row.id, [])))
+    Timekeeping::StoredEntries.all.map do |entry|
+      id = entry.fetch("id")
+      entry.merge("version" => entry.fetch("version") + 1, "locked" => TimekeepingReservations.locked?(id, by_entry.fetch(id, [])))
     end
   end
   private_class_method :entries
