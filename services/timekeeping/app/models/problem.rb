@@ -8,8 +8,9 @@
 # The slug names the stable type. The types themselves are read from
 # common.json, the one source of truth, so a slug the contract does not list
 # cannot be built. `errors` is validation-failed's extension: the model's
-# errors by attribute.
-Problem = Data.define(:slug, :status, :detail, :retryable, :errors) do
+# errors by attribute. `refused` is reservation-refused's: each entry prepare
+# refused, and why.
+Problem = Data.define(:slug, :status, :detail, :retryable, :errors, :refused) do
   def self.types
     @types ||= JSON.parse(Rails.configuration.x.timekeeping.contracts_dir.join("common.json").read)
       .dig("$defs", "problem_type", "enum")
@@ -17,7 +18,7 @@ Problem = Data.define(:slug, :status, :detail, :retryable, :errors) do
       .freeze
   end
 
-  def initialize(slug:, status:, detail: nil, retryable: false, errors: nil)
+  def initialize(slug:, status:, detail: nil, retryable: false, errors: nil, refused: nil)
     raise ArgumentError, "#{slug} is not a problem type of the contracts" unless self.class.types.key?(slug)
 
     super
@@ -30,7 +31,8 @@ Problem = Data.define(:slug, :status, :detail, :retryable, :errors) do
       "status" => status,
       "detail" => detail,
       "retryable" => retryable,
-      "errors" => errors
+      "errors" => errors,
+      "refused" => refused
     }.compact
   end
 end
