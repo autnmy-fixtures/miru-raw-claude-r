@@ -15,7 +15,14 @@
 #   `aborted` receipt (§9.3), and a commit of one is not-found.
 #
 # Each call is one transaction: admission under the carried generation
-# (§10.1), then a per-invoice lock, then the invoice's tenant. A reservation
+# (§10.1), then a per-invoice lock, then the invoice's tenant. During a
+# handoff's settle step Timekeeping, as the outgoing owner, still admits a
+# commit or abort carrying the old generation (§10.5 step 2,
+# Ownership#settling?), and answers it only for an operation it registered:
+# a commit of any other is refused as stale-generation. An abort of one is
+# the no-op receipt it always is (§9.3), as the abort the existing
+# application recorded for a prepare that never arrived here must be
+# answered for settle to finish. A reservation
 # change holds the entries it touches FOR UPDATE in id order, so it
 # serializes with entry edits (§9.4), and gives every entry whose
 # reservations changed its next version and outbox snapshot (§5.4), which
@@ -58,14 +65,14 @@ module ReservationProtocol
   end
 
   def self.commit(call)
-    admitted(call) do
-      record = find(call) || not_prepared!(call)
+    admitted(call, settle: true) do |ownership|
+      record = find(call) || unregistered!(call, ownership)
       record.terminal? ? receipt(record) : resolve(record, "committed", call.claims)
     end
   end
 
   def self.abort(call)
-    admitted(call) do
+    admitted(call, settle: true) do
       record = find(call) || ReservationOperation.create!(
         invoice_id: call.invoice_id, operation_id: call.operation_id, company_id: call.company_id, state: "aborted"
       )
@@ -73,12 +80,12 @@ module ReservationProtocol
     end
   end
 
-  def self.admitted(call)
+  def self.admitted(call, settle: false)
     ReservationOperation.transaction do
-      Ownership.admit!(call.generation)
+      ownership = Ownership.admit!(call.generation, settle:)
       ReservationOperation.lock_invoice!(call.invoice_id)
       tenant!(call)
-      yield
+      yield ownership
     end
   end
   private_class_method :admitted
@@ -230,6 +237,15 @@ module ReservationProtocol
     )
   end
   private_class_method :unresolved!
+
+  # A commit of an operation never prepared here: not-found under the
+  # current generation, and stale under the settle step's exception, which
+  # covers only an operation Timekeeping registered.
+  def self.unregistered!(call, ownership)
+    Ownership.refuse!("stale-generation", ownership, call.generation) if ownership.settling?(call.generation)
+    not_prepared!(call)
+  end
+  private_class_method :unregistered!
 
   def self.not_prepared!(call)
     raise Problem::Raised, Problem.new(slug: "not-found", status: 404, detail: "operation #{call.operation_id} was never prepared")

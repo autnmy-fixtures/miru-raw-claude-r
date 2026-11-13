@@ -48,11 +48,23 @@ class Ownership < ApplicationRecord
   # every call admitted this way, and a call that arrives while it is held
   # waits and then reads the raised record. Must run inside the call's own
   # write transaction.
-  def self.admit!(generation)
+  #
+  # `settle: true` is for the reservation API's commit and abort only: it
+  # also admits a call the settle step's exception covers (#settling?). The
+  # caller then answers only for an operation Timekeeping registered.
+  def self.admit!(generation, settle: false)
     lock_shared!.tap do |ownership|
+      next if settle && ownership.settling?(generation)
+
       refusal = REFUSALS.find { |candidate| candidate.refuses.call(ownership, generation) }
       raise Refused, refusal_problem(refusal, ownership, generation) if refusal
     end
+  end
+
+  # Refuses as `slug`, one of REFUSALS, for a call carrying `generation`
+  # that admission let through but its endpoint will not answer.
+  def self.refuse!(slug, ownership, generation)
+    raise Refused, refusal_problem(REFUSALS.find { |refusal| refusal.slug == slug }, ownership, generation)
   end
 
   def self.lock_shared!
@@ -81,6 +93,17 @@ class Ownership < ApplicationRecord
     )
   end
   private_class_method :refusal_problem
+
+  # The settle step's exception (§10.5 step 2): "During this step only, the
+  # outgoing owner still applies a commit or abort that carries the old
+  # generation, and only for an operation it registered." True for a call
+  # carrying an older generation while Timekeeping is the outgoing owner of a
+  # handoff whose admission is closed: after close and before freeze, which
+  # is when settle runs. Freeze ends it. So does abort, which reopens
+  # admission at the raised generation and leaves the old one stale for good.
+  def settling?(carried)
+    owner_timekeeping? && state_closed? && carried < generation
+  end
 
   def summary = TimekeepingReservations::Handoff.summary(self)
 end
