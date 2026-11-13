@@ -41,4 +41,28 @@ RSpec.describe "Timekeeping characterization: pre-flight on the seeded businesse
         .to eq(disposition.fetch("unlocked_links").fetch("invoices"))
     end
   end
+
+  # §10.4: "the cutover checks every list again on the live data". With the
+  # recorded disposition, the first cutover's checkpoint (§10.5 step 4) is
+  # taken with nothing listed, and carries every entry and one reservation for
+  # each entry on a kept invoice, locked exactly as today.
+  it "takes the first cutover's checkpoint with the recorded disposition" do
+    seed_both_businesses!
+    recorded = disposition.fetch("unlocked_links").fetch("invoices").flat_map do |company, numbers|
+      Invoice.joins(:company).where(companies: { name: company }, invoice_number: numbers).ids
+    end
+    on_kept_invoices = Timekeeping::Preflight.process.entries.select { |entry| entry.mapping == :active }
+    set_timekeeping_ownership!(generation: 1, owner: "legacy", state: "frozen")
+
+    checkpoint = Timekeeping::LegacyCheckpoint.take(generation: 1, unlocked_link_invoice_ids: recorded)
+
+    aggregate_failures do
+      expect(recorded.size).to eq(disposition.fetch("unlocked_links").fetch("invoices").values.sum(&:size))
+      expect(checkpoint.entries.map { |entry| entry.fetch("id") }).to eq(TimesheetEntry.order(:id).ids)
+      expect(checkpoint.reservations.map(&:entry_id)).to match_array(on_kept_invoices.map(&:entry_id))
+      expect(checkpoint.reservations.map(&:disposition).uniq).to eq([:active])
+      expect(checkpoint.entries.to_h { |entry| [entry.fetch("id"), entry.fetch("locked")] })
+        .to eq(TimesheetEntry.pluck(:id, :locked).to_h)
+    end
+  end
 end
