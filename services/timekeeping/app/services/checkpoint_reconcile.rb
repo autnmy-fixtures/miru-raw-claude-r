@@ -19,7 +19,8 @@
 #   and Timekeeping must hold none.
 #
 # The rows that read the existing application's tables (reservations against
-# kept invoices, the projection, money) are reconciled there.
+# kept invoices, the projection, money) are reconciled there, by
+# Timekeeping::CheckpointReconcile against the same checkpoint.
 #
 # It runs only while Timekeeping's copy of the ownership record is frozen
 # under the legacy owner at the handoff's generation, and holds the record

@@ -12,6 +12,7 @@
 class Timekeeping::Ownership < ApplicationRecord
   SINGLETON_ID = 1
   INITIAL_GENERATION = 0
+  FROZEN = %w[frozen].freeze
 
   # Raised by a seed or demo-data builder (W8) asked to write after a handoff
   # has begun (§10.1).
@@ -58,6 +59,22 @@ class Timekeeping::Ownership < ApplicationRecord
   # NOTHING and all lock the one row.
   def self.lock_shared!
     locked_row("FOR SHARE")
+  end
+
+  # The record held FOR SHARE for a step of the first cutover that runs on
+  # this copy (§10.5 steps 4 and 6: Timekeeping::LegacyCheckpoint,
+  # Timekeeping::CheckpointReconcile), or OutOfStep unless it is frozen under
+  # the legacy owner at `generation`. Held for the rest of the caller's
+  # transaction, so the fence cannot flip or abort the handoff under it. Must
+  # run inside that transaction. Timekeeping's copy has the same guard.
+  def self.lock_frozen_legacy!(step, generation)
+    lock_shared!.tap do |ownership|
+      TimekeepingReservations::Handoff.ensure_in_step!(step, FROZEN, ownership, generation)
+      next if ownership.owner_legacy?
+
+      raise TimekeepingReservations::Handoff::OutOfStep,
+        "Timekeeping handoff: #{step} expects owner legacy, found #{ownership.summary}; nothing changed"
+    end
   end
 
   # The handoff's lock (§10.5): the record read FOR UPDATE, which waits for
