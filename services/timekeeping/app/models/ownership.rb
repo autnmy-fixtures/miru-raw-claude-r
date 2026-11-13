@@ -10,6 +10,7 @@
 # defaults.
 class Ownership < ApplicationRecord
   SINGLETON_ID = 1
+  FROZEN = %w[frozen].freeze
 
   # Raised by .admit! when this copy refuses a mutating call. Nothing was
   # written; `problem` is the contract's answer (§5.1).
@@ -69,6 +70,21 @@ class Ownership < ApplicationRecord
 
   def self.lock_shared!
     locked_row("FOR SHARE")
+  end
+
+  # The record held FOR SHARE for a step of the first cutover that runs on
+  # this copy (§10.5 steps 4 to 6: CheckpointLoad, CheckpointReconcile), or
+  # OutOfStep unless it is frozen under the legacy owner at `generation`.
+  # Held for the rest of the caller's transaction, so the fence cannot flip
+  # or abort the handoff under it. Must run inside that transaction.
+  def self.lock_frozen_legacy!(step, generation)
+    lock_shared!.tap do |ownership|
+      TimekeepingReservations::Handoff.ensure_in_step!(step, FROZEN, ownership, generation)
+      next if ownership.owner_legacy?
+
+      raise TimekeepingReservations::Handoff::OutOfStep,
+        "Timekeeping handoff: #{step} expects owner legacy, found #{ownership.summary}; nothing changed"
+    end
   end
 
   # The handoff's lock (§10.5): the record read FOR UPDATE, which waits for

@@ -24,7 +24,6 @@
 # refused whole, listing the entry ids each check found.
 module CheckpointLoad
   OutOfStep = TimekeepingReservations::Handoff::OutOfStep
-  STATES = %w[frozen].freeze
 
   # The checkpoint cannot be loaded as given. Nothing was written. `lists`
   # names each check that failed and the entry ids it found.
@@ -68,7 +67,7 @@ module CheckpointLoad
   # every snapshot (§11.3).
   def self.call(generation:, entries:, reservations:, request_id:)
     Ownership.transaction do
-      ensure_frozen_legacy!(Ownership.lock_shared!, generation)
+      Ownership.lock_frozen_legacy!(:load, generation)
       raise AlreadyLoaded, "Timekeeping checkpoint load: Timekeeping already holds entries; nothing loaded" if Entry.exists?
 
       ensure_loadable!(entries, reservations)
@@ -76,14 +75,6 @@ module CheckpointLoad
       Loaded.new(entries: entries.size, reservations: reservations.size)
     end
   end
-
-  def self.ensure_frozen_legacy!(ownership, generation)
-    TimekeepingReservations::Handoff.ensure_in_step!(:load, STATES, ownership, generation)
-    return if ownership.owner_legacy?
-
-    raise OutOfStep, "Timekeeping handoff: the checkpoint load expects owner legacy, found #{ownership.summary}; nothing loaded"
-  end
-  private_class_method :ensure_frozen_legacy!
 
   def self.ensure_loadable!(entries, reservations)
     lists = CHECKS.transform_values { |check| check.call(entries, reservations).uniq }.reject { |_, ids| ids.empty? }
