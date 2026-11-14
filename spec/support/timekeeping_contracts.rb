@@ -1,14 +1,15 @@
 # frozen_string_literal: true
 
 # The three Timekeeping contracts of docs/architecture/timekeeping-soa.md §5
-# (entry API, prepare/commit/abort, entry snapshot), read through
+# (entry API, prepare/commit/abort, entry snapshot), and the handoff API the
+# handoff tool reaches Timekeeping through (§10.5), read through
 # Timekeeping::Contracts from their one source of truth in
 # packages/timekeeping_reservations/contracts/v1, and the helpers their
 # consumer-side fakes share: schema validation, the operation table and the
 # HS256 tokens of §6.1.
 module TimekeepingContracts
   BASE_URI = "https://contracts.timekeeping.internal/v1/"
-  NAMES = %i[entry_api reservation_api entry_snapshot].freeze
+  NAMES = %i[entry_api reservation_api entry_snapshot handoff_api].freeze
   TOKEN_TTL = 60.seconds
   TEST_TOKEN_KEY = "timekeeping-contract-test-key"
 

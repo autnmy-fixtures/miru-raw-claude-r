@@ -20,7 +20,8 @@ module TimekeepingContracts
   # the shared decision table (§7.2), which is tested row by row in its package.
   class FakeTimekeeping
     URL = "http://timekeeping.test"
-    SERVED = %r{\A#{Regexp.escape(URL)}/}
+    # Every path but the handoff API's, which FakeHandoff serves.
+    SERVED = %r{\A#{Regexp.escape(URL)}/(?!internal/v1/handoff(?:[/?]|\z))}
     CONTRACTS = %i[entry_api reservation_api].freeze
 
     HANDLERS = {

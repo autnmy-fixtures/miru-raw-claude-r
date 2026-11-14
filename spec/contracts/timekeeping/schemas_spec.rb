@@ -2,9 +2,9 @@
 
 require "rails_helper"
 
-# The three contracts of docs/architecture/timekeeping-soa.md §5 and §12.3:
-# well-formed, complete against the table they carry, and accepting the
-# design's own examples.
+# The three contracts of docs/architecture/timekeeping-soa.md §5 and §12.3,
+# and the handoff API (§10.5): well-formed, complete against the table they
+# carry, and accepting the design's own examples.
 RSpec.describe "Timekeeping contract schemas" do
   let(:contracts) { TimekeepingContracts }
 
@@ -18,7 +18,7 @@ RSpec.describe "Timekeeping contract schemas" do
     end
   end
 
-  it "lists the routes of §5.2, §5.3 and §5.4" do
+  it "lists the routes of §5.2, §5.3 and §5.4, and the handoff API's" do
     routes = contracts.operations.map { |operation| "#{operation.verb} #{operation.path}" }
 
     expect(routes).to contain_exactly(
@@ -35,7 +35,11 @@ RSpec.describe "Timekeeping contract schemas" do
       "POST /internal/v1/invoices/{invoice_id}/operations/{operation_id}/prepare",
       "POST /internal/v1/invoices/{invoice_id}/operations/{operation_id}/commit",
       "POST /internal/v1/invoices/{invoice_id}/operations/{operation_id}/abort",
-      "POST /internal/v1/projection/entry_snapshots"
+      "POST /internal/v1/projection/entry_snapshots",
+      "GET /internal/v1/handoff",
+      "POST /internal/v1/handoff/steps/{step}",
+      "POST /internal/v1/handoff/checkpoint",
+      "POST /internal/v1/handoff/checkpoint/reconcile"
     )
   end
 
