@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://contracts.timekeeping.internal/v1/common.json",
   "title": "Timekeeping contracts v1: shared definitions",
-  "description": "Definitions shared by the entry API, the reservation API and the entry snapshot event (docs/architecture/timekeeping-soa.md §5). Changes within v1 are additive (§5.1).",
+  "description": "Definitions shared by the entry API, the reservation API, the entry snapshot event and the handoff API (docs/architecture/timekeeping-soa.md §5, §10.5). Changes within v1 are additive (§5.1).",
   "$defs": {
     "id": { "type": "integer", "minimum": 1 },
     "generation": {
@@ -93,11 +93,16 @@
         "https://contracts.timekeeping.internal/problems/ownership-moving",
         "https://contracts.timekeeping.internal/problems/idempotency-conflict",
         "https://contracts.timekeeping.internal/problems/reservation-refused",
-        "https://contracts.timekeeping.internal/problems/operation-unresolved"
+        "https://contracts.timekeeping.internal/problems/operation-unresolved",
+        "https://contracts.timekeeping.internal/problems/out-of-step",
+        "https://contracts.timekeeping.internal/problems/drain-timeout",
+        "https://contracts.timekeeping.internal/problems/already-loaded",
+        "https://contracts.timekeeping.internal/problems/checkpoint-refused",
+        "https://contracts.timekeeping.internal/problems/checkpoint-differs"
       ]
     },
     "problem": {
-      "description": "application/problem+json (RFC 9457) with two extensions: retryable, and errors for validation-failed.",
+      "description": "application/problem+json (RFC 9457) with its extensions: retryable, errors for validation-failed, refused for reservation-refused, and lists for checkpoint-refused and checkpoint-differs.",
       "type": "object",
       "properties": {
         "type": { "$ref": "#/$defs/problem_type" },
@@ -122,6 +127,16 @@
             },
             "required": ["entry_id", "reason"],
             "additionalProperties": false
+          }
+        },
+        "lists": {
+          "description": "checkpoint-refused and checkpoint-differs only (handoff_api.json): each check that failed, and the entry ids, or receipt identifiers, it found (§10.4).",
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "string" }] }
           }
         }
       },

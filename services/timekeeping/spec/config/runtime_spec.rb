@@ -13,7 +13,7 @@ RSpec.describe "Timekeeping runtime" do
   it "reads the shared reservation decision table and contracts from packages/" do
     expect(TimekeepingReservations::TABLE).not_to be_empty
     expect(Rails.configuration.x.timekeeping.contracts_dir.glob("*.json").map { |path| path.basename(".json").to_s })
-      .to contain_exactly("common", "entry_api", "entry_snapshot", "reservation_api")
+      .to contain_exactly("common", "entry_api", "entry_snapshot", "handoff_api", "reservation_api")
   end
 
   it "takes the shared token key and the existing application's URL from the environment" do
