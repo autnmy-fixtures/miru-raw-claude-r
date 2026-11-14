@@ -35,7 +35,7 @@
 # nothing is changed.
 #
 # The checkpoint is taken once (§10.5 step 4: "one frozen, verified
-# checkpoint"), and a resumed transfer reuses it (#checkpoint). It cannot be
+# checkpoint"), and a resumed transfer reuses it (#resume). It cannot be
 # taken again once the load has run: the relay then writes Timekeeping's
 # snapshots into timesheet_entries, the table the legacy checkpoint is read
 # from, so a second one would carry Timekeeping's versions and prove nothing
@@ -60,7 +60,7 @@
 #
 # The financial snapshot is the "before" of the money check. A run that
 # starts at close_local takes it; a resumed run is given the one taken before
-# the interruption (#financial_snapshot, JSON-safe), or takes it itself.
+# the interruption (#resume; the snapshot is JSON-safe), or takes it itself.
 # Both are taken while admission is closed, and no billing write is admitted
 # then (§10.1), so either is the state the handoff must leave unchanged.
 #
@@ -115,26 +115,44 @@ class Timekeeping::FirstCutover
   # The states of a copy a handoff has fenced, which abort reopens.
   FENCED = %w[closed frozen].freeze
 
-  DRAIN_TIMEOUT = 60 # seconds
   POLL_INTERVAL = 1 # second
 
-  attr_reader :financial_snapshot, :checkpoint
+  # How a run waits for Timekeeping's relay to drain: at most `timeout`
+  # seconds of `clock` (monotonic), calling `pause` between reads.
+  Drain = Data.define(:timeout, :pause, :clock) do
+    def initialize(
+      timeout: 60, pause: ->(seconds) { sleep(seconds) }, clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) }
+    )
+      super
+    end
+  end
+
+  # What an interrupted run took, for its resume: the financial snapshot and
+  # the checkpoint, each nil until taken.
+  Resume = Data.define(:financial_snapshot, :checkpoint) do
+    def initialize(financial_snapshot: nil, checkpoint: nil)
+      super
+    end
+  end
+
+  # `request_id` names this run in the snapshots the load writes (§11.3).
+  attr_reader :financial_snapshot, :checkpoint, :request_id
 
   # `unlocked_link_invoice_ids` is the recorded disposition the checkpoint
   # takes (§10.4): the kept invoices whose unlocked links map to an active
-  # reservation with no edit lock. `financial_snapshot` and `checkpoint` are
-  # what an interrupted run took, for its resume. `pause` is called between
-  # reads of Timekeeping's relay; `clock` is monotonic seconds.
+  # reservation with no edit lock. `resume` is what an interrupted run took
+  # (#resume).
   def initialize(
-    client: Timekeeping::HandoffClient.new, unlocked_link_invoice_ids: [], financial_snapshot: nil, checkpoint: nil,
-    request_id: SecureRandom.uuid, drain_timeout: DRAIN_TIMEOUT,
-    pause: ->(seconds) { sleep(seconds) }, clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
+    client: Timekeeping::HandoffClient.new, unlocked_link_invoice_ids: [], resume: Resume.new, drain: Drain.new,
     logger: Rails.logger
   )
-    @client, @unlocked_link_invoice_ids = client, unlocked_link_invoice_ids
-    @financial_snapshot, @checkpoint = financial_snapshot, checkpoint
-    @request_id, @drain_timeout, @pause, @clock, @logger = request_id, drain_timeout, pause, clock, logger
+    @client, @unlocked_link_invoice_ids, @drain, @logger = client, unlocked_link_invoice_ids, drain, logger
+    @financial_snapshot, @checkpoint = resume.financial_snapshot, resume.checkpoint
+    @request_id = SecureRandom.uuid
   end
+
+  # What a later run needs to resume this one.
+  def resume = Resume.new(financial_snapshot:, checkpoint:)
 
   # Runs every step from where the two copies stand to the end, and answers
   # the Result.
@@ -251,16 +269,16 @@ class Timekeeping::FirstCutover
     # §10.5 step 3's "drain the outbox into the projection": every snapshot
     # Timekeeping wrote has reached timesheet_entries.
     def wait_for_drain!
-      deadline = @clock.call + @drain_timeout
+      deadline = @drain.clock.call + @drain.timeout
 
       until (outbox = @client.status.outbox).drained?
-        if @clock.call >= deadline
+        if @drain.clock.call >= deadline
           raise DrainTimeout,
-            "Timekeeping first cutover: #{outbox.undelivered} snapshots undelivered after #{@drain_timeout} s; " \
+            "Timekeeping first cutover: #{outbox.undelivered} snapshots undelivered after #{@drain.timeout} s; " \
             "both copies stay frozen, run again to resume"
         end
 
-        @pause.call(POLL_INTERVAL)
+        @drain.pause.call(POLL_INTERVAL)
       end
     end
 

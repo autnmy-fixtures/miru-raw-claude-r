@@ -64,7 +64,7 @@ RSpec.describe Timekeeping::FirstCutover, type: :model do
   # The relay runs whenever the tool waits for it.
   def relaying = ->(_seconds) { fake.relay! }
 
-  def tool(interrupt_before: nil, pause: relaying, **options)
+  def tool(interrupt_before: nil, drain: described_class::Drain.new(pause: relaying), **options)
     interruption = interrupted
     logger = Class.new do
       define_method(:info) do |message|
@@ -72,7 +72,7 @@ RSpec.describe Timekeeping::FirstCutover, type: :model do
       end
     end.new
 
-    described_class.new(client:, unlocked_link_invoice_ids: [unlocked_link_invoice.id], pause:, logger:, **options)
+    described_class.new(client:, unlocked_link_invoice_ids: [unlocked_link_invoice.id], drain:, logger:, **options)
   end
 
   def copies
@@ -101,7 +101,8 @@ RSpec.describe Timekeeping::FirstCutover, type: :model do
     end
 
     it "loads every entry and its reservation into Timekeeping, values as stored" do
-      tool(request_id: "handoff-1").call
+      cutover = tool
+      cutover.call
 
       loaded = fake.loaded
       expect(loaded.fetch("entries").map { |entry| entry.fetch("id") }).to eq(TimesheetEntry.order(:id).ids)
@@ -111,7 +112,7 @@ RSpec.describe Timekeeping::FirstCutover, type: :model do
           [draft_entry.id, "active", true], *grouped_entries.map { |entry| [entry.id, "active", true] },
           [retained_entry.id, "retained", true], [linked_entry.id, "active", false]
         )
-      expect(fake.calls.find { |call| call.operation == :load_checkpoint }.request_id).to eq("handoff-1")
+      expect(fake.calls.find { |call| call.operation == :load_checkpoint }.request_id).to eq(cutover.request_id)
     end
 
     it "leaves the projection at Timekeeping's first version of every entry, with the F2 release, and no billing value moved" do
@@ -159,7 +160,7 @@ RSpec.describe Timekeeping::FirstCutover, type: :model do
         expect { stopped.call }.to raise_error(interrupted)
         expect(copies).to eq(left)
 
-        result = tool(financial_snapshot: stopped.financial_snapshot, checkpoint: stopped.checkpoint).call
+        result = tool(resume: stopped.resume).call
 
         expect(result.generation).to eq(1)
         expect(copies).to eq(cut_over)
@@ -205,20 +206,20 @@ RSpec.describe Timekeeping::FirstCutover, type: :model do
       expect { tool(interrupt_before: :transfer).call }.to raise_error(interrupted)
       other = Timekeeping::LegacyCheckpoint::Checkpoint.new(generation: 2, entries: [], reservations: [])
 
-      expect { tool(checkpoint: other).call }.to raise_error(described_class::Unresumable, /taken at generation 2, the handoff is at 1/)
+      expect { tool(resume: described_class::Resume.new(checkpoint: other)).call }.to raise_error(described_class::Unresumable, /taken at generation 2, the handoff is at 1/)
       expect(fake.loaded).to be_nil
       expect(copies).to eq([[1, "legacy", "frozen"], [1, "legacy", "frozen"]])
     end
 
     it "stops with both copies frozen when the relay does not drain in time, and resumes once it runs" do
       now = 0
-      stalled = tool(pause: ->(seconds) { now += seconds }, clock: -> { now }, drain_timeout: 5)
+      stalled = tool(drain: described_class::Drain.new(timeout: 5, pause: ->(seconds) { now += seconds }, clock: -> { now }))
 
       expect { stalled.call }.to raise_error(described_class::DrainTimeout, /\d+ snapshots undelivered after 5 s/)
       expect(copies).to eq([[1, "legacy", "frozen"], [1, "legacy", "frozen"]])
       expect(fake.undelivered).not_to be_empty
 
-      tool(financial_snapshot: stalled.financial_snapshot, checkpoint: stalled.checkpoint).call
+      tool(resume: stalled.resume).call
       expect(copies).to eq(cut_over)
     end
 
@@ -241,7 +242,7 @@ RSpec.describe Timekeeping::FirstCutover, type: :model do
     end
 
     it "aborts when the pre-flight lists an unlocked link with no recorded disposition, loading nothing" do
-      failure = aborted_at(described_class.new(client:, pause: relaying, logger: Logger.new(nil)))
+      failure = aborted_at(described_class.new(client:, drain: described_class::Drain.new(pause: relaying), logger: Logger.new(nil)))
 
       expect(failure.step).to eq(:checkpoint)
       expect(failure.lists).to eq(unlocked_links: [linked_entry.id])
@@ -273,7 +274,7 @@ RSpec.describe Timekeeping::FirstCutover, type: :model do
         InvoiceLineItem.where(id: line.id).update_all(rate: 101) # a write no fence sees
       }
 
-      failure = aborted_at(tool(pause: moving))
+      failure = aborted_at(tool(drain: described_class::Drain.new(pause: moving)))
 
       expect(failure.step).to eq(:reconcile_local)
       expect(failure.lists.keys).to eq([:money_differs])

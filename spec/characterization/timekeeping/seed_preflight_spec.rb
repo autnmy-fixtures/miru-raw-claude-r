@@ -101,7 +101,8 @@ RSpec.describe "Timekeeping characterization: pre-flight on the seeded businesse
 
     result = Timekeeping::FirstCutover.new(
       client: Timekeeping::HandoffClient.new(url: TimekeepingContracts::FakeHandoff::URL, token_key: TimekeepingContracts::TEST_TOKEN_KEY),
-      unlocked_link_invoice_ids: recorded, pause: ->(_) { fake.relay! }, logger: Logger.new(nil)
+      unlocked_link_invoice_ids: recorded, drain: Timekeeping::FirstCutover::Drain.new(pause: ->(_) { fake.relay! }),
+      logger: Logger.new(nil)
     ).call
 
     aggregate_failures do
