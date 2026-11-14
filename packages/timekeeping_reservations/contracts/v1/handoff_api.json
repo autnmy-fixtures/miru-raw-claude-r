@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.timekeeping.internal/v1/handoff_api.json",
+  "title": "Timekeeping handoff API v1: Timekeeping's side of the handoff procedure",
+  "description": "Provider: Timekeeping. Consumer: the handoff tool, run from the existing application (docs/architecture/timekeeping-soa.md §10.1, §10.5). The two applications share no database (§11.2), so the tool moves Timekeeping's copy of the ownership record and carries the checkpoint to it over this API. No call needs an Idempotency-Key: every step names the generation and state it expects, so a replay is refused as out-of-step and changes nothing; a second load is already-loaded; reconcile writes nothing. A resumed handoff reads the copy first and re-runs the step that did not commit.",
+  "x-headers": {
+    "every": ["Authorization", "X-Request-Id"],
+    "mutating": ["X-Ownership-Generation"]
+  },
+  "x-operations": {
+    "read_handoff": {
+      "method": "GET", "path": "/internal/v1/handoff", "mutating": false,
+      "responses": { "200": "#/$defs/handoff_status" }
+    },
+    "run_step": {
+      "method": "POST", "path": "/internal/v1/handoff/steps/{step}", "mutating": true,
+      "request": "#/$defs/step_request",
+      "responses": { "200": "#/$defs/handoff_status" }
+    },
+    "load_checkpoint": {
+      "method": "POST", "path": "/internal/v1/handoff/checkpoint", "mutating": true,
+      "request": "#/$defs/checkpoint",
+      "responses": { "200": "#/$defs/checkpoint_receipt" }
+    },
+    "reconcile_checkpoint": {
+      "method": "POST", "path": "/internal/v1/handoff/checkpoint/reconcile", "mutating": true,
+      "request": "#/$defs/checkpoint",
+      "responses": { "200": "#/$defs/checkpoint_receipt" }
+    }
+  },
+  "$defs": {
+    "service_token_claims": {
+      "description": "The handoff tool authenticates with an HS256 JWT signed with the shared token key, 60 s TTL. No user acts here.",
+      "type": "object",
+      "properties": {
+        "sub": { "const": "service:timekeeping-handoff" },
+        "aud": { "const": "handoff" },
+        "iat": { "type": "integer" },
+        "exp": { "type": "integer" }
+      },
+      "required": ["sub", "aud", "iat", "exp"],
+      "additionalProperties": false
+    },
+    "owner": { "enum": ["legacy", "timekeeping", "monolith"] },
+    "ownership": {
+      "description": "Timekeeping's copy of the ownership record (§10.1).",
+      "type": "object",
+      "properties": {
+        "generation": { "$ref": "common.json#/$defs/generation" },
+        "owner": { "$ref": "#/$defs/owner" },
+        "state": { "enum": ["open", "closed", "frozen"] }
+      },
+      "required": ["generation", "owner", "state"],
+      "additionalProperties": false
+    },
+    "outbox": {
+      "description": "Where the relay stands (§5.4, §10.5 step 3): the latest outbox position, null while the outbox is empty, and how many snapshots it has not yet delivered. The projection holds everything through the latest position once undelivered is 0.",
+      "type": "object",
+      "properties": {
+        "latest_position": { "$ref": "common.json#/$defs/nullable_id" },
+        "undelivered": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["latest_position", "undelivered"],
+      "additionalProperties": false
+    },
+    "handoff_status": {
+      "type": "object",
+      "properties": {
+        "ownership": { "$ref": "#/$defs/ownership" },
+        "outbox": { "$ref": "#/$defs/outbox" }
+      },
+      "required": ["ownership", "outbox"],
+      "additionalProperties": false
+    },
+    "step": {
+      "description": "A step of the shared state machine (TimekeepingReservations::Handoff): close (step 1), freeze (step 3), flip (step 7), abort.",
+      "enum": ["close", "freeze", "flip", "abort"]
+    },
+    "step_request": {
+      "description": "The generation the step expects to find the copy at: before close raises it, the raised one after.",
+      "type": "object",
+      "properties": {
+        "generation": { "$ref": "common.json#/$defs/generation" }
+      },
+      "required": ["generation"],
+      "additionalProperties": false
+    },
+    "reservation": {
+      "description": "One of an entry's reservations by an invoice (§7.1), as TimekeepingReservations::Reservation holds it.",
+      "type": "object",
+      "properties": {
+        "entry_id": { "$ref": "common.json#/$defs/id" },
+        "invoice_id": { "$ref": "common.json#/$defs/id" },
+        "company_id": { "$ref": "common.json#/$defs/id" },
+        "operation_id": { "anyOf": [{ "type": "string", "format": "uuid" }, { "type": "null" }] },
+        "state": { "enum": ["provisional", "committed"] },
+        "disposition": { "enum": ["active", "retained"] },
+        "edit_lock": { "type": "boolean" }
+      },
+      "required": ["entry_id", "invoice_id", "company_id", "operation_id", "state", "disposition", "edit_lock"],
+      "additionalProperties": false
+    },
+    "checkpoint": {
+      "description": "The frozen checkpoint of §10.5 step 4, taken at generation: every entry as the full entry, discarded ones included, and every reservation. The load refuses whatever does not hold together (checkpoint-refused), so an entry is only required to name its id here.",
+      "type": "object",
+      "properties": {
+        "generation": { "$ref": "common.json#/$defs/generation" },
+        "entries": {
+          "type": "array",
+          "items": { "type": "object", "properties": { "id": { "$ref": "common.json#/$defs/id" } }, "required": ["id"] }
+        },
+        "reservations": { "type": "array", "items": { "$ref": "#/$defs/reservation" } }
+      },
+      "required": ["generation", "entries", "reservations"],
+      "additionalProperties": false
+    },
+    "checkpoint_receipt": {
+      "description": "How many entries and reservations the checkpoint carried, loaded or reconciled.",
+      "type": "object",
+      "properties": {
+        "entries": { "type": "integer", "minimum": 0 },
+        "reservations": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["entries", "reservations"],
+      "additionalProperties": false
+    }
+  }
+}

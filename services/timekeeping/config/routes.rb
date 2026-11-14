@@ -24,6 +24,15 @@ Rails.application.routes.draw do
         post "commit", to: "invoice_operations#commit_operation"
         post "abort", to: "invoice_operations#abort_operation"
       end
+
+      # The handoff API (handoff_api.json): the handoff tool's way to
+      # Timekeeping's copy of the ownership record and the checkpoint (§10.5).
+      # A step is one the shared state machine names; any other is not found.
+      get "handoff", to: "handoffs#show"
+      post "handoff/steps/:step", to: "handoffs#step",
+        constraints: { step: Regexp.union(TimekeepingReservations::Handoff::STEPS.keys.map(&:to_s)) }
+      post "handoff/checkpoint", to: "handoffs#load_checkpoint"
+      post "handoff/checkpoint/reconcile", to: "handoffs#reconcile_checkpoint"
     end
   end
 end

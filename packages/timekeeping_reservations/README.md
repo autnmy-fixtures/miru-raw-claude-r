@@ -87,6 +87,7 @@ The existing application reads them at run time through `Timekeeping::Contracts`
 | `contracts/v1/entry_api.json` | Entry API (§5.2) and the user token (§6.1) | Timekeeping | Write gateway | `TimekeepingContracts::FakeTimekeeping` |
 | `contracts/v1/reservation_api.json` | Prepare, commit, abort (§5.3) | Timekeeping | Invoice reservation boundary, invoice operation worker | `TimekeepingContracts::FakeTimekeeping` |
 | `contracts/v1/entry_snapshot.json` | Entry snapshot event and its delivery (§5.4) | Timekeeping relay | Projection consumer | `TimekeepingContracts::FakeRelay` |
+| `contracts/v1/handoff_api.json` | Timekeeping's side of the handoff procedure (§10.1, §10.5): its copy of the ownership record, the relay's progress, the fence steps, the checkpoint load and reconcile | Timekeeping | The handoff tool (not built yet) | — (comes with the handoff tool) |
 | `contracts/v1/common.json` | Entry, problem types, ids, generation, duration | — | — | — |
 
 Each contract file carries two extensions that JSON Schema ignores:
@@ -111,6 +112,15 @@ Each contract file carries two extensions that JSON Schema ignores:
   `GenerateInvoice::NewLineItemsService` resolves them today, and the existing filters as `user_ids`,
   `from`, `to`, `exclude_ids` and `search_term`.
 - **A snapshot delivery** answers `{ applied, ignored }`. A 2xx means the whole batch is durable.
+- **The handoff tool reaches Timekeeping over HTTP** (`handoff_api.json`), as the two applications share
+  no database (§11.2). It signs a service token, audience `handoff`, subject
+  `service:timekeeping-handoff`; a user token or the relay's is refused. Its calls carry
+  `X-Ownership-Generation`, which must equal the body's `generation`, and no `Idempotency-Key`: every
+  step names the generation and state it expects, so a replay is `409 out-of-step` and changes
+  nothing; a second load is `409 already-loaded`; reconcile writes nothing. A step whose lock waits
+  out the admitted calls is a retryable `503 drain-timeout`. A load that does not hold together is
+  `422 checkpoint-refused`, and a reconcile that finds a difference `409 checkpoint-differs`, each
+  listing what every failed check found in the problem's `lists` extension.
 
 ## Tests
 
