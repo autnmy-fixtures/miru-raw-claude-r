@@ -49,9 +49,7 @@ RSpec.describe "Timekeeping characterization: pre-flight on the seeded businesse
   # side of the reconcile (§10.5 step 6) then passes on it.
   it "takes the first cutover's checkpoint with the recorded disposition, and reconciles it" do
     seed_both_businesses!
-    recorded = disposition.fetch("unlocked_links").fetch("invoices").flat_map do |company, numbers|
-      Invoice.joins(:company).where(companies: { name: company }, invoice_number: numbers).ids
-    end
+    recorded = Timekeeping::RecordedDisposition.unlocked_link_invoice_ids
     on_kept_invoices = Timekeeping::Preflight.process.entries.select { |entry| entry.mapping == :active }
     money_before = Timekeeping::FinancialSnapshot.process
     set_timekeeping_ownership!(generation: 1, owner: "legacy", state: "frozen")
@@ -92,9 +90,7 @@ RSpec.describe "Timekeeping characterization: pre-flight on the seeded businesse
     seed_both_businesses!
     allow(Rails.configuration.x.timekeeping).to receive(:token_key).and_return(TimekeepingContracts::TEST_TOKEN_KEY)
     fake = TimekeepingContracts::FakeHandoff.new.install!
-    recorded = disposition.fetch("unlocked_links").fetch("invoices").flat_map do |company, numbers|
-      Invoice.joins(:company).where(companies: { name: company }, invoice_number: numbers).ids
-    end
+    recorded = Timekeeping::RecordedDisposition.unlocked_link_invoice_ids
     on_kept_invoices = Timekeeping::Preflight.process.entries.count { |entry| entry.mapping == :active }
     money_before = Timekeeping::FinancialSnapshot.process
     locked_before = TimesheetEntry.pluck(:id, :locked).to_h
