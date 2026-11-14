@@ -87,7 +87,7 @@ The existing application reads them at run time through `Timekeeping::Contracts`
 | `contracts/v1/entry_api.json` | Entry API (§5.2) and the user token (§6.1) | Timekeeping | Write gateway | `TimekeepingContracts::FakeTimekeeping` |
 | `contracts/v1/reservation_api.json` | Prepare, commit, abort (§5.3) | Timekeeping | Invoice reservation boundary, invoice operation worker | `TimekeepingContracts::FakeTimekeeping` |
 | `contracts/v1/entry_snapshot.json` | Entry snapshot event and its delivery (§5.4) | Timekeeping relay | Projection consumer | `TimekeepingContracts::FakeRelay` |
-| `contracts/v1/handoff_api.json` | Timekeeping's side of the handoff procedure (§10.1, §10.5): its copy of the ownership record, the relay's progress, the fence steps, the checkpoint load and reconcile | Timekeeping | The handoff tool (not built yet) | — (comes with the handoff tool) |
+| `contracts/v1/handoff_api.json` | Timekeeping's side of the handoff procedure (§10.1, §10.5): its copy of the ownership record, the relay's progress, the fence steps, the checkpoint load and reconcile | Timekeeping | The handoff tool, through `Timekeeping::HandoffClient` (the tool itself is not built yet) | `TimekeepingContracts::FakeHandoff` |
 | `contracts/v1/common.json` | Entry, problem types, ids, generation, duration | — | — | — |
 
 Each contract file carries two extensions that JSON Schema ignores:

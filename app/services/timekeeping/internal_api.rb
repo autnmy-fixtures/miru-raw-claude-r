@@ -4,7 +4,8 @@
 # (docs/architecture/timekeeping-soa.md §5.1): its configuration, its errors,
 # the system-actor token (§6.1), the 2 s timeout (§9.2 step 2, §9.4), and
 # reading an answer against the client's contract. A client inherits from
-# this class and names its contract in CONTRACT.
+# this class and names its contract in CONTRACT; one whose calls may wait
+# longer than 2 s by design names its own TIMEOUT.
 class Timekeeping::InternalApi
   TIMEOUT = 2 # seconds, §9.2 step 2 and §9.4
   PROBLEM = "common.json#/$defs/problem"
@@ -17,16 +18,19 @@ class Timekeeping::InternalApi
   # Timekeeping answered application/problem+json (§5.1), read from the body
   # the contract's problem definition allows.
   class Problem < Error
-    attr_reader :status, :type, :retryable, :detail, :refused, :errors
+    attr_reader :status, :type, :retryable, :detail, :refused, :errors, :lists
 
     # `type` is the stable slug, without the problem base URI. `refused`
     # lists, for reservation-refused only, every entry prepare refused and why
     # (F1, L8), as the shared rule's Refusal. `errors` is, for
-    # validation-failed only, the model's errors by attribute.
+    # validation-failed only, the model's errors by attribute. `lists` is, for
+    # checkpoint-refused and checkpoint-differs only, each check that failed
+    # and the entry ids or receipt identifiers it found (§10.4).
     def initialize(body)
       @status, @retryable, @detail = body.fetch("status"), body.fetch("retryable"), body["detail"]
       @type = body.fetch("type").delete_prefix(Timekeeping::Contracts::PROBLEM_BASE)
       @errors = body.fetch("errors", {})
+      @lists = body.fetch("lists", {})
       @refused = body.fetch("refused", []).map do |refusal|
         TimekeepingReservations::Refusal.new(entry_id: refusal.fetch("entry_id"), reason: refusal.fetch("reason").to_sym)
       end
@@ -89,6 +93,6 @@ class Timekeeping::InternalApi
     end
 
     def http
-      @http ||= Faraday.new(url: @url, request: { timeout: TIMEOUT, open_timeout: TIMEOUT })
+      @http ||= Faraday.new(url: @url, request: { timeout: self.class::TIMEOUT, open_timeout: TIMEOUT })
     end
 end
