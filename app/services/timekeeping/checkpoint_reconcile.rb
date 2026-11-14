@@ -77,7 +77,8 @@ module Timekeeping::CheckpointReconcile
   # Reconciles against `entries` (common.json#/$defs/entry each) and
   # `reservations` (TimekeepingReservations::Reservation values), the
   # checkpoint taken at `generation`, and `financial_snapshot`, the
-  # Timekeeping::FinancialSnapshot taken before the handoff closed admission.
+  # Timekeeping::FinancialSnapshot the handoff tool (Timekeeping::FirstCutover)
+  # took once close had drained every billing write already admitted.
   def self.call(generation:, entries:, reservations:, financial_snapshot:)
     Timekeeping::Ownership.transaction do
       Timekeeping::Ownership.lock_frozen_legacy!(:reconcile, generation)

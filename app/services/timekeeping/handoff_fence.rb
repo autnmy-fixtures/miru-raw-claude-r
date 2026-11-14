@@ -32,7 +32,7 @@
 # This is the local record only. Timekeeping's copy has its own fence
 # (services/timekeeping/app/services/handoff_fence.rb); the drain, checkpoint
 # and reconcile steps between belong to the handoff tool that calls both in
-# order.
+# order (Timekeeping::FirstCutover).
 module Timekeeping::HandoffFence
   DRAIN_TIMEOUT = 60.seconds
 
