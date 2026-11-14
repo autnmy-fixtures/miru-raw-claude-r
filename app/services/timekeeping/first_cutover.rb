@@ -35,7 +35,7 @@
 # nothing is changed.
 #
 # The checkpoint is taken once (§10.5 step 4: "one frozen, verified
-# checkpoint"), and a resumed transfer reuses it (#resume). It cannot be
+# checkpoint"), and a resumed transfer reuses it (the journal's). It cannot be
 # taken again once the load has run: the relay then writes Timekeeping's
 # snapshots into timesheet_entries, the table the legacy checkpoint is read
 # from, so a second one would carry Timekeeping's versions and prove nothing
@@ -60,9 +60,20 @@
 #
 # The financial snapshot is the "before" of the money check. A run that
 # starts at close_local takes it; a resumed run is given the one taken before
-# the interruption (#resume; the snapshot is JSON-safe), or takes it itself.
+# the interruption (the journal's; the snapshot is JSON-safe), or takes it
+# itself.
 # Both are taken while admission is closed, and no billing write is admitted
 # then (§10.1), so either is the state the handoff must leave unchanged.
+#
+# What a run took is kept in its journal, which a later run is given to
+# resume from. A run starts from the journal's #resume, and records its own
+# #resume in it as soon as it takes the financial snapshot, and again as soon
+# as it takes the checkpoint, before the load, so a run that stops at any
+# later point leaves the checkpoint the load carried. A run that starts a
+# handoff (close_local) first records an empty resume, so nothing an earlier
+# handoff took is resumed into this one. MemoryJournal, the default, keeps it
+# within one process; Timekeeping::FirstCutoverJournal keeps it in a file,
+# across processes (the timekeeping:first_cutover task).
 #
 # Rollback and re-cutover take this shape in the other direction once the
 # prepared application's entry store exists; under any owner but legacy this
@@ -135,18 +146,34 @@ class Timekeeping::FirstCutover
     end
   end
 
+  # A journal kept in memory, for runs within one process: what the last run
+  # recorded, or the Resume it was built with.
+  class MemoryJournal
+    attr_reader :resume
+
+    def initialize(resume = Resume.new)
+      @resume = resume
+    end
+
+    def record(resume)
+      @resume = resume
+    end
+  end
+
   # `request_id` names this run in the snapshots the load writes (§11.3).
   attr_reader :financial_snapshot, :checkpoint, :request_id
 
   # `unlocked_link_invoice_ids` is the recorded disposition the checkpoint
   # takes (§10.4): the kept invoices whose unlocked links map to an active
-  # reservation with no edit lock. `resume` is what an interrupted run took
-  # (#resume).
+  # reservation with no edit lock. `journal` holds what an interrupted run
+  # took: the run starts from its `resume`, and tells it `record(resume)`
+  # each time it takes something.
   def initialize(
-    client: Timekeeping::HandoffClient.new, unlocked_link_invoice_ids: [], resume: Resume.new, drain: Drain.new,
+    client: Timekeeping::HandoffClient.new, unlocked_link_invoice_ids: [], journal: MemoryJournal.new, drain: Drain.new,
     logger: Rails.logger
   )
-    @client, @unlocked_link_invoice_ids, @drain, @logger = client, unlocked_link_invoice_ids, drain, logger
+    @client, @unlocked_link_invoice_ids, @drain, @logger, @journal = client, unlocked_link_invoice_ids, drain, logger, journal
+    resume = journal.resume
     @financial_snapshot, @checkpoint = resume.financial_snapshot, resume.checkpoint
     @request_id = SecureRandom.uuid
   end
@@ -206,8 +233,9 @@ class Timekeeping::FirstCutover
     # Steps
 
     def close_local(generation)
+      remember(financial_snapshot: nil, checkpoint: nil)
       Timekeeping::HandoffFence.call(:close, generation: generation - 1)
-      @financial_snapshot = Timekeeping::FinancialSnapshot.process
+      remember(financial_snapshot: Timekeeping::FinancialSnapshot.process)
     end
 
     def close_remote(generation) = @client.run_step(:close, generation: generation - 1)
@@ -220,13 +248,7 @@ class Timekeeping::FirstCutover
     def freeze_remote(generation) = @client.run_step(:freeze, generation:)
 
     def transfer(generation)
-      @financial_snapshot ||= Timekeeping::FinancialSnapshot.process
-      checkpoint = (@checkpoint ||= take_checkpoint(generation))
-      unless checkpoint.generation == generation
-        raise Unresumable, "Timekeeping first cutover: the checkpoint given was taken at generation #{checkpoint.generation}, " \
-          "the handoff is at #{generation}; nothing changed"
-      end
-
+      checkpoint = checkpoint_for(generation)
       load_checkpoint(checkpoint)
       wait_for_drain!
       @client.reconcile_checkpoint(checkpoint)
@@ -246,6 +268,25 @@ class Timekeeping::FirstCutover
     def flip_remote(generation) = @client.run_step(:flip, generation:)
 
     def flip_local(generation) = Timekeeping::HandoffFence.call(:flip, generation:)
+
+    # The checkpoint the transfer carries: the one the run holds, or one it
+    # takes, with the financial snapshot if it holds none, and records before
+    # anything is loaded.
+    def checkpoint_for(generation)
+      remember(financial_snapshot: Timekeeping::FinancialSnapshot.process) unless @financial_snapshot
+      remember(checkpoint: take_checkpoint(generation)) unless @checkpoint
+      return @checkpoint if @checkpoint.generation == generation
+
+      raise Unresumable, "Timekeeping first cutover: the checkpoint given was taken at generation #{@checkpoint.generation}, " \
+        "the handoff is at #{generation}; nothing changed"
+    end
+
+    # Keeps what the run took, and records it in the journal.
+    def remember(**taken)
+      @financial_snapshot = taken.fetch(:financial_snapshot, @financial_snapshot)
+      @checkpoint = taken.fetch(:checkpoint, @checkpoint)
+      @journal.record(resume)
+    end
 
     def take_checkpoint(generation)
       if @client.status.outbox.latest_position

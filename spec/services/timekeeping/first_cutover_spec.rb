@@ -64,7 +64,9 @@ RSpec.describe Timekeeping::FirstCutover, type: :model do
   # The relay runs whenever the tool waits for it.
   def relaying = ->(_seconds) { fake.relay! }
 
-  def tool(interrupt_before: nil, drain: described_class::Drain.new(pause: relaying), **options)
+  # `resume` is what an earlier run took, handed over in a journal.
+  def tool(interrupt_before: nil, drain: described_class::Drain.new(pause: relaying), resume: nil, **options)
+    options[:journal] ||= described_class::MemoryJournal.new(resume) if resume
     interruption = interrupted
     logger = Class.new do
       define_method(:info) do |message|
@@ -229,6 +231,79 @@ RSpec.describe Timekeeping::FirstCutover, type: :model do
       expect(copies).to eq([[1, "legacy", "closed"], [0, "legacy", "open"]])
 
       tool.call
+      expect(copies).to eq(cut_over)
+    end
+  end
+
+  describe "the journal" do
+    # Records each resume it is told, with whether Timekeeping held the load
+    # at that moment.
+    def journal_of(resume = described_class::Resume.new)
+      loaded = -> { fake.loaded.present? }
+      Class.new(described_class::MemoryJournal) do
+        define_method(:records) { @records ||= [] }
+        define_method(:record) do |taken|
+          records << [taken, loaded.call]
+          super(taken)
+        end
+      end.new(resume)
+    end
+
+    let(:journal) { journal_of }
+
+    it "starts the run from what the journal holds" do
+      expect { tool(interrupt_before: :freeze_local).call }.to raise_error(interrupted)
+      held = described_class::Resume.new(financial_snapshot: money_before)
+
+      expect(tool(journal: journal_of(held)).resume).to eq(held)
+    end
+
+    it "is told an empty resume as the handoff starts, then the financial snapshot, then the checkpoint before the load" do
+      cutover = tool(journal:)
+      cutover.call
+
+      expect(journal.records.map { |resume, loaded| [resume.financial_snapshot.present?, resume.checkpoint.present?, loaded] })
+        .to eq([[false, false, false], [true, false, false], [true, true, false]])
+      expect(journal.records.last.first).to eq(cutover.resume)
+      expect(journal.resume).to eq(cutover.resume)
+      expect(journal.records.last.first.checkpoint.entries).to eq(fake.loaded.fetch("entries"))
+    end
+
+    it "is told nothing new by a resumed transfer that already holds both" do
+      stopped = tool(interrupt_before: :transfer)
+      expect { stopped.call }.to raise_error(interrupted)
+      checkpointed = tool(interrupt_before: :flip_remote, resume: stopped.resume)
+      expect { checkpointed.call }.to raise_error(interrupted)
+
+      resumed = journal_of(checkpointed.resume)
+      tool(journal: resumed).call
+
+      expect(resumed.records).to be_empty
+      expect(copies).to eq(cut_over)
+    end
+
+    it "is told what a resumed transfer takes when the run that closed admission left nothing" do
+      expect { tool(interrupt_before: :close_remote).call }.to raise_error(interrupted)
+
+      tool(journal:).call
+
+      expect(journal.records.map { |resume, loaded| [resume.financial_snapshot.present?, resume.checkpoint.present?, loaded] })
+        .to eq([[true, false, false], [true, true, false]])
+    end
+
+    it "never carries what an earlier handoff took into a new one: starting a handoff forgets it" do
+      earlier = described_class::Resume.new(
+        financial_snapshot: { "invoices" => {} },
+        checkpoint: Timekeeping::LegacyCheckpoint::Checkpoint.new(generation: 7, entries: [], reservations: [])
+      )
+
+      started = journal_of(earlier)
+      cutover = tool(journal: started)
+      cutover.call
+
+      expect(started.records.first.first).to eq(described_class::Resume.new)
+      expect(cutover.resume.checkpoint.generation).to eq(1)
+      expect(cutover.resume.financial_snapshot).to eq(money_before)
       expect(copies).to eq(cut_over)
     end
   end
