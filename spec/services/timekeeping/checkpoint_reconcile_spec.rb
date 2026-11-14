@@ -51,7 +51,8 @@ RSpec.describe Timekeeping::CheckpointReconcile, type: :model do
   end
   let!(:unlocked_link_invoice) { invoice_for(tenant_b, status: :sent).tap { |invoice| direct_line(invoice, linked_entry) } }
 
-  # Taken before the handoff closes admission, as the handoff tool takes it.
+  # The "before" of the money check, taken once every billing write is done,
+  # as the handoff tool takes it right after close.
   let!(:money_before) { Timekeeping::FinancialSnapshot.process }
 
   let(:checkpoint) do

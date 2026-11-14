@@ -82,4 +82,37 @@ RSpec.describe "Timekeeping characterization: pre-flight on the seeded businesse
     expect(Timekeeping::CheckpointReconcile.call(generation: 1, entries: checkpoint.entries, reservations: checkpoint.reservations, financial_snapshot: money_before))
       .to eq(Timekeeping::CheckpointReconcile::Reconciled.new(entries: TimesheetEntry.count, reservations: on_kept_invoices.size))
   end
+
+  # §10.2 step 5 on the live seed: the handoff tool runs the whole first
+  # cutover on both copies of the ownership record, against the consumer-side
+  # fake of Timekeeping's handoff API, whose relay delivers into the real
+  # projection endpoint. Both sides reconcile, no billing value moves, and
+  # both copies end open under Timekeeping at generation 1.
+  it "runs the first cutover on both seeded businesses with the recorded disposition" do
+    seed_both_businesses!
+    allow(Rails.configuration.x.timekeeping).to receive(:token_key).and_return(TimekeepingContracts::TEST_TOKEN_KEY)
+    fake = TimekeepingContracts::FakeHandoff.new.install!
+    recorded = disposition.fetch("unlocked_links").fetch("invoices").flat_map do |company, numbers|
+      Invoice.joins(:company).where(companies: { name: company }, invoice_number: numbers).ids
+    end
+    on_kept_invoices = Timekeeping::Preflight.process.entries.count { |entry| entry.mapping == :active }
+    money_before = Timekeeping::FinancialSnapshot.process
+    locked_before = TimesheetEntry.pluck(:id, :locked).to_h
+
+    result = Timekeeping::FirstCutover.new(
+      client: Timekeeping::HandoffClient.new(url: TimekeepingContracts::FakeHandoff::URL, token_key: TimekeepingContracts::TEST_TOKEN_KEY),
+      unlocked_link_invoice_ids: recorded, drain: Timekeeping::FirstCutover::Drain.new(pause: ->(_) { fake.relay! }),
+      logger: Logger.new(nil)
+    ).call
+
+    aggregate_failures do
+      expect(result).to eq(Timekeeping::FirstCutover::Result.new(generation: 1, entries: TimesheetEntry.count, reservations: on_kept_invoices))
+      expect(Timekeeping::Ownership.current.slice(:generation, :owner, :state)).to eq("generation" => 1, "owner" => "timekeeping", "state" => "open")
+      expect(fake.copy).to eq(TimekeepingContracts::FakeHandoff::Copy.new(generation: 1, owner: "timekeeping", state: "open"))
+      expect(fake.violations).to be_empty
+      expect(TimesheetEntry.distinct.pluck(:version)).to eq([1])
+      expect(TimesheetEntry.pluck(:id, :locked).to_h).to eq(locked_before)
+      expect(Timekeeping::FinancialSnapshot.diff(money_before, Timekeeping::FinancialSnapshot.process)).to be_empty
+    end
+  end
 end
