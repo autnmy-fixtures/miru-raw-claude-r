@@ -4,11 +4,11 @@ require "rails_helper"
 
 # Entry writes and reads under the `monolith` owner
 # (docs/architecture/timekeeping-soa.md §3.1, §3.3 rule 1, §10.5), through
-# the real entry points of W1 web and mobile, W2 bulk, W3 CLI, W3a MCP and
-# W4 agent: each write lands in the prepared application's own entry table
-# with its audit and outbox rows, answers today's public JSON, and writes
-# nothing to timesheet_entries, which the local relay then projects (§3.2,
-# §12.2). The time-tracking list, the lookup before an update or discard and
+# the real entry points of W1 web and mobile, W2 bulk, W3 CLI, W3a MCP, W4
+# agent, W5 Harvest import and W6 agent destroy: each write lands in the
+# prepared application's own entry table with its audit and outbox rows,
+# answers today's public JSON, and writes nothing to timesheet_entries,
+# which the local relay then projects (§3.2, §12.2). The time-tracking list, the lookup before an update or discard and
 # W2's selection read that same table, so an entry the relay has not
 # projected yet is listed and edited at once (§12.4 "relay paused"),
 # authorized on the owner's state.
@@ -318,6 +318,78 @@ RSpec.describe "Timekeeping entry writes under the monolith owner", type: :reque
         expect(foreign.reload).to have_attributes(version: 1, discarded_at: nil)
         expect(Timekeeping::OutboxSnapshot.count).to eq(0)
       end
+    end
+  end
+
+  describe "W5 Harvest import" do
+    let(:data_import) { create(:data_import, company: tenant_a.company, user: tenant_a.admin, options: {}) }
+
+    before do
+      %w[Paul\ Connors Jane\ Doe].each do |name|
+        first_name, last_name = name.split
+        user = create(:user, first_name:, last_name:, current_workspace_id: tenant_a.company.id)
+        create(:employment, company: tenant_a.company, user:)
+      end
+    end
+
+    def attach(contents) = data_import.file.attach(io: StringIO.new(contents), filename: "harvest.csv", content_type: "text/csv")
+
+    def attach_fixture = attach(Rails.root.join("spec/fixtures/files/harvest_detailed_time.csv").read)
+
+    def import!(into = data_import) = without_projection_writes { Imports::HarvestTimeEntriesImporter.new(into).process }
+
+    def harvest_rows(*hours)
+      "Date,Client,Project,Hours,First Name,Last Name,Notes\n" +
+        hours.each_with_index.map { |count, index| "2026-01-01,Acme LLC,Website,#{count},Paul,Connors,Row #{index}\n" }.join
+    end
+
+    it "writes every row in the prepared application's table as the system import writer, billed rows billed, and the relay projects them (§3.4)" do
+      attach_fixture
+
+      import!
+
+      entries = Timekeeping::Entry.of_company(tenant_a.company.id).order(:id)
+      aggregate_failures do
+        expect(data_import.reload).to have_attributes(status: "completed", imported_rows: 11, failed_rows: 0)
+        expect(entries.count).to eq(11)
+        expect(entries.pluck(:source).uniq).to eq(["import"])
+        expect(entries.pluck(:bill_status)).to include("billed", "unbilled", "non_billable")
+        expect(Timekeeping::EntryAudit.where(entry_id: entries.ids).pluck(:writer, :actor).uniq).to eq([%w[import system]])
+        expect(TimesheetEntry.where(id: entries.ids)).to be_empty
+      end
+
+      Timekeeping::LocalRelay.new.run
+
+      expect(TimesheetEntry.where(id: entries.ids).order(:id).pluck(:id, :bill_status)).to eq(entries.pluck(:id, :bill_status))
+    end
+
+    it "skips, on a re-run before the relay has run, every row the owner already holds (W5's duplicate check, §3.3 rule 1)" do
+      attach_fixture
+      import!
+      rerun = create(:data_import, company: tenant_a.company, user: tenant_a.admin, options: {})
+      rerun.file.attach(io: Rails.root.join("spec/fixtures/files/harvest_detailed_time.csv").open, filename: "harvest.csv", content_type: "text/csv")
+
+      expect { import!(rerun) }.not_to change(Timekeeping::Entry, :count)
+      expect(rerun.reload).to have_attributes(status: "completed", imported_rows: 0)
+    end
+
+    it "records a row today's rules reject as today's row error, and keeps the rest of its batch" do
+      attach(harvest_rows(1, 100_001, 2))
+
+      import!
+
+      expect(data_import.reload).to have_attributes(status: "completed", imported_rows: 2, failed_rows: 1)
+      expect(data_import.row_errors).to eq([{ "row" => 3, "message" => "Duration must be less than or equal to 6000000" }])
+      expect(Timekeeping::Entry.order(:id).pluck(:note)).to eq(["Row 0", "Row 2"])
+    end
+
+    it "fails the import with today's retry message while a handoff away from the owner runs, and writes no entry (§9.3, §10.1)" do
+      attach(harvest_rows(1))
+      set_timekeeping_ownership!(generation: 2, owner: "monolith", state: "closed")
+
+      expect { import! }.to raise_error(Timekeeping::Ownership::Moving)
+      expect(data_import.reload).to have_attributes(status: "failed", error_message: I18n.t("imports.errors.ownership_moving"))
+      expect(Timekeeping::Entry.count).to eq(0)
     end
   end
 
