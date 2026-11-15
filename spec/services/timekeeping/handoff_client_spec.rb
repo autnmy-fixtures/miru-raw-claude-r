@@ -162,6 +162,194 @@ RSpec.describe Timekeeping::HandoffClient do
     end
   end
 
+  describe "#take_checkpoint" do
+    # Timekeeping owns the entries after a cutover at generation 1; the
+    # rollback's close raises the generation to 2 and freezes there.
+    let!(:fake) { TimekeepingContracts::FakeHandoff.new(generation: 1, owner: "timekeeping").install! }
+
+    let(:created_at) { "2026-11-02T09:15:30.123456Z" }
+
+    # What Timekeeping holds on two tenants after the cutover and some writes:
+    # an entry on a kept draft at version 3, an unlocked link, a destroyed
+    # non-draft's retained entry (§7.3), a discarded entry, and an agent's
+    # entry whose metadata holds a null inside an array; their audit rows, a
+    # committed receipt and the no-op abort (§9.3), and an idempotency receipt
+    # per tenant under one key.
+    let(:held) do
+      {
+        entries: [
+          entry(id: 101, company_id: 1, version: 3, locked: true, duration: 0.1, note: "Kitchen prep"),
+          entry(id: 102, company_id: 1, duration: 479.99999, note: nil),
+          entry(id: 103, company_id: 1, version: 2, locked: true, bill_status: "billed"),
+          entry(id: 104, company_id: 1, discarded_at: "2026-11-04T08:00:00.000001Z"),
+          entry(id: 230, company_id: 2, version: 5, locked: true, agent_id: 4, source: "mcp", proof_metadata: { "tags" => [nil, "a"] })
+        ],
+        reservations: [
+          wire(reservation(entry_id: 101, invoice_id: 501, company_id: 1)),
+          wire(reservation(entry_id: 102, invoice_id: 502, company_id: 1, edit_lock: false)),
+          wire(reservation(entry_id: 103, invoice_id: 503, company_id: 1, disposition: :retained)),
+          wire(reservation(entry_id: 230, invoice_id: 601, company_id: 2))
+        ],
+        entry_audits: [
+          { "id" => 9, "entry_id" => 101, "company_id" => 1, "version" => 1, "action" => "create", "actor" => "user:7", "agent_id" => nil,
+            "writer" => "web", "request_id" => "req-1", "audited_changes" => { "duration" => 0.1, "note" => nil }, "created_at" => created_at },
+          { "id" => 14, "entry_id" => 230, "company_id" => 2, "version" => 5, "action" => "update", "actor" => "agent:4", "agent_id" => 4,
+            "writer" => "agent", "request_id" => "req-2", "audited_changes" => { "note" => [nil, "Proofing"] }, "created_at" => created_at }
+        ],
+        reservation_operations: [
+          { "invoice_id" => 501, "operation_id" => "3c9d1f6e-8a2b-4c5d-9e0f-1a2b3c4d5e6f", "company_id" => 1, "kind" => "save",
+            "invoice_state" => "draft", "entry_ids" => [101], "state" => "committed", "created_at" => created_at, "updated_at" => created_at },
+          { "invoice_id" => 701, "operation_id" => "8f14e45f-ceea-467f-a0e3-b4a1c3d2e5f6", "company_id" => nil, "kind" => nil,
+            "invoice_state" => nil, "entry_ids" => [], "state" => "aborted", "created_at" => created_at, "updated_at" => created_at }
+        ],
+        idempotency_receipts: [
+          { "company_id" => 1, "key" => "web-1", "request_digest" => "d1", "status" => 201,
+            "response" => { "entry" => { "id" => 101, "duration" => 0.1 } }, "created_at" => created_at },
+          { "company_id" => 2, "key" => "web-1", "request_digest" => "d2", "status" => 200, "response" => { "discarded_ids" => [] }, "created_at" => created_at }
+        ]
+      }
+    end
+
+    def wire(reservation)
+      reservation.to_h.transform_keys(&:to_s).merge("state" => reservation.state.to_s, "disposition" => reservation.disposition.to_s)
+    end
+
+    def frozen_for_rollback!
+      fake.hold!(**held)
+      client.run_step(:close, generation: 1)
+      client.run_step(:freeze, generation: 2)
+    end
+
+    it "answers the checkpoint Timekeeping holds, every value exactly as carried" do
+      frozen_for_rollback!
+
+      taken = client.take_checkpoint(generation: 2)
+
+      expect(taken).to be_a(described_class::TakenCheckpoint)
+      expect(taken.generation).to eq(2)
+      expect(taken.entries).to eq(held[:entries])
+      expect(taken.entries.map { |carried| carried.values_at("id", "version", "duration", "locked") }).to eq(
+        [[101, 3, 0.1, true], [102, 1, 479.99999, false], [103, 2, 90.7, true], [104, 1, 90.7, false], [230, 5, 90.7, true]]
+      )
+      expect(taken.entries.last["proof_metadata"]).to eq("tags" => [nil, "a"])
+      expect(taken.entries[1]["note"]).to be_nil
+      expect(taken.entries[3]["discarded_at"]).to eq("2026-11-04T08:00:00.000001Z")
+      expect(taken.entry_audits).to eq(held[:entry_audits])
+      expect(taken.reservation_operations).to eq(held[:reservation_operations])
+      expect(taken.idempotency_receipts).to eq(held[:idempotency_receipts])
+    end
+
+    it "answers the reservations as the shared rule's values, the retained one with its own owner" do
+      frozen_for_rollback!
+
+      reservations = client.take_checkpoint(generation: 2).reservations
+
+      expect(reservations).to all(be_a(TimekeepingReservations::Reservation))
+      expect(reservations).to eq([
+        reservation(entry_id: 101, invoice_id: 501, company_id: 1),
+        reservation(entry_id: 102, invoice_id: 502, company_id: 1, edit_lock: false),
+        reservation(entry_id: 103, invoice_id: 503, company_id: 1, disposition: :retained),
+        reservation(entry_id: 230, invoice_id: 601, company_id: 2)
+      ])
+    end
+
+    it "names the ids the incoming owner's entry and audit sequences are set above (§10.3)" do
+      frozen_for_rollback!
+
+      taken = client.take_checkpoint(generation: 2)
+
+      expect([taken.highest_entry_id, taken.highest_entry_audit_id]).to eq([230, 14])
+    end
+
+    it "names no highest id when Timekeeping holds nothing" do
+      client.run_step(:close, generation: 1)
+      client.run_step(:freeze, generation: 2)
+
+      taken = client.take_checkpoint(generation: 2)
+
+      expect([taken.entries, taken.reservations, taken.entry_audits]).to eq([[], [], []])
+      expect([taken.highest_entry_id, taken.highest_entry_audit_id]).to eq([nil, nil])
+    end
+
+    it "is a read: the generation goes in the query, no X-Ownership-Generation, and asking again answers the same" do
+      frozen_for_rollback!
+
+      first = client.take_checkpoint(generation: 2)
+
+      expect(client.take_checkpoint(generation: 2)).to eq(first)
+      expect(fake.calls.last(2).map { |call| [call.operation, call.input] }).to eq([[:take_checkpoint, { "generation" => "2" }]] * 2)
+      expect(a_request(:get, "#{TimekeepingContracts::FakeHandoff::URL}/internal/v1/handoff/checkpoint?generation=2")
+        .with { |request| !request.headers.key?("X-Ownership-Generation") && request.headers.key?("X-Request-Id") }).to have_been_made.twice
+      expect(fake.copy).to eq(TimekeepingContracts::FakeHandoff::Copy.new(generation: 2, owner: "timekeeping", state: "frozen"))
+      expect(fake.outbox).to be_empty
+    end
+
+    it "raises Timekeeping's out-of-step refusal anywhere but frozen under timekeeping at the generation asked" do
+      fake.hold!(**held)
+      refusals = {
+        "open" => -> { },
+        "closed" => -> { client.run_step(:close, generation: 1) },
+        "frozen, asked another generation" => -> { client.run_step(:freeze, generation: 2) }
+      }
+
+      refusals.each do |where, reach|
+        reach.call
+        asked = where.include?("another") ? 3 : 2
+
+        expect { client.take_checkpoint(generation: asked) }.to raise_error(described_class::Problem) { |problem|
+          expect([problem.status, problem.type, problem.retryable]).to eq([409, "out-of-step", false]), where
+        }
+      end
+    end
+
+    it "raises out-of-step for a first cutover's copy, frozen under legacy" do
+      legacy = TimekeepingContracts::FakeHandoff.new.install!
+      client.run_step(:close, generation: 0)
+      client.run_step(:freeze, generation: 1)
+
+      expect { client.take_checkpoint(generation: 1) }.to raise_error(described_class::Problem, /409 out-of-step.*expects owner timekeeping/)
+      expect(legacy.calls.last.operation).to eq(:take_checkpoint)
+    end
+
+    it "raises checkpoint-unsettled with what settle left unresolved, not retryable" do
+      frozen_for_rollback!
+      fake.fail_next(:take_checkpoint, status: 409, slug: "checkpoint-unsettled",
+        lists: { "provisional_reservation" => [101], "unresolved_operation" => ["501/3c9d1f6e-8a2b-4c5d-9e0f-1a2b3c4d5e6f"] })
+
+      expect { client.take_checkpoint(generation: 2) }.to raise_error(described_class::Problem) { |problem|
+        expect([problem.status, problem.type, problem.retryable]).to eq([409, "checkpoint-unsettled", false])
+        expect(problem.lists).to eq(
+          "provisional_reservation" => [101], "unresolved_operation" => ["501/3c9d1f6e-8a2b-4c5d-9e0f-1a2b3c4d5e6f"]
+        )
+      }
+    end
+
+    it "refuses a generation the contract cannot carry without sending it" do
+      [-1, nil, 1.5].each do |generation|
+        expect { client.take_checkpoint(generation:) }.to raise_error(described_class::Invalid, /take_checkpoint/), generation.inspect
+      end
+      expect(fake.calls).to be_empty
+    end
+
+    it "raises Unavailable on a lost response; the take wrote nothing, so the tool asks again" do
+      frozen_for_rollback!
+      fake.lose_next_response(:take_checkpoint)
+
+      expect { client.take_checkpoint(generation: 2) }.to raise_error(described_class::Unavailable, /take_checkpoint/)
+      expect(client.take_checkpoint(generation: 2).entries).to eq(held[:entries])
+    end
+
+    it "raises ContractViolation on a checkpoint outside the contract, such as a provisional reservation" do
+      provisional = wire(reservation(entry_id: 101, invoice_id: 501, company_id: 1)).merge("state" => "provisional")
+      stub_request(:get, "#{TimekeepingContracts::FakeHandoff::URL}/internal/v1/handoff/checkpoint?generation=2").to_return(
+        status: 200, headers: { "Content-Type" => "application/json" },
+        body: JSON.generate({ "generation" => 2, **held.transform_keys(&:to_s), "reservations" => [provisional] })
+      )
+
+      expect { client.take_checkpoint(generation: 2) }.to raise_error(described_class::ContractViolation)
+    end
+  end
+
   describe "when Timekeeping cannot answer" do
     it "raises Unavailable on a lost response, though the step ran, so the tool reads the status again" do
       fake.lose_next_response(:run_step)

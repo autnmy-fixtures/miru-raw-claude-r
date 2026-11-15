@@ -9,6 +9,8 @@
 #   #status                Timekeeping's copy of the record, and where its
 #                          relay stands (the drain of §10.5 step 3)
 #   #run_step              close, freeze, flip or abort on that copy
+#   #take_checkpoint       §10.5 step 4 out of Timekeeping, the outgoing
+#                          owner of a rollback (§10.2 step 6)
 #   #load_checkpoint       §10.5 steps 4 and 5 in Timekeeping
 #   #reconcile_checkpoint  step 6 in Timekeeping
 #
@@ -47,6 +49,23 @@ class Timekeeping::HandoffClient < Timekeeping::InternalApi
   # reconciled.
   Receipt = Data.define(:entries, :reservations)
 
+  # The rollback's checkpoint as Timekeeping took it (taken_checkpoint;
+  # CheckpointTake in services/timekeeping), for the handoff tool to load into
+  # the prepared application here (the monolith owner). Entries, audit rows
+  # and receipts are the contract's hashes exactly as carried (§8 item 1):
+  # nothing is recomputed or renumbered. Reservations are
+  # TimekeepingReservations::Reservation values, as every checkpoint holds
+  # them.
+  TakenCheckpoint = Data.define(:generation, :entries, :reservations, :entry_audits, :reservation_operations, :idempotency_receipts) do
+    # The id the incoming owner's entry sequence is set above (§10.3); nil
+    # when there is no entry.
+    def highest_entry_id = entries.map { |entry| entry.fetch("id") }.max
+
+    # Audit rows keep their ids, so the incoming owner's audit sequence is set
+    # above this too; nil when there is no audit row.
+    def highest_entry_audit_id = entry_audits.map { |audit| audit.fetch("id") }.max
+  end
+
   # Timekeeping could not be reached, timed out, or answered a 5xx that is not
   # a problem of the contract. Whether a step ran is not known.
   class Unavailable < Timekeeping::InternalApi::Error; end
@@ -72,6 +91,18 @@ class Timekeeping::HandoffClient < Timekeeping::InternalApi
     status_of(request(:run_step, { "generation" => generation }, generation:, step:))
   end
 
+  # Takes the rollback's checkpoint out of Timekeeping, frozen under the
+  # timekeeping owner at `generation`, and answers it as a TakenCheckpoint. A
+  # read: it writes nothing in Timekeeping, carries no
+  # X-Ownership-Generation, and may be asked again as often as the tool needs.
+  # Timekeeping refuses it out-of-step anywhere else, and
+  # checkpoint-unsettled, with its `lists`, while settle left an operation
+  # unresolved (§10.5 step 2); frozen, no retry changes that, so the tool
+  # aborts.
+  def take_checkpoint(generation:)
+    taken_checkpoint_of(request(:take_checkpoint, query: { "generation" => generation.to_s }))
+  end
+
   # The checkpoint is anything with generation, entries in the contract's
   # full-entry form, and reservations as TimekeepingReservations::Reservation
   # values: what Timekeeping::LegacyCheckpoint takes. `request_id` names the
@@ -88,13 +119,13 @@ class Timekeeping::HandoffClient < Timekeeping::InternalApi
 
   private
 
-    def request(name, body = nil, generation: nil, request_id: SecureRandom.uuid, **path_params)
+    def request(name, body = nil, generation: nil, query: nil, request_id: SecureRandom.uuid, **path_params)
       operation = contract_operation(name)
-      errors = body ? Timekeeping::Contracts.errors(CONTRACT, operation.fetch("request"), body) : []
+      errors = request_errors(operation, body, query)
       raise Invalid.new(name, errors) if errors.any?
 
       response = http.run_request(
-        operation.fetch("method").downcase.to_sym, path(operation, path_params), body && JSON.generate(body),
+        operation.fetch("method").downcase.to_sym, path(operation, path_params, query), body && JSON.generate(body),
         headers(generation, request_id)
       )
       answered(name, operation, response)
@@ -117,8 +148,15 @@ class Timekeeping::HandoffClient < Timekeeping::InternalApi
       }.merge(generation.nil? ? {} : { "X-Ownership-Generation" => generation.to_s, "Content-Type" => "application/json" })
     end
 
-    def path(operation, path_params)
-      operation.fetch("path").gsub(/\{(\w+)\}/) { path_params.fetch(Regexp.last_match(1).to_sym).to_s }
+    def request_errors(operation, body, query)
+      [[body, "request"], [query, "query"]].flat_map do |input, part|
+        input ? Timekeeping::Contracts.errors(CONTRACT, operation.fetch(part), input) : []
+      end
+    end
+
+    def path(operation, path_params, query = nil)
+      path = operation.fetch("path").gsub(/\{(\w+)\}/) { path_params.fetch(Regexp.last_match(1).to_sym).to_s }
+      query ? "#{path}?#{URI.encode_www_form(query)}" : path
     end
 
     def checkpoint_body(checkpoint)
@@ -139,4 +177,16 @@ class Timekeeping::HandoffClient < Timekeeping::InternalApi
     end
 
     def receipt_of(body) = Receipt.new(**body.symbolize_keys)
+
+    def taken_checkpoint_of(body)
+      TakenCheckpoint.new(
+        **body.symbolize_keys.merge(reservations: body.fetch("reservations").map { |reservation| reservation_of(reservation) })
+      )
+    end
+
+    def reservation_of(reservation)
+      TimekeepingReservations::Reservation.new(
+        **reservation.symbolize_keys.merge(state: reservation.fetch("state").to_sym, disposition: reservation.fetch("disposition").to_sym)
+      )
+    end
 end
