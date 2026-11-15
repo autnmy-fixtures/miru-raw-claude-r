@@ -320,4 +320,62 @@ RSpec.describe "Timekeeping entry writes under the monolith owner", type: :reque
       end
     end
   end
+
+  describe "W6 agent destroy" do
+    let(:agent) { create(:agent, company: tenant_a.company, user: employee, default_project: tenant_a.project) }
+    let(:first_id) { TimesheetEntry.maximum(:id).to_i + 1_000 }
+
+    # An agent's entry the prepared application holds and the relay has not
+    # projected (§12.4 "relay paused").
+    def held_entry(offset: 0, **attributes)
+      Timekeeping::Entry.create!(
+        id: first_id + offset, company_id: tenant_a.company.id, project_id: tenant_a.project.id, user_id: employee.id,
+        agent_id: agent.id, duration: 30.0, work_date: Date.current, bill_status: "unbilled", **attributes
+      )
+    end
+
+    it "detaches the agent's entries in the owner's table and deletes the agent, in one transaction (§3.4)" do
+      entry = held_entry
+
+      without_projection_writes { agent.destroy! }
+
+      expect(Agent.exists?(agent.id)).to be(false)
+      expect(entry.reload).to have_attributes(agent_id: nil, version: 2)
+      expect(entry.audits.sole.writer).to eq("agent_destroy")
+
+      Timekeeping::LocalRelay.new.run
+      expect(TimesheetEntry.find(entry.id).agent_id).to be_nil
+    end
+
+    it "keeps the agent and every entry as they were while a handoff away from the owner runs (§10.1)" do
+      entry = held_entry
+      set_timekeeping_ownership!(generation: 2, owner: "monolith", state: "closed")
+
+      expect { agent.destroy! }.to raise_error(Timekeeping::Ownership::Moving)
+
+      expect(Agent.exists?(agent.id)).to be(true)
+      expect(entry.reload).to have_attributes(agent_id: agent.id, version: 1)
+    end
+
+    # The projection keeps today's timesheet_entries -> agents foreign key
+    # (db/schema.rb). While a projected row still names the agent, the
+    # delete is refused by that key, and the detach rolls back with it.
+    it "is refused whole, with nothing half done, while the projection still names the agent" do
+      entry = held_entry
+      Timekeeping::LocalEntryChange.record!(
+        entry, action: "create", audited_changes: {},
+        claims: Timekeeping::UserToken.system_claims(company: tenant_a.company, writer: "agent", request_id: "req-seed")
+      )
+      Timekeeping::LocalRelay.new.run
+      expect(TimesheetEntry.find(entry.id).agent_id).to eq(agent.id)
+
+      without_projection_writes do
+        expect { agent.destroy! }.to raise_error(ActiveRecord::InvalidForeignKey)
+      end
+
+      expect(Agent.exists?(agent.id)).to be(true)
+      expect(entry.reload).to have_attributes(agent_id: agent.id, version: 1)
+      expect(entry.outbox_snapshots.count).to eq(1)
+    end
+  end
 end
