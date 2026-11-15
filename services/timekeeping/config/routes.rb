@@ -31,6 +31,7 @@ Rails.application.routes.draw do
       get "handoff", to: "handoffs#show"
       post "handoff/steps/:step", to: "handoffs#step",
         constraints: { step: Regexp.union(TimekeepingReservations::Handoff::STEPS.keys.map(&:to_s)) }
+      get "handoff/checkpoint", to: "handoffs#take_checkpoint"
       post "handoff/checkpoint", to: "handoffs#load_checkpoint"
       post "handoff/checkpoint/reconcile", to: "handoffs#reconcile_checkpoint"
     end
