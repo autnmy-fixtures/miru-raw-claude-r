@@ -75,7 +75,8 @@ class Timekeeping::Ownership < ApplicationRecord
   # (§10.5 steps 4 to 6), or OutOfStep unless it is frozen under `owner`, the
   # handoff's outgoing owner, at `generation`: `legacy` for the first
   # cutover's steps, `timekeeping` for the rollback's load
-  # (Timekeeping::CheckpointLoad). Held for the rest of the caller's
+  # (Timekeeping::CheckpointLoad), `monolith` for the re-cutover's take
+  # (Timekeeping::LocalCheckpoint). Held for the rest of the caller's
   # transaction, so the fence cannot flip or abort the handoff under it. Must
   # run inside that transaction. Timekeeping's Ownership.lock_frozen! is the
   # same guard.

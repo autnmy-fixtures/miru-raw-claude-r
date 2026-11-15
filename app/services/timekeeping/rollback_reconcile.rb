@@ -45,38 +45,15 @@ module Timekeeping::RollbackReconcile
 
   Reconciled = Data.define(:entries, :reservations, :entry_audits, :reservation_operations, :idempotency_receipts)
 
-  # Each receipt part the prepared application holds: its table, the contract
-  # definition that names its columns (handoff_api.json), and what identifies
-  # a row, as Differs lists it: the audit row's id, `invoice_id/operation_id`
-  # or `company_id/key`.
-  Part = Data.define(:model, :columns, :identify) do
-    def self.of(model, definition, identify)
-      columns = Timekeeping::Contracts.document(:handoff_api).dig("$defs", definition, "properties").keys
-      new(model:, columns: columns.freeze, identify:)
-    end
-
-    # Every row, in contract form: timestamps in UTC to the microsecond, every
-    # other column as stored (§8 item 1).
-    def held
-      model.pluck(*columns).map do |values|
-        columns.zip(values).to_h { |column, value| [column, column.end_with?("_at") ? value&.utc&.iso8601(6) : value] }
-      end
-    end
-  end
-
   JOINED = ->(*columns) { ->(row) { row.values_at(*columns).join("/") } }
 
-  # By the name Differs lists it under: the checkpoint member it reconciles,
-  # and the part.
+  # By the name Differs lists it under: the checkpoint member it reconciles
+  # (Timekeeping::PreparedRows::PARTS), and what identifies a row: the audit
+  # row's id, `invoice_id/operation_id` or `company_id/key`.
   PARTS = {
-    entry_audit: [:entry_audits, Part.of(Timekeeping::EntryAudit, "entry_audit", ->(row) { row.fetch("id") })],
-    reservation_operation: [
-      :reservation_operations,
-      Part.of(Timekeeping::ReservationOperation, "operation_receipt", JOINED.call("invoice_id", "operation_id"))
-    ],
-    idempotency_receipt: [
-      :idempotency_receipts, Part.of(Timekeeping::IdempotencyReceipt, "idempotency_receipt", JOINED.call("company_id", "key"))
-    ]
+    entry_audit: [:entry_audits, ->(row) { row.fetch("id") }],
+    reservation_operation: [:reservation_operations, JOINED.call("invoice_id", "operation_id")],
+    idempotency_receipt: [:idempotency_receipts, JOINED.call("company_id", "key")]
   }.freeze
 
   # Reconciles `checkpoint`, anything with the members of
@@ -107,12 +84,11 @@ module Timekeeping::RollbackReconcile
 
   # What the prepared application holds against what the checkpoint carries.
   def self.incoming_owner_lists(checkpoint)
-    held_entries = Timekeeping::Entry.includes(:reservations).order(:id).map(&:to_contract)
-    lists = by_identity(:entry, checkpoint.entries, held_entries) { |entry| entry.fetch("id") }
+    lists = by_identity(:entry, checkpoint.entries, Timekeeping::PreparedRows.entries) { |entry| entry.fetch("id") }
     lists[:reservations_differ] = reservations_differ(checkpoint.reservations)
 
-    PARTS.each do |name, (member, part)|
-      lists.merge!(by_identity(name, checkpoint.public_send(member), part.held, &part.identify))
+    PARTS.each do |name, (member, identify)|
+      lists.merge!(by_identity(name, checkpoint.public_send(member), Timekeeping::PreparedRows.held(member), &identify))
     end
     lists
   end
@@ -138,7 +114,7 @@ module Timekeeping::RollbackReconcile
   # Entry ids whose reservations, as a set, are not the checkpoint's.
   def self.reservations_differ(carried)
     carried = carried.group_by(&:entry_id).transform_values(&:to_set)
-    held = Timekeeping::Reservation.all.map(&:to_value).group_by(&:entry_id).transform_values(&:to_set)
+    held = Timekeeping::PreparedRows.reservations.group_by(&:entry_id).transform_values(&:to_set)
 
     (carried.keys | held.keys).reject { |entry_id| carried[entry_id] == held[entry_id] }
   end
