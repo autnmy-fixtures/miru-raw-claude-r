@@ -71,6 +71,35 @@ RSpec.describe Timekeeping::Ownership, type: :model do
     end
   end
 
+  # The settle step's exception (§10.5 step 2) on this application's side:
+  # only while it is the outgoing owner, between close and freeze, and only
+  # for an older generation.
+  describe "#settling?" do
+    def settling?(record, carried)
+      described_class.new(record).settling?(carried)
+    end
+
+    it "is true for an older generation while the monolith owner's handoff has admission closed" do
+      expect(settling?({ generation: 3, owner: "monolith", state: "closed" }, 2)).to be(true)
+    end
+
+    it "is false for the generation close raised, and for a newer one" do
+      expect([3, 4].map { |carried| settling?({ generation: 3, owner: "monolith", state: "closed" }, carried) }).to eq([false, false])
+    end
+
+    {
+      "before close" => { generation: 2, owner: "monolith", state: "open" },
+      "after freeze" => { generation: 3, owner: "monolith", state: "frozen" },
+      "after an aborted handoff" => { generation: 3, owner: "monolith", state: "open" },
+      "while Timekeeping is the outgoing owner" => { generation: 2, owner: "timekeeping", state: "closed" },
+      "while the legacy owner hands off" => { generation: 1, owner: "legacy", state: "closed" }
+    }.each do |name, record|
+      it "is false #{name}" do
+        expect(settling?(record, record.fetch(:generation) - 1)).to be(false)
+      end
+    end
+  end
+
   describe "the database" do
     it "holds one record at most" do
       set_timekeeping_ownership!(TimekeepingOwnershipStates::BEFORE_FIRST_HANDOFF)

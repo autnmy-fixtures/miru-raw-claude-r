@@ -50,8 +50,9 @@ as `Timekeeping::ReservationClient` does (`Prepared`, a `Receipt` with the contr
 the contract's problem raised), so the boundary runs the same save order under either owner. The invoice
 operation worker delivers commit and abort to the provider through the same client, admitted the same
 way and answered with the same `Receipt` (`not-found` for a commit of an operation never prepared), so
-delivery reads either owner one way. The settle step's exception for an old-generation commit or abort
-(§10.5 step 2) is not taken under that owner yet. An entry change there records its audit row and its
+delivery reads either owner one way. During a handoff out of that owner, the client also admits the
+settle step's commit or abort carrying the old generation (§10.5 step 2, `Timekeeping::Ownership#settling?`),
+only for an operation the provider registered, as Timekeeping's `ReservationProtocol` does. An entry change there records its audit row and its
 entry snapshot through `Timekeeping::LocalEntryChange`, into the prepared application's outbox
 (`timekeeping_outbox_snapshots`, Timekeeping's `outbox_snapshots` shape), and `Timekeeping::LocalRelay`
 drains that outbox into `timesheet_entries` through the projection consumer, on its own

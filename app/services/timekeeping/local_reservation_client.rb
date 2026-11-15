@@ -33,10 +33,20 @@
 # entries, then ownership-moving while a handoff has admission closed. The
 # reservation change runs inside that transaction, as a savepoint, so it
 # commits with the admission or not at all. Commit and abort are admitted the
-# same way, under the generation the intent was admitted under. The settle
-# step's exception for an old-generation commit or abort (§10.5 step 2) is
-# not taken here yet: one is refused as stale-generation, so it stays
-# undelivered and the fence refuses to freeze.
+# same way, under the generation the intent was admitted under.
+#
+# Settle (§10.5 step 2). During a handoff out of `monolith`, "the outgoing
+# owner still applies a commit or abort that carries the old generation, and
+# only for an operation it registered". Commit and abort therefore also admit
+# an intent that Timekeeping::Ownership#settling? covers: one carrying an
+# older generation while this application is the outgoing owner and the
+# handoff has admission closed, between close and freeze. They answer it as
+# Timekeeping's ReservationProtocol answers one: a commit of an operation
+# never prepared here is stale-generation, not not-found, and an abort of one
+# is the usual no-op aborted receipt (§9.3), so the abort the ledger recorded
+# for a prepare that never ran lets settle finish. Prepare under the old
+# generation stays stale, and freeze, or an aborted handoff, ends the
+# exception.
 #
 # A reservation-refused prepare is answered by the local provider, not
 # raised, so its transaction commits whatever the prepare's `resolves`
@@ -98,18 +108,33 @@ class Timekeeping::LocalReservationClient
 
     def resolve(call, intent)
       answer = Timekeeping::Ownership.transaction do
-        admit!(intent)
-        @reservations.public_send(call, invoice_id: intent.invoice_id, operation_id: intent.operation_id)
+        ownership = admit!(intent, settle: true)
+        @reservations.public_send(call, invoice_id: intent.invoice_id, operation_id: intent.operation_id).tap do |resolved|
+          unregistered!(ownership, intent) if resolved.is_a?(Local::NotPrepared)
+        end
       end
       ANSWERS.fetch(answer.class).call(answer)
     end
 
-    def admit!(intent)
-      ownership = Timekeeping::Ownership.lock_shared!
-      if intent.generation != ownership.generation || !ownership.owner_monolith?
-        raise refusal("stale-generation", 409, ownership, intent)
+    # The local ownership row, held FOR SHARE for the rest of the caller's
+    # transaction, or the refusal. `settle: true` is for commit and abort
+    # only: it also admits an intent the settle step's exception covers.
+    def admit!(intent, settle: false)
+      Timekeeping::Ownership.lock_shared!.tap do |ownership|
+        next if settle && ownership.settling?(intent.generation)
+
+        if intent.generation != ownership.generation || !ownership.owner_monolith?
+          raise refusal("stale-generation", 409, ownership, intent)
+        end
+        raise refusal("ownership-moving", 503, ownership, intent, retryable: true) unless ownership.state_open?
       end
-      raise refusal("ownership-moving", 503, ownership, intent, retryable: true) unless ownership.state_open?
+    end
+
+    # A commit of an operation never prepared here: not-found under the
+    # current generation, and stale under the settle step's exception, which
+    # covers only an operation this application registered.
+    def unregistered!(ownership, intent)
+      raise refusal("stale-generation", 409, ownership, intent) if ownership.settling?(intent.generation)
     end
 
     def refusal(slug, status, ownership, intent, retryable: false)

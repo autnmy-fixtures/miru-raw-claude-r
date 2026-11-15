@@ -131,22 +131,88 @@ RSpec.describe Timekeeping::HandoffSettle do
     end
   end
 
-  # The `monolith` owner takes delivery, but not yet the settle step's
-  # exception for a commit or abort carrying the old generation.
-  it "leaves an old-generation outcome undelivered under the monolith owner, after resolving the pending intent" do
-    intent = prepared_save
-    set_timekeeping_ownership!(generation: 3, owner: "monolith", state: "closed")
+  # A re-cutover (§10.2 step 6): the outgoing owner is the prepared
+  # application, which takes delivery in-process
+  # (Timekeeping::LocalReservationClient) and still applies the old
+  # generation's commit and abort during settle, only for an operation it
+  # registered. No call reaches Timekeeping.
+  describe "out of the monolith owner" do
+    let(:offsets) { (0..).each }
 
-    result = described_class.call(generation: 3)
+    before { set_timekeeping_ownership!(generation: 2, owner: "monolith", state: "open") }
 
-    expect(result).to eq(Timekeeping::InvoiceOperationWorker::Result.new(
-      recovered: { intent.operation_id => "failed" }, delivered: [], undelivered: [intent.operation_id]
-    ))
-    expect(Rails.error).to have_received(:report).with(
-      an_object_having_attributes(status: 409, type: "stale-generation"), hash_including(context: hash_including(delivery: :abort))
-    )
-    expect(intent.reload).to have_attributes(state: "failed", delivered_at: nil)
-    expect(resolve_calls).to eq([])
-    expect { Timekeeping::HandoffFence.call(:freeze, generation: 3) }.to raise_error(Timekeeping::HandoffFence::Unsettled, /failed #{intent.operation_id}/)
+    after { expect(fake.calls).to be_empty }
+
+    def held_entry
+      Timekeeping::Entry.create!(
+        id: TimesheetEntry.maximum(:id).to_i + 1_000 + offsets.next, company_id: company.id, project_id: 7, user_id: 3,
+        duration: 90.7, work_date: Date.new(2026, 11, 2), bill_status: "unbilled"
+      )
+    end
+
+    def open_save(entry_ids)
+      Timekeeping::InvoiceOperation.open!(invoice_id: invoice_ids.next, company_id: company.id, kind: :save, entry_ids:)
+    end
+
+    # §9.2 steps 1 and 2 under this owner.
+    def locally_prepared
+      open_save([held_entry.id]).tap do |intent|
+        Timekeeping::LocalReservationClient.new.prepare(intent, invoice_state: :draft, resolves: nil)
+      end
+    end
+
+    def local_state(intent)
+      [
+        Timekeeping::Reservation.where(invoice_id: intent.invoice_id).pluck(:state),
+        Timekeeping::ReservationOperation.find_by(invoice_id: intent.invoice_id, operation_id: intent.operation_id)&.state
+      ]
+    end
+
+    def close!
+      Timekeeping::HandoffFence.call(:close, generation: 2)
+    end
+
+    it "resolves the pending save and delivers every outcome under the old generation, so the fence freezes" do
+      committed = locally_prepared.tap { |intent| ActiveRecord::Base.transaction(requires_new: true) { intent.succeed! } }
+      pending = locally_prepared
+      close!
+
+      result = described_class.call(generation: 3)
+
+      aggregate_failures do
+        expect(result).to eq(Timekeeping::InvoiceOperationWorker::Result.new(
+          recovered: { pending.operation_id => "failed" }, delivered: [committed.operation_id, pending.operation_id], undelivered: []
+        ))
+        expect([committed, pending].map(&:reload).map(&:generation)).to eq([2, 2])
+        expect([local_state(committed), local_state(pending)]).to eq([[["committed"], "committed"], [[], "aborted"]])
+        expect(Timekeeping::InvoiceOperation.unsettled).to be_empty
+      end
+      expect(Timekeeping::HandoffFence.call(:freeze, generation: 3)).to have_attributes(state: "frozen", generation: 3, owner: "monolith")
+    end
+
+    it "settles a save whose prepare never ran: recovery records failed and the abort is the no-op receipt (§9.3)" do
+      intent = open_save([held_entry.id])
+      close!
+
+      expect(described_class.call(generation: 3)).to eq(Timekeeping::InvoiceOperationWorker::Result.new(
+        recovered: { intent.operation_id => "failed" }, delivered: [intent.operation_id], undelivered: []
+      ))
+      expect(local_state(intent)).to eq([[], "aborted"])
+      expect(Timekeeping::HandoffFence.call(:freeze, generation: 3).state).to eq("frozen")
+    end
+
+    it "keeps a commit of an operation never registered here undelivered as stale-generation, and the fence refuses to freeze" do
+      intent = open_save([held_entry.id]).tap { |open| ActiveRecord::Base.transaction(requires_new: true) { open.succeed! } }
+      close!
+
+      expect(described_class.call(generation: 3)).to eq(Timekeeping::InvoiceOperationWorker::Result.new(
+        recovered: {}, delivered: [], undelivered: [intent.operation_id]
+      ))
+      expect(Rails.error).to have_received(:report).with(
+        an_object_having_attributes(status: 409, type: "stale-generation"), hash_including(context: hash_including(delivery: :commit))
+      )
+      expect([intent.reload.delivered_at, local_state(intent)]).to eq([nil, [[], nil]])
+      expect { Timekeeping::HandoffFence.call(:freeze, generation: 3) }.to raise_error(Timekeeping::HandoffFence::Unsettled, /succeeded #{intent.operation_id}/)
+    end
   end
 end

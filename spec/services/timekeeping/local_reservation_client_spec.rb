@@ -317,6 +317,94 @@ RSpec.describe Timekeeping::LocalReservationClient do
     end
   end
 
+  # §10.5 step 2: during a handoff out of `monolith`, the outgoing owner
+  # still applies a commit or abort carrying the old generation, and only for
+  # an operation it registered, as Timekeeping's ReservationProtocol does.
+  describe "the settle step's exception (§10.5 step 2)" do
+    let(:prepared) { intent }
+
+    before do
+      prepare(prepared)
+      set_timekeeping_ownership!(generation: generation + 1, owner: "monolith", state: "closed")
+    end
+
+    it "commits an operation registered here under the old generation" do
+      expect(client.commit(prepared)).to eq(Timekeeping::ReservationClient::Receipt.new(status: "committed"))
+      expect([reservations, receipt_of(prepared)]).to eq([[[entry.id, 10, "committed", "active", true]], "committed"])
+    end
+
+    it "aborts an operation registered here under the old generation" do
+      expect(client.abort(prepared)).to eq(Timekeeping::ReservationClient::Receipt.new(status: "aborted"))
+      expect([reservations, receipt_of(prepared)]).to eq([[], "aborted"])
+    end
+
+    it "answers a resend with the stored receipt" do
+      client.commit(prepared)
+      before = local_state
+
+      expect(client.commit(prepared)).to eq(Timekeeping::ReservationClient::Receipt.new(status: "committed"))
+      expect(local_state).to eq(before)
+    end
+
+    it "refuses a commit of an operation never registered here as stale-generation, not not-found, and records nothing" do
+      unregistered = intent(invoice_id: 11)
+      before = local_state
+
+      expect { client.commit(unregistered) }.to raise_error(problem("stale-generation", status: 409, retryable: false))
+      expect(local_state).to eq(before)
+    end
+
+    it "aborts an operation never registered here as the no-op receipt, so a prepare that never ran lets settle finish (§9.3)" do
+      unregistered = intent(invoice_id: 11)
+      before = reservations
+
+      expect(client.abort(unregistered)).to eq(Timekeeping::ReservationClient::Receipt.new(status: "aborted"))
+      expect([reservations, receipt_of(unregistered)]).to eq([before, "aborted"])
+    end
+
+    it "keeps a prepare under the old generation stale" do
+      before = local_state
+
+      expect { prepare(intent(invoice_id: 11)) }.to raise_error(problem("stale-generation", status: 409, retryable: false))
+      expect(local_state).to eq(before)
+    end
+
+    it "refuses a commit or abort under the generation close raised as ownership-moving, retryable" do
+      current = intent(invoice_id: 11, generation: generation + 1)
+
+      expect { client.commit(current) }.to raise_error(problem("ownership-moving", status: 503, retryable: true))
+      expect { client.abort(current) }.to raise_error(problem("ownership-moving", status: 503, retryable: true))
+      expect(receipt_of(current)).to be_nil
+    end
+
+    {
+      "once the handoff froze" => { owner: "monolith", state: "frozen" },
+      "once the handoff was aborted" => { owner: "monolith", state: "open" },
+      "once ownership flipped to Timekeeping" => { owner: "timekeeping", state: "open" }
+    }.each do |name, record|
+      it "refuses the old generation as stale-generation #{name}, and resolves nothing" do
+        set_timekeeping_ownership!(generation: generation + 1, **record)
+        before = local_state
+
+        expect { client.commit(prepared) }.to raise_error(problem("stale-generation", status: 409, retryable: false))
+        expect { client.abort(prepared) }.to raise_error(problem("stale-generation", status: 409, retryable: false))
+        expect(local_state).to eq(before)
+      end
+    end
+
+    it "holds the ownership row FOR SHARE before it touches a reservation" do
+      statements = []
+      subscriber = ActiveSupport::Notifications.subscribe("sql.active_record") { |*, payload| statements << payload[:sql] }
+      client.commit(prepared)
+      ActiveSupport::Notifications.unsubscribe(subscriber)
+
+      admission = statements.index { |sql| sql.include?("timekeeping_ownerships") && sql.include?("FOR SHARE") }
+      first_reservation = statements.index { |sql| sql.include?("timekeeping_reservation") }
+      expect(admission).not_to be_nil
+      expect(admission).to be < first_reservation
+    end
+  end
+
   describe ".problem" do
     it "builds every problem it raises from a body the contract's problem allows" do
       bodies = []
