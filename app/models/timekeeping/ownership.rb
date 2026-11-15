@@ -118,5 +118,20 @@ class Timekeeping::Ownership < ApplicationRecord
     !state_open? || generation > INITIAL_GENERATION
   end
 
+  # The settle step's exception (§10.5 step 2) on this application's side:
+  # "During this step only, the outgoing owner still applies a commit or abort
+  # that carries the old generation, and only for an operation it registered."
+  # True for an intent carrying an older generation while this application,
+  # as the `monolith` owner, is the outgoing owner of a handoff whose
+  # admission is closed: after close and before freeze, which is when settle
+  # runs. Freeze ends it. So does abort, which reopens admission at the raised
+  # generation and leaves the old one stale for good. Only
+  # Timekeeping::LocalReservationClient's commit and abort ask it; no other
+  # write is admitted under an old generation. Timekeeping's copy has the same
+  # test for its own owner.
+  def settling?(carried)
+    owner_monolith? && state_closed? && carried < generation
+  end
+
   def summary = TimekeepingReservations::Handoff.summary(self)
 end
