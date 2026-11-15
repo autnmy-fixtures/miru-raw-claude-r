@@ -80,6 +80,19 @@ application's tables (`Timekeeping::CheckpointReconcile.differences`): kept invo
 the active reservations, `timesheet_entries` against the carried entries, and money by financial
 snapshot. Any difference raises `CheckpointReconcile::Differs`, and the handoff is aborted.
 
+`Timekeeping::Rollback` (`app/services/timekeeping/rollback.rb`, §10.2 step 6, §10.5) is the handoff tool
+that runs those steps in order, as `Timekeeping::FirstCutover` runs the first cutover's: close this
+application's copy of the ownership record, then Timekeeping's; settle (Timekeeping, the outgoing owner,
+applies the old generation's commit and abort while its copy is closed); freeze both; wait for
+Timekeeping's relay to drain its outbox into `timesheet_entries`; take the checkpoint, load it and
+reconcile it; then flip this copy, the incoming owner, first and Timekeeping's second. It resumes from
+where the two copies stand. The take is a read of a frozen Timekeeping, so a resumed transfer takes it
+again, and a load that already ran (`AlreadyLoaded`) goes on to reconcile. A take refused as
+`checkpoint-unsettled`, a load refused, or a reconcile difference aborts the handoff on both copies;
+anything else leaves them fenced for a resume or `#abort!`. An abort leaves the prepared tables as the
+load left them: a later rollback reconciles them against Timekeeping as it then stands, and aborts on
+any write Timekeeping took since, so it never flips onto them unreconciled.
+
 Timekeeping's provider is `ReservationProtocol` (`services/timekeeping/app/services/reservation_protocol.rb`),
 behind the reservation API's three endpoints. It keeps the same protocol on tables with the same shape,
 `reservations` and `reservation_operations`, so a checkpoint carries reservations and receipts either way
@@ -136,7 +149,7 @@ The existing application reads them at run time through `Timekeeping::Contracts`
 | `contracts/v1/entry_api.json` | Entry API (§5.2) and the user token (§6.1) | Timekeeping | Write gateway | `TimekeepingContracts::FakeTimekeeping` |
 | `contracts/v1/reservation_api.json` | Prepare, commit, abort (§5.3) | Timekeeping | Invoice reservation boundary, invoice operation worker | `TimekeepingContracts::FakeTimekeeping` |
 | `contracts/v1/entry_snapshot.json` | Entry snapshot event and its delivery (§5.4) | Timekeeping relay | Projection consumer | `TimekeepingContracts::FakeRelay` |
-| `contracts/v1/handoff_api.json` | Timekeeping's side of the handoff procedure (§10.1, §10.5): its copy of the ownership record, the relay's progress, the fence steps, the first cutover's checkpoint load and reconcile, and the rollback's checkpoint taken out of Timekeeping | Timekeeping | The handoff tool, `Timekeeping::FirstCutover`, through `Timekeeping::HandoffClient` | `TimekeepingContracts::FakeHandoff` |
+| `contracts/v1/handoff_api.json` | Timekeeping's side of the handoff procedure (§10.1, §10.5): its copy of the ownership record, the relay's progress, the fence steps, the first cutover's checkpoint load and reconcile, and the rollback's checkpoint taken out of Timekeeping | Timekeeping | The handoff tools, `Timekeeping::FirstCutover` and `Timekeeping::Rollback`, through `Timekeeping::HandoffClient` | `TimekeepingContracts::FakeHandoff` |
 | `contracts/v1/common.json` | Entry, problem types, ids, generation, duration | — | — | — |
 
 Each contract file carries two extensions that JSON Schema ignores:
