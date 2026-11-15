@@ -239,16 +239,14 @@ RSpec.describe Timekeeping::InvoiceOperationWorker do
       expect(worker.run).to eq(described_class::Result.new(recovered: {}, delivered: [], undelivered: []))
     end
 
-    { "legacy" => 0, "monolith" => 2 }.each do |owner, generation|
-      it "refuses to deliver under the #{owner} owner, after recovery, and marks nothing delivered" do
-        intent = open_intent
-        set_timekeeping_ownership!(generation:, owner:, state: "open")
+    it "refuses to deliver under the legacy owner, after recovery, and marks nothing delivered" do
+      intent = open_intent
+      set_timekeeping_ownership!(generation: 0, owner: "legacy", state: "open")
 
-        expect { described_class.new(clock: -> { past_the_limit }).run }
-          .to raise_error(described_class::OwnerUnavailable, /owner #{owner} has no reservation provider yet/)
-        expect(intent.reload).to have_attributes(state: "failed", delivered_at: nil)
-        expect(resolve_calls).to eq([])
-      end
+      expect { described_class.new(clock: -> { past_the_limit }).run }
+        .to raise_error(described_class::OwnerUnavailable, /owner legacy has no reservation provider yet/)
+      expect(intent.reload).to have_attributes(state: "failed", delivered_at: nil)
+      expect(resolve_calls).to eq([])
     end
 
     it "refuses to deliver when Timekeeping is not configured here" do
@@ -256,6 +254,154 @@ RSpec.describe Timekeeping::InvoiceOperationWorker do
       Rails.configuration.x.timekeeping.url = nil
 
       expect { worker.run }.to raise_error(Timekeeping::ReservationClient::NotConfigured, /TIMEKEEPING_URL/)
+    end
+  end
+
+  # Under `monolith`, the prepared application after a rollback (§10.5), the
+  # worker delivers to its own reservation table, in-process, through
+  # Timekeeping::LocalReservationClient: no call reaches Timekeeping.
+  describe "under the monolith owner" do
+    let(:generation) { 2 }
+    let(:local) { Timekeeping::LocalReservations.new(entries: Timekeeping::LocalEntries.new) }
+    let(:offsets) { (0..).each }
+
+    before do
+      set_timekeeping_ownership!(generation:, owner: "monolith", state: "open")
+    end
+
+    after { expect(fake.calls).to be_empty }
+
+    # An entry the prepared application holds; the projection need not.
+    def held_entry
+      Timekeeping::Entry.create!(
+        id: TimesheetEntry.maximum(:id).to_i + 1_000 + offsets.next, company_id: company.id, project_id: 7, user_id: 3,
+        duration: 90.7, work_date: Date.new(2026, 11, 2), bill_status: "unbilled"
+      )
+    end
+
+    # §9.2 steps 1 and 2 under this owner: the intent is open and the
+    # prepared application prepared it.
+    def locally_prepared
+      held = held_entry
+      open_intent(entry_ids: [held.id]).tap do |intent|
+        Timekeeping::LocalReservationClient.new.prepare(intent, invoice_state: :draft, resolves: nil)
+      end
+    end
+
+    def local_succeeded
+      locally_prepared.tap { |intent| ActiveRecord::Base.transaction(requires_new: true) { intent.succeed! } }
+    end
+
+    def local_failed
+      locally_prepared.tap(&:record_failure!)
+    end
+
+    def local_state(intent)
+      [
+        Timekeeping::Reservation.where(invoice_id: intent.invoice_id).pluck(:state),
+        Timekeeping::ReservationOperation.find_by(invoice_id: intent.invoice_id, operation_id: intent.operation_id)&.state
+      ]
+    end
+
+    it "delivers a succeeded outcome as commit to the prepared application, and marks it delivered" do
+      intent = local_succeeded
+
+      result = worker.run
+
+      aggregate_failures do
+        expect(result).to eq(described_class::Result.new(recovered: {}, delivered: [intent.operation_id], undelivered: []))
+        expect(intent.reload.delivered_at).to be_present
+        expect(local_state(intent)).to eq([["committed"], "committed"])
+      end
+    end
+
+    it "delivers a failed outcome as abort, which drops the save's provisional reservation" do
+      intent = local_failed
+
+      worker.run
+
+      expect([intent.reload.delivered_at.present?, local_state(intent)]).to eq([true, [[], "aborted"]])
+    end
+
+    it "sends nothing again for an outcome already delivered" do
+      intent = local_succeeded
+      worker.run
+      before = Timekeeping::OutboxSnapshot.count
+
+      expect(worker.run.delivered).to eq([])
+      expect([local_state(intent), Timekeeping::OutboxSnapshot.count]).to eq([[["committed"], "committed"], before])
+    end
+
+    it "confirms a commit already applied, by its stored receipt, when the earlier delivery was not marked (§9.3 lost response)" do
+      intent = local_succeeded
+      local.commit(invoice_id: intent.invoice_id, operation_id: intent.operation_id)
+
+      expect(worker.run.delivered).to eq([intent.operation_id])
+      expect(local_state(intent)).to eq([["committed"], "committed"])
+    end
+
+    it "recovers a save pending past its time limit as failed, and aborts its reservation in the same sweep" do
+      intent = locally_prepared
+
+      result = described_class.new(clock: -> { past_the_limit }).run
+
+      expect([result.recovered, result.delivered]).to eq([{ intent.operation_id => "failed" }, [intent.operation_id]])
+      expect(local_state(intent)).to eq([[], "aborted"])
+    end
+
+    it "delivers abort for an operation whose prepare never ran: a no-op with a receipt (§9.3)" do
+      intent = open_intent(entry_ids: [held_entry.id])
+
+      expect(described_class.new(clock: -> { past_the_limit }).run.delivered).to eq([intent.operation_id])
+      expect(local_state(intent)).to eq([[], "aborted"])
+    end
+
+    it "never marks a commit delivered when the prepared application holds the operation as aborted" do
+      intent = local_succeeded
+      local.abort(invoice_id: intent.invoice_id, operation_id: intent.operation_id)
+
+      expect(worker.run.undelivered).to eq([intent.operation_id])
+      expect(Rails.error).to reported(described_class::OutcomeMismatch)
+      expect(intent.reload.delivered_at).to be_nil
+    end
+
+    it "keeps a commit of an operation never prepared here undelivered, as not-found" do
+      intent = open_intent(entry_ids: [held_entry.id])
+      ActiveRecord::Base.transaction(requires_new: true) { intent.succeed! }
+
+      expect(worker.run.undelivered).to eq([intent.operation_id])
+      expect(Rails.error).to have_received(:report).with(an_object_having_attributes(status: 404, type: "not-found"), anything)
+    end
+
+    it "keeps an outcome admitted under another generation undelivered, as stale-generation, without holding back the rest" do
+      stale = Timekeeping::InvoiceOperation.create!(
+        operation_id: SecureRandom.uuid, invoice_id: invoice_ids.next, company_id: company.id, kind: "discard", entry_ids: [], state: "failed", generation: 1
+      )
+      delivered = local_failed
+
+      result = worker.run
+
+      expect([result.delivered, result.undelivered]).to eq([[delivered.operation_id], [stale.operation_id]])
+      expect(Rails.error).to have_received(:report).with(
+        an_object_having_attributes(status: 409, type: "stale-generation"), hash_including(context: hash_including(operation_id: stale.operation_id, delivery: :abort))
+      )
+      expect(Timekeeping::ReservationOperation.find_by(operation_id: stale.operation_id)).to be_nil
+    end
+
+    it "keeps an outcome undelivered, as ownership-moving, while a handoff has admission closed" do
+      intent = local_succeeded
+      set_timekeeping_ownership!(generation:, owner: "monolith", state: "closed")
+
+      expect(worker.run.undelivered).to eq([intent.operation_id])
+      expect(Rails.error).to have_received(:report).with(an_object_having_attributes(status: 503, type: "ownership-moving"), anything)
+      expect(local_state(intent)).to eq([["provisional"], "prepared"])
+    end
+
+    it "needs no Timekeeping configuration" do
+      intent = local_succeeded
+      Rails.configuration.x.timekeeping.url = nil
+
+      expect(worker.run.delivered).to eq([intent.operation_id])
     end
   end
 end

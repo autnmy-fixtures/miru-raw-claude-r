@@ -307,12 +307,10 @@ RSpec.describe "Timekeeping invoice writes through the reservation boundary", ty
   # Under `monolith`, the prepared application after a rollback (§10.5), the
   # same endpoints prepare in-process against its own reservation table and
   # entries (Timekeeping::LocalReservationClient): no call reaches
-  # Timekeeping, and no invoice write touches timesheet_entries. Commit and
-  # abort are not delivered to it by the worker yet, so these examples
-  # deliver them as the worker will.
+  # Timekeeping, and no invoice write touches timesheet_entries. The invoice
+  # operation worker delivers commit and abort to the same provider.
   describe "under the monolith owner" do
     let(:first_id) { TimesheetEntry.maximum(:id).to_i + 1_000 }
-    let(:local) { Timekeeping::LocalReservations.new(entries: Timekeeping::LocalEntries.new) }
     let(:held_x) { held_entry(tenant_a, offset: 0) }
     let(:held_y) { held_entry(tenant_a, offset: 1) }
 
@@ -337,13 +335,11 @@ RSpec.describe "Timekeeping invoice writes through the reservation boundary", ty
       Timekeeping::Reservation.order(:entry_id).pluck(:entry_id, :invoice_id, :state, :disposition, :edit_lock)
     end
 
-    # Commit or abort of every undelivered outcome, as the worker will
-    # deliver it under this owner.
+    # Commit or abort of every undelivered outcome, delivered by the invoice
+    # operation worker to the prepared application's provider (§9.2 step 4).
     def deliver_locally!
-      Timekeeping::InvoiceOperation.undelivered.order(:id).each do |intent|
-        local.public_send(intent.delivery, invoice_id: intent.invoice_id, operation_id: intent.operation_id)
-        intent.mark_delivered!
-      end
+      undelivered = Timekeeping::InvoiceOperation.undelivered.order(:created_at, :id).pluck(:operation_id)
+      expect(worker.run).to have_attributes(delivered: undelivered, undelivered: [])
     end
 
     def local_invoice_with_lines

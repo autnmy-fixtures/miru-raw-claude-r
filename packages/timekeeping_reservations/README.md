@@ -47,8 +47,11 @@ through the provider, by way of `Timekeeping::LocalReservationClient`
 (`app/services/timekeeping/local_reservation_client.rb`): it admits the prepare under the intent's
 generation in its own transaction, as Timekeeping admits one under `X-Ownership-Generation`, and answers
 as `Timekeeping::ReservationClient` does (`Prepared`, a `Receipt` with the contract's string status, or
-the contract's problem raised), so the boundary runs the same save order under either owner. Commit and
-abort are not delivered to the provider yet. An entry change there records its audit row and its
+the contract's problem raised), so the boundary runs the same save order under either owner. The invoice
+operation worker delivers commit and abort to the provider through the same client, admitted the same
+way and answered with the same `Receipt` (`not-found` for a commit of an operation never prepared), so
+delivery reads either owner one way. The settle step's exception for an old-generation commit or abort
+(§10.5 step 2) is not taken under that owner yet. An entry change there records its audit row and its
 entry snapshot through `Timekeeping::LocalEntryChange`, into the prepared application's outbox
 (`timekeeping_outbox_snapshots`, Timekeeping's `outbox_snapshots` shape), and `Timekeeping::LocalRelay`
 drains that outbox into `timesheet_entries` through the projection consumer, on its own

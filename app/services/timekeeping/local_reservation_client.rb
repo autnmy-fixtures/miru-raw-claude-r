@@ -1,26 +1,30 @@
 # frozen_string_literal: true
 
-# The `monolith` owner's side of the reservation API for the invoice
-# reservation boundary (docs/architecture/timekeeping-soa.md §5.3, §9.2 step
-# 2, §10.5): prepare of one ledger intent, run in-process against the
-# prepared application's reservation table (Timekeeping::LocalReservations
-# over Timekeeping::LocalEntries), and answered exactly as
-# Timekeeping::ReservationClient answers the `timekeeping` owner's prepare
-# over HTTP. The boundary therefore runs the same save order, the same retry
-# and the same reconciliation under either owner.
+# The `monolith` owner's side of the reservation API
+# (docs/architecture/timekeeping-soa.md §5.3, §9.2, §10.5): prepare of one
+# ledger intent for the invoice reservation boundary, and commit and abort of
+# one for the invoice operation worker (§9.2 step 4, §11.1), run in-process
+# against the prepared application's reservation table
+# (Timekeeping::LocalReservations over Timekeeping::LocalEntries), and
+# answered exactly as Timekeeping::ReservationClient answers the
+# `timekeeping` owner's calls over HTTP. The boundary therefore runs the same
+# save order, the same retry and the same reconciliation, and the worker the
+# same delivery, under either owner.
 #
 # - `prepared` answers ReservationClient::Prepared, with the desired set's
 #   ReservationClient::PreparedEntry facts (L8).
 # - A stored terminal receipt answers ReservationClient::Receipt, with the
 #   contract's string status ("committed" or "aborted"), which the intent
-#   reconciles (§9.2 step 3).
+#   reconciles (§9.2 step 3). Commit and abort answer the Receipt they
+#   leave, which the worker matches against the delivery (§9.2 step 4).
 # - Everything else raises the problem Timekeeping would answer, as
 #   ReservationClient::Problem with a body the contract's problem allows:
 #   reservation-refused with each refused entry (F1, L8), operation-unresolved
-#   (retryable), idempotency-conflict for a replay with another body, and the
-#   admission refusals below.
+#   (retryable), idempotency-conflict for a replay with another body,
+#   not-found for a commit of an operation never prepared here (an abort of
+#   one is the no-op receipt of §9.3), and the admission refusals below.
 #
-# Admission (§10.1). Timekeeping admits a prepare under the generation it
+# Admission (§10.1). Timekeeping admits each call under the generation it
 # carries in X-Ownership-Generation. Here the provider runs in its own
 # transaction, which holds the local ownership row FOR SHARE, so a handoff
 # that raises the generation waits for it, and refuses it, as Timekeeping's
@@ -28,15 +32,17 @@
 # admitted under another generation or this application does not own the
 # entries, then ownership-moving while a handoff has admission closed. The
 # reservation change runs inside that transaction, as a savepoint, so it
-# commits with the admission or not at all.
+# commits with the admission or not at all. Commit and abort are admitted the
+# same way, under the generation the intent was admitted under. The settle
+# step's exception for an old-generation commit or abort (§10.5 step 2) is
+# not taken here yet: one is refused as stale-generation, so it stays
+# undelivered and the fence refuses to freeze.
 #
 # A reservation-refused prepare is answered by the local provider, not
 # raised, so its transaction commits whatever the prepare's `resolves`
 # resolved for the invoice's earlier operation, as Timekeeping keeps it. The
 # problem is raised only after that commit.
 #
-# Commit and abort are the invoice operation worker's (§11.1), and arrive
-# with its delivery under this owner.
 class Timekeeping::LocalReservationClient
   Client = Timekeeping::ReservationClient
   Local = Timekeeping::LocalReservations
@@ -46,6 +52,9 @@ class Timekeeping::LocalReservationClient
   ANSWERS = {
     Local::Prepared => ->(answer) { Client::Prepared.new(entries: answer.entries) },
     Local::Receipt => ->(answer) { Client::Receipt.new(status: answer.status.to_s) },
+    Local::NotPrepared => ->(answer) {
+      raise problem("not-found", 404, detail: "operation #{answer.operation_id} was never prepared")
+    },
     Local::Unresolved => ->(answer) {
       raise problem("operation-unresolved", 409, retryable: true, detail: "operation #{answer.operation_id} is not resolved")
     },
@@ -79,7 +88,21 @@ class Timekeeping::LocalReservationClient
     ANSWERS.fetch(answer.class).call(answer)
   end
 
+  # §9.2 step 4, the calls ReservationClient#commit and #abort make: the
+  # outcome the intent recorded, as its terminal receipt.
+  def commit(intent) = resolve(:commit, intent)
+
+  def abort(intent) = resolve(:abort, intent)
+
   private
+
+    def resolve(call, intent)
+      answer = Timekeeping::Ownership.transaction do
+        admit!(intent)
+        @reservations.public_send(call, invoice_id: intent.invoice_id, operation_id: intent.operation_id)
+      end
+      ANSWERS.fetch(answer.class).call(answer)
+    end
 
     def admit!(intent)
       ownership = Timekeeping::Ownership.lock_shared!

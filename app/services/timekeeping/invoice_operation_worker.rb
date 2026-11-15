@@ -18,13 +18,14 @@
 #      same Idempotency-Key, until it is answered. One intent's failure never
 #      holds back another's.
 #
-# The owner is the one the ownership record names now. Only `timekeeping`
-# takes delivery so far. Under `monolith` the boundary already prepares
-# in-process (Timekeeping::LocalReservationClient), but commit and abort are
-# not delivered to the prepared application's provider yet (§10.5), and
-# `legacy` keeps today's callbacks and opens no intent. A sweep with
-# something to deliver under either is refused, after recovery, and nothing
-# is marked delivered.
+# The owner is the one the ownership record names now: `timekeeping` over
+# HTTP (Timekeeping::ReservationClient), and `monolith`, the prepared
+# application after a rollback (§10.5), in-process against its own
+# reservation table (Timekeeping::LocalReservationClient), which answers the
+# same Receipt and raises the same problems, so delivery reads either owner
+# one way. `legacy` keeps today's callbacks and opens no intent: a sweep with
+# something to deliver under it is refused, after recovery, and nothing is
+# marked delivered.
 class Timekeeping::InvoiceOperationWorker
   # How long a save may hold its intent pending: three prepare attempts of at
   # most 2 s each with jitter (§9.4), then the invoice transaction. Past it,
@@ -32,7 +33,10 @@ class Timekeeping::InvoiceOperationWorker
   # a slow save is safe, only unkind: the save then fails, retryable.
   SAVE_TIME_LIMIT = 30.seconds
 
-  OWNERS = { "timekeeping" => -> { Timekeeping::ReservationClient.new } }.freeze
+  OWNERS = {
+    "timekeeping" => -> { Timekeeping::ReservationClient.new },
+    "monolith" => -> { Timekeeping::LocalReservationClient.new }
+  }.freeze
 
   # The receipt that confirms each delivery (§5.3).
   CONFIRMED_BY = { commit: "committed", abort: "aborted" }.freeze

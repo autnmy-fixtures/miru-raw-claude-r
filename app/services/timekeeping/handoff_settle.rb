@@ -26,8 +26,10 @@
 # and settle runs again, or the handoff aborts. Running it again is safe:
 # recovery and delivery are idempotent by operation.
 #
-# Delivery to the `monolith` owner is not wired yet, so a settle with
-# anything to deliver under it is refused, as the worker refuses.
+# The `monolith` owner takes delivery (Timekeeping::LocalReservationClient),
+# but does not take the settle step's exception yet: a commit or abort
+# carrying the old generation is refused there as stale-generation, so it
+# stays undelivered and the fence refuses to freeze.
 module Timekeeping::HandoffSettle
   STATES = %w[closed].freeze
 
