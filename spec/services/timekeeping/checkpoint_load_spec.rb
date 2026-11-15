@@ -119,6 +119,29 @@ RSpec.describe Timekeeping::CheckpointLoad, type: :model do
     model.connection.select_value("SELECT nextval(#{model.connection.quote(model.sequence_name)})")
   end
 
+  # A sequence is not transactional: the fixture transaction does not roll
+  # back what another spec in this process moved (advance_local_entry_ids!),
+  # nor what the load moves here. Each example therefore starts both
+  # sequences below every carried id, so the load must move them, and puts
+  # back what it found, so no later spec sees a sequence moved back.
+  def sequenced = [Timekeeping::Entry, Timekeeping::EntryAudit]
+
+  def sequence_state(model)
+    model.connection.select_rows("SELECT last_value, is_called FROM #{model.connection.quote_table_name(model.sequence_name)}").first
+  end
+
+  def set_sequence!(model, value, called)
+    model.connection.select_value("SELECT setval(#{model.connection.quote(model.sequence_name)}, #{Integer(value)}, #{called ? 'true' : 'false'})")
+  end
+
+  around do |example|
+    found = sequenced.index_with { |model| sequence_state(model) }
+    sequenced.each { |model| set_sequence!(model, 1, false) }
+    example.run
+  ensure
+    found&.each { |model, (value, called)| set_sequence!(model, value, called) }
+  end
+
   describe "where the handoff must be" do
     {
       "admission still open" => { owner: "timekeeping", state: "open" },
