@@ -346,9 +346,10 @@ RSpec.describe Timekeeping::InvoiceBoundary do
       Timekeeping::Reservation.order(:entry_id, :invoice_id).pluck(:entry_id, :invoice_id, :state)
     end
 
-    # Commit or abort as the worker will deliver it under this owner.
+    # Commit or abort, delivered by the invoice operation worker to the
+    # prepared application's provider (§9.2 step 4).
     def deliver_locally(intent)
-      local.public_send(intent.reload.delivery, invoice_id: intent.invoice_id, operation_id: intent.operation_id)
+      expect(worker.run.delivered).to eq([intent.operation_id])
     end
 
     it "prepares the desired set locally, runs the change with the prepared entries and records success (§9.2 steps 1-3)" do

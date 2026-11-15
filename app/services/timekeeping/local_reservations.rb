@@ -5,9 +5,10 @@
 # and abort of §5.3, run in-process against the local reservation table and
 # decided by the shared decision table (§7.2), which nobody re-implements.
 # Under the `monolith` owner the invoice reservation boundary prepares through
-# it, by way of Timekeeping::LocalReservationClient, which admits each call
-# under the intent's generation and answers as the `timekeeping` owner's
-# client does. Commit and abort are not delivered to it yet.
+# it, and the invoice operation worker delivers commit and abort to it, both
+# by way of Timekeeping::LocalReservationClient, which admits each call under
+# the intent's generation and answers as the `timekeeping` owner's client
+# does.
 #
 # It keeps the protocol Timekeeping keeps: idempotency and a terminal receipt
 # per (invoice, operation), at most one unresolved operation per invoice

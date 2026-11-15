@@ -131,13 +131,22 @@ RSpec.describe Timekeeping::HandoffSettle do
     end
   end
 
-  it "refuses to deliver under the monolith owner, which has no reservation provider yet, after resolving the pending intent" do
+  # The `monolith` owner takes delivery, but not yet the settle step's
+  # exception for a commit or abort carrying the old generation.
+  it "leaves an old-generation outcome undelivered under the monolith owner, after resolving the pending intent" do
     intent = prepared_save
     set_timekeeping_ownership!(generation: 3, owner: "monolith", state: "closed")
 
-    expect { described_class.call(generation: 3) }
-      .to raise_error(Timekeeping::InvoiceOperationWorker::OwnerUnavailable, /owner monolith/)
+    result = described_class.call(generation: 3)
+
+    expect(result).to eq(Timekeeping::InvoiceOperationWorker::Result.new(
+      recovered: { intent.operation_id => "failed" }, delivered: [], undelivered: [intent.operation_id]
+    ))
+    expect(Rails.error).to have_received(:report).with(
+      an_object_having_attributes(status: 409, type: "stale-generation"), hash_including(context: hash_including(delivery: :abort))
+    )
     expect(intent.reload).to have_attributes(state: "failed", delivered_at: nil)
+    expect(resolve_calls).to eq([])
     expect { Timekeeping::HandoffFence.call(:freeze, generation: 3) }.to raise_error(Timekeeping::HandoffFence::Unsettled, /failed #{intent.operation_id}/)
   end
 end

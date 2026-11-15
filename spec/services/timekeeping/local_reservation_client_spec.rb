@@ -2,12 +2,13 @@
 
 require "rails_helper"
 
-# The `monolith` owner's prepare for the invoice reservation boundary
-# (docs/architecture/timekeeping-soa.md §5.3, §9.2 step 2, §10.5): run
-# in-process against the prepared application's reservation table, admitted
-# under the intent's generation, and answered as Timekeeping::ReservationClient
-# answers the `timekeeping` owner's prepare, so the boundary reads either
-# owner one way.
+# The `monolith` owner's side of the reservation API
+# (docs/architecture/timekeeping-soa.md §5.3, §9.2, §10.5): prepare for the
+# invoice reservation boundary, and commit and abort for the invoice
+# operation worker, run in-process against the prepared application's
+# reservation table, admitted under the intent's generation, and answered as
+# Timekeeping::ReservationClient answers the `timekeeping` owner's calls, so
+# the boundary and the worker read either owner one way.
 RSpec.describe Timekeeping::LocalReservationClient do
   include_context "with two Timekeeping tenants"
 
@@ -228,6 +229,94 @@ RSpec.describe Timekeeping::LocalReservationClient do
     end
   end
 
+  describe "commit and abort, the worker's delivery (§9.2 step 4)" do
+    let(:prepared) { intent }
+
+    before { prepare(prepared) }
+
+    it "commits the prepared operation and answers the client's Receipt, with the contract's string status" do
+      answer = client.commit(prepared)
+
+      expect(answer).to eq(Timekeeping::ReservationClient::Receipt.new(status: "committed"))
+      expect([reservations, receipt_of(prepared)]).to eq([[[entry.id, 10, "committed", "active", true]], "committed"])
+      expect(entry.reload.outbox_snapshots.order(:version).last.snapshot.dig("data", "locked")).to be(true)
+    end
+
+    it "aborts the prepared operation, which drops its provisional reservation and the derived lock" do
+      answer = client.abort(prepared)
+
+      expect(answer).to eq(Timekeeping::ReservationClient::Receipt.new(status: "aborted"))
+      expect([reservations, receipt_of(prepared)]).to eq([[], "aborted"])
+      expect(entry.reload.outbox_snapshots.order(:version).last.snapshot.dig("data", "locked")).to be(false)
+    end
+
+    it "answers a resend with the stored receipt and changes nothing (§9.3 lost response on commit)" do
+      client.commit(prepared)
+      before = local_state
+
+      expect(client.commit(prepared)).to eq(Timekeeping::ReservationClient::Receipt.new(status: "committed"))
+      expect(local_state).to eq(before)
+    end
+
+    it "answers the stored receipt, not the delivery's, when the operation is already resolved the other way" do
+      client.abort(prepared)
+
+      expect(client.commit(prepared)).to eq(Timekeeping::ReservationClient::Receipt.new(status: "aborted"))
+      expect(reservations).to eq([])
+    end
+
+    it "aborts an operation never prepared here as a no-op that still leaves an aborted receipt (§9.3)" do
+      unprepared = intent(invoice_id: 11)
+      before = reservations
+
+      expect(client.abort(unprepared)).to eq(Timekeeping::ReservationClient::Receipt.new(status: "aborted"))
+      expect([reservations, receipt_of(unprepared)]).to eq([before, "aborted"])
+    end
+
+    it "refuses a commit of an operation never prepared here as not-found, and records nothing" do
+      unprepared = intent(invoice_id: 11)
+      before = local_state
+
+      expect { client.commit(unprepared) }.to raise_error(problem("not-found", status: 404, retryable: false))
+      expect(local_state).to eq(before)
+    end
+
+    it "refuses a delivery under another generation as stale-generation, and resolves nothing" do
+      stale = Timekeeping::InvoiceOperation.new(**prepared.attributes.symbolize_keys.slice(:operation_id, :invoice_id, :company_id, :kind, :entry_ids), generation: generation - 1)
+      before = local_state
+
+      expect { client.commit(stale) }.to raise_error(problem("stale-generation", status: 409, retryable: false))
+      expect { client.abort(stale) }.to raise_error(problem("stale-generation", status: 409, retryable: false))
+      expect(local_state).to eq(before)
+    end
+
+    it "refuses a delivery once this application no longer owns the entries, as stale-generation" do
+      set_timekeeping_ownership!(TimekeepingOwnershipStates::AFTER_HANDOFF_BEGUN.fetch("re-cut over to Timekeeping"))
+
+      expect { client.commit(prepared) }.to raise_error(problem("stale-generation", status: 409, retryable: false))
+      expect(receipt_of(prepared)).to eq("prepared")
+    end
+
+    it "refuses a delivery as ownership-moving, retryable, while a handoff has admission closed at its generation" do
+      set_timekeeping_ownership!(generation:, owner: "monolith", state: "closed")
+
+      expect { client.abort(prepared) }.to raise_error(problem("ownership-moving", status: 503, retryable: true))
+      expect(receipt_of(prepared)).to eq("prepared")
+    end
+
+    it "holds the ownership row FOR SHARE before it touches a reservation" do
+      statements = []
+      subscriber = ActiveSupport::Notifications.subscribe("sql.active_record") { |*, payload| statements << payload[:sql] }
+      client.commit(prepared)
+      ActiveSupport::Notifications.unsubscribe(subscriber)
+
+      admission = statements.index { |sql| sql.include?("timekeeping_ownerships") && sql.include?("FOR SHARE") }
+      first_reservation = statements.index { |sql| sql.include?("timekeeping_reservation") }
+      expect(admission).not_to be_nil
+      expect(admission).to be < first_reservation
+    end
+  end
+
   describe ".problem" do
     it "builds every problem it raises from a body the contract's problem allows" do
       bodies = []
@@ -242,11 +331,12 @@ RSpec.describe Timekeeping::LocalReservationClient do
       expect { prepare(intent(invoice_id: 11)) }.to raise_error(Timekeeping::ReservationClient::Problem)
       expect { prepare(first, invoice_state: :non_draft) }.to raise_error(Timekeeping::ReservationClient::Problem)
       expect { prepare(intent(generation: 9)) }.to raise_error(Timekeeping::ReservationClient::Problem)
+      expect { client.commit(intent(invoice_id: 12)) }.to raise_error(Timekeeping::ReservationClient::Problem)
       set_timekeeping_ownership!(generation:, owner: "monolith", state: "closed")
       expect { prepare(intent) }.to raise_error(Timekeeping::ReservationClient::Problem)
 
       expect(bodies.map { |body| body.fetch("type").split("/").last })
-        .to eq(%w[reservation-refused operation-unresolved idempotency-conflict stale-generation ownership-moving])
+        .to eq(%w[reservation-refused operation-unresolved idempotency-conflict stale-generation not-found ownership-moving])
       bodies.each { |body| expect(Timekeeping::Contracts.errors(:reservation_api, problem_pointer, body)).to eq([]) }
     end
   end
