@@ -93,6 +93,15 @@ anything else leaves them fenced for a resume or `#abort!`. An abort leaves the 
 load left them: a later rollback reconciles them against Timekeeping as it then stands, and aborts on
 any write Timekeeping took since, so it never flips onto them unreconciled.
 
+The re-cutover (`monolith` → `timekeeping`, §10.2 step 6) starts from the other side.
+`Timekeeping::LocalCheckpoint` (`app/services/timekeeping/local_checkpoint.rb`, §10.5 step 4) takes the
+checkpoint out of the prepared tables, with the same parts and forms as the rollback's take out of
+Timekeeping (`handoff_api.json#/$defs/taken_checkpoint`). It runs only while this application's copy is
+`frozen` under owner `monolith` at the handoff's generation, refuses as `Unsettled` while a provisional
+reservation or a prepared operation is left, and writes nothing. It reads those tables through
+`Timekeeping::PreparedRows`, the same reader `Timekeeping::RollbackReconcile` compares against, so the
+two directions read one rendering.
+
 Timekeeping's provider is `ReservationProtocol` (`services/timekeeping/app/services/reservation_protocol.rb`),
 behind the reservation API's three endpoints. It keeps the same protocol on tables with the same shape,
 `reservations` and `reservation_operations`, so a checkpoint carries reservations and receipts either way
