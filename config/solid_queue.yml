@@ -33,6 +33,9 @@ default: &default
         invoice_operations:
           class: Timekeeping::InvoiceOperationsJob
           schedule: '*/5 * * * * *'  # Every 5 seconds: Timekeeping invoice operation recovery and delivery
+        timekeeping_local_relay:
+          class: Timekeeping::LocalRelayJob
+          schedule: '* * * * * *'  # Every second: the prepared application's outbox into the Timekeeping projection
   workers:
     - queues: default
       threads: 5
@@ -46,6 +49,10 @@ default: &default
       threads: 1
       processes: 1
       polling_interval: 0.5
+    - queues: timekeeping_relay
+      threads: 1
+      processes: 1
+      polling_interval: 0.1
 
 development:
  <<: *default

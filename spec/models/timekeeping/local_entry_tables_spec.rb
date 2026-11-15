@@ -138,6 +138,49 @@ RSpec.describe "Timekeeping local entry tables", type: :model do
     end
   end
 
+  describe Timekeeping::OutboxSnapshot do
+    def outbox!(entry_id, version: 3)
+      Timekeeping::OutboxSnapshot.create!(entry_id:, company_id: 42, version:, snapshot: { "entry_id" => entry_id }, request_id: "request-1")
+    end
+
+    it "renders an entry as the contract's entry snapshot, with its tenant and version lifted out of `data` (§5.4)" do
+      entry = entry!
+      snapshot = Timekeeping::OutboxSnapshot.of(entry)
+
+      aggregate_failures do
+        expect { TimekeepingContracts.validate!(:entry_snapshot, "#/$defs/entry_snapshot", snapshot) }.not_to raise_error
+        expect(snapshot).to eq(
+          "type" => "timekeeping.entry_snapshot.v1", "entry_id" => 101, "version" => 3, "company_id" => 42,
+          "data" => contract_entry.except("id", "company_id", "version")
+        )
+      end
+    end
+
+    it "holds one snapshot per entry version, only for an entry that exists, and keeps the entry it belongs to" do
+      entry = entry!
+      outbox!(entry.id)
+
+      aggregate_failures do
+        refused { outbox!(entry.id) }.to raise_error(ActiveRecord::RecordNotUnique)
+        expect { outbox!(entry.id, version: 4) }.not_to raise_error
+        refused {
+          Timekeeping::OutboxSnapshot.insert!(
+            { entry_id: entry.id + 1, company_id: 42, version: 3, snapshot: {}, request_id: "request-1", created_at: Time.current }
+          )
+        }.to raise_error(ActiveRecord::InvalidForeignKey)
+        expect { entry.destroy! }.to raise_error(ActiveRecord::DeleteRestrictionError)
+      end
+    end
+
+    it "queues only what is undelivered, in outbox order" do
+      entry = entry!
+      first, second, third = [3, 4, 5].map { |version| outbox!(entry.id, version:) }
+      second.update!(delivered_at: Time.current)
+
+      expect(Timekeeping::OutboxSnapshot.undelivered).to eq([first, third])
+    end
+  end
+
   describe Timekeeping::IdempotencyReceipt do
     def receipt!(company_id: 42, key: "key-1", request_digest: "digest-1")
       Timekeeping::IdempotencyReceipt.create!(company_id:, key:, request_digest:, status: 201, response: { "entry" => { "id" => 101 } })

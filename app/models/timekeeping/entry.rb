@@ -13,6 +13,7 @@ class Timekeeping::Entry < ApplicationRecord
 
   has_many :reservations, class_name: "Timekeeping::Reservation", inverse_of: false, dependent: :restrict_with_exception
   has_many :audits, class_name: "Timekeeping::EntryAudit", inverse_of: :entry, dependent: :restrict_with_exception
+  has_many :outbox_snapshots, class_name: "Timekeeping::OutboxSnapshot", inverse_of: :entry, dependent: :restrict_with_exception
 
   scope :of_company, ->(company_id) { where(company_id:) }
   scope :kept, -> { where(discarded_at: nil) }
