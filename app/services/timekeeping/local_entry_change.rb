@@ -12,7 +12,7 @@
 # projection, written only by the projection consumer (§3.3: nothing writes
 # through from the request path). An entry change that skips this recorder is
 # invisible to every report and to a re-cutover, so every `monolith` writer
-# records through here: so far the single-entry writes of
+# records through here: so far the single-entry and bulk writes of
 # Timekeeping::Gateway::Local.
 module Timekeeping::LocalEntryChange
   # Records `entry` as it was just saved by `action`, made by the caller the

@@ -4,13 +4,14 @@ require "rails_helper"
 
 # Entry writes and reads under the `monolith` owner
 # (docs/architecture/timekeeping-soa.md §3.1, §3.3 rule 1, §10.5), through
-# the real entry points of W1 web and mobile, W3 CLI, W3a MCP and W4 agent:
-# each write lands in the prepared application's own entry table with its
-# audit and outbox rows, answers today's public JSON, and writes nothing to
-# timesheet_entries, which the local relay then projects (§3.2, §12.2). The
-# time-tracking list and the lookup before an update or discard read that
-# same table, so an entry the relay has not projected yet is listed and
-# edited at once (§12.4 "relay paused"), authorized on the owner's state.
+# the real entry points of W1 web and mobile, W2 bulk, W3 CLI, W3a MCP and
+# W4 agent: each write lands in the prepared application's own entry table
+# with its audit and outbox rows, answers today's public JSON, and writes
+# nothing to timesheet_entries, which the local relay then projects (§3.2,
+# §12.2). The time-tracking list, the lookup before an update or discard and
+# W2's selection read that same table, so an entry the relay has not
+# projected yet is listed and edited at once (§12.4 "relay paused"),
+# authorized on the owner's state.
 RSpec.describe "Timekeeping entry writes under the monolith owner", type: :request do
   include_context "with two Timekeeping tenants"
   include TimekeepingSingleWriterGuard
@@ -237,6 +238,86 @@ RSpec.describe "Timekeeping entry writes under the monolith owner", type: :reque
       expect(entry.reload).to have_attributes(note: "edited", discarded_at: be_present)
       expect(entry.audits.order(:id).pluck(:writer)).to eq(%w[cli mcp])
       expect(theirs.reload.discarded_at).to be_nil
+    end
+
+    describe "W2 bulk" do
+      let(:target) do
+        create(:project, client: tenant_a.client, billable: true).tap do |project|
+          create(:project_member, project:, user: employee)
+        end
+      end
+
+      before { sign_in employee }
+
+      def bulk_move(*entries)
+        send_request :patch, api_v1_bulk_action_path,
+          params: { ids: entries.map(&:id), project_id: target.id }, headers: auth_headers(employee)
+      end
+
+      def bulk_discard(*entries)
+        send_request :delete, api_v1_bulk_action_path, params: { source: { ids: entries.map(&:id) } }, headers: auth_headers(employee)
+      end
+
+      it "moves and then discards entries the projection does not hold, in the owner's table, with today's JSON" do
+        first = held_entry(tenant_a, offset: 0, note: "First")
+        second = held_entry(tenant_a, offset: 1, note: "Second")
+
+        without_projection_writes do
+          bulk_move(first, second)
+          expect(response).to have_http_status(:ok)
+          expect(json_response["notice"]).to eq(I18n.t("timesheet_entry.update.message"))
+          expect(json_response["entries"].values.flatten.map { |entry| [entry["id"], entry["project_id"], entry["project"]] })
+            .to contain_exactly([first.id, target.id, target.name], [second.id, target.id, target.name])
+
+          bulk_discard(first)
+          expect(response).to have_http_status(:ok)
+          expect(json_response["notice"]).to eq(I18n.t("timesheet_entry.destroy.message"))
+        end
+
+        expect(first.reload).to have_attributes(project_id: target.id, version: 3, discarded_at: be_present)
+        expect(second.reload).to have_attributes(project_id: target.id, version: 2, discarded_at: nil)
+        expect(first.audits.order(:id).pluck(:writer)).to eq(%w[bulk bulk])
+        expect(TimesheetEntry.where(id: [first.id, second.id])).to be_empty
+      end
+
+      it "skips an employee's entry its reservations lock, and still answers 200 (A9's silent skip, K12, §7.1)" do
+        locked = held_entry(tenant_a, offset: 0)
+        free = held_entry(tenant_a, offset: 1)
+        Timekeeping::Reservation.create!(
+          entry_id: locked.id, invoice_id: 10, company_id: tenant_a.company.id, state: "committed", disposition: "active", edit_lock: true
+        )
+
+        bulk_move(locked, free)
+
+        expect(response).to have_http_status(:ok)
+        expect(locked.reload).to have_attributes(project_id: tenant_a.project.id, version: 1)
+        expect(free.reload).to have_attributes(project_id: target.id, version: 2)
+      end
+
+      it "answers today's locked JSON for an entry the owner holds billed, for move and for discard, and writes nothing (A9)" do
+        days = tenant_a.company.timesheet_edit_days
+        billed = held_entry(tenant_a, bill_status: "billed")
+
+        bulk_move(billed)
+        expect(response).to have_http_status(:forbidden)
+        expect(json_response).to eq("error" => I18n.t("timesheet_entry.update.locked", days:))
+
+        bulk_discard(billed)
+        expect(response).to have_http_status(:forbidden)
+        expect(json_response).to eq("error" => I18n.t("timesheet_entry.destroy.locked", days:))
+
+        expect(billed.reload).to have_attributes(version: 1, project_id: tenant_a.project.id, discarded_at: nil)
+      end
+
+      it "never reaches tenant B's entries (§6.3)" do
+        foreign = held_entry(tenant_b, user: tenant_b.employee)
+
+        bulk_discard(foreign)
+
+        expect(response).to have_http_status(:unprocessable_content)
+        expect(foreign.reload).to have_attributes(version: 1, discarded_at: nil)
+        expect(Timekeeping::OutboxSnapshot.count).to eq(0)
+      end
     end
   end
 end
