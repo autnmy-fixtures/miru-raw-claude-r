@@ -14,6 +14,18 @@
 # does. JOURNAL names the journal file (tmp/timekeeping/first_cutover.json by
 # default), DISPOSITION the recorded disposition of the unlocked links
 # (§10.4; the seed disposition of the two seeded businesses by default).
+#
+# The runner for the rollback to the prepared application (§10.2 step 6,
+# §10.5) works the same way, with its own journal
+# (Timekeeping::RollbackJournal), which keeps the financial snapshot:
+#
+#   bin/rails timekeeping:rollback             run, or resume, to the end
+#   bin/rails timekeeping:rollback:abort       reopen admission on both copies
+#
+# They read TIMEKEEPING_URL and TIMEKEEPING_TOKEN_KEY too, and JOURNAL
+# (tmp/timekeeping/rollback.json by default). The rollback takes no
+# disposition: its reservations come out of Timekeeping as Timekeeping holds
+# them.
 module TimekeepingFirstCutoverTask
   def self.journal = Timekeeping::FirstCutoverJournal.new(path: ENV.fetch("JOURNAL", Timekeeping::FirstCutoverJournal::DEFAULT_PATH))
 
@@ -60,6 +72,53 @@ namespace :timekeeping do
       journal.clear
       puts "Timekeeping first cutover: aborted at generation #{generation}, admission reopened on both copies"
     rescue Timekeeping::FirstCutover::Unresumable, Timekeeping::InternalApi::NotConfigured => error
+      abort error.message
+    end
+  end
+end
+
+module TimekeepingRollbackTask
+  def self.journal = Timekeeping::RollbackJournal.new(path: ENV.fetch("JOURNAL", Timekeeping::RollbackJournal::DEFAULT_PATH))
+
+  def self.resume_hint(journal)
+    "Both copies stay where the run left them, and #{journal.path} keeps what it took. " \
+      "Run bin/rails timekeeping:rollback again to resume, or bin/rails timekeeping:rollback:abort to reopen admission."
+  end
+
+  def self.reconciled(counts)
+    return "reconciled earlier" unless counts
+
+    "reconciled: #{counts.to_h.map { |part, count| "#{count} #{part.to_s.tr('_', ' ')}" }.join(', ')}"
+  end
+end
+
+namespace :timekeeping do
+  desc "Run or resume the rollback from Timekeeping to the prepared application (JOURNAL=path)"
+  task rollback: :environment do
+    journal = TimekeepingRollbackTask.journal
+    result = Timekeeping::Rollback.new(journal:, logger: TimekeepingFirstCutoverTask.logger).call
+    journal.clear
+    puts "Timekeeping rollback: done at generation #{result.generation}, the prepared application owns entries " \
+      "(#{TimekeepingRollbackTask.reconciled(result.reconciled)})"
+  rescue Timekeeping::Rollback::Aborted => error
+    journal.clear
+    abort [error.message, *error.lists.map { |list, ids| "  #{list}: #{Array(ids).join(', ')}" }].join("\n")
+  rescue Timekeeping::Rollback::Unresumable, Timekeeping::HandoffJournal::Unreadable, Timekeeping::InternalApi::NotConfigured => error
+    abort error.message
+  rescue StandardError => error
+    raise unless journal
+
+    abort "Timekeeping rollback stopped: #{error.class}: #{error.message}\n#{TimekeepingRollbackTask.resume_hint(journal)}"
+  end
+
+  namespace :rollback do
+    desc "Abort the rollback in progress, reopening admission on both copies under Timekeeping (JOURNAL=path)"
+    task abort: :environment do
+      journal = TimekeepingRollbackTask.journal
+      generation = Timekeeping::Rollback.new(logger: TimekeepingFirstCutoverTask.logger).abort!
+      journal.clear
+      puts "Timekeeping rollback: aborted at generation #{generation}, admission reopened on both copies under Timekeeping"
+    rescue Timekeeping::Rollback::Unresumable, Timekeeping::InternalApi::NotConfigured => error
       abort error.message
     end
   end

@@ -70,8 +70,9 @@
 # starts at close_local takes it; a resumed run is given the one taken before
 # the interruption (its journal's), or takes it itself. Both are taken while
 # admission is closed, and no billing write is admitted then (§10.1), so
-# either is the state the handoff must leave unchanged. The journal is the
-# first cutover's kind (Timekeeping::FirstCutover::MemoryJournal by default):
+# either is the state the handoff must leave unchanged. The journal has the
+# first cutover's interface (Timekeeping::FirstCutover::MemoryJournal by
+# default, Timekeeping::RollbackJournal for a file that outlives the process):
 # it is told an empty Resume as a handoff starts, so nothing an earlier
 # handoff took is resumed into this one, then the snapshot as soon as it is
 # taken. It holds no checkpoint, since the take can always be asked again.
