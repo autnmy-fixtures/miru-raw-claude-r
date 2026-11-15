@@ -87,15 +87,22 @@ module CheckpointTake
       Ownership.lock_frozen!(:checkpoint, generation, owner: "timekeeping")
       ensure_settled!
 
-      Checkpoint.new(
-        generation:,
-        entries: Entry.includes(:reservations).order(:id).map(&:to_contract),
-        reservations: Reservation.order(:entry_id, :id).map(&:to_value),
-        entry_audits: rows(:entry_audits, EntryAudit.order(:id)),
-        reservation_operations: rows(:reservation_operations, ReservationOperation.order(:invoice_id, :operation_id)),
-        idempotency_receipts: rows(:idempotency_receipts, IdempotencyReceipt.order(:company_id, :key))
-      )
+      Checkpoint.new(generation:, **held)
     end
+  end
+
+  # Every part Timekeeping holds, each in the form a checkpoint carries it and
+  # in the order the take answers it. Reads only, with no guard of its own:
+  # the caller holds the record as its step needs (the take here, and the
+  # re-cutover's load, RecutoverLoad, which compares what it would replace).
+  def self.held
+    {
+      entries: Entry.includes(:reservations).order(:id).map(&:to_contract),
+      reservations: Reservation.order(:entry_id, :id).map(&:to_value),
+      entry_audits: rows(:entry_audits, EntryAudit.order(:id)),
+      reservation_operations: rows(:reservation_operations, ReservationOperation.order(:invoice_id, :operation_id)),
+      idempotency_receipts: rows(:idempotency_receipts, IdempotencyReceipt.order(:company_id, :key))
+    }
   end
 
   def self.ensure_settled!
