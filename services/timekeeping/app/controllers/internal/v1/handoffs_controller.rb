@@ -11,11 +11,14 @@
 #   GET  /internal/v1/handoff/checkpoint            CheckpointTake (§10.5 step 4, out of Timekeeping)
 #   POST /internal/v1/handoff/checkpoint            CheckpointLoad (§10.5 steps 4 and 5)
 #   POST /internal/v1/handoff/checkpoint/reconcile  CheckpointReconcile (step 6)
+#   POST /internal/v1/handoff/recutover/checkpoint  RecutoverLoad (the re-cutover's steps 4 and 5)
 #
 # Only the handoff tool's service token is accepted, never a user token. The
 # calls are not admitted writes: each service guards itself by the step the
 # copy is at, so a replay is refused out of step and changes nothing, and no
-# Idempotency-Key is needed. The generation travels in X-Ownership-Generation
+# Idempotency-Key is needed. A second first-cutover load is already-loaded;
+# the re-cutover's load run again leaves the same tables, so a resumed
+# handoff may carry it again. The generation travels in X-Ownership-Generation
 # as on every mutating call (§5.1), and must be the body's. Taking a
 # checkpoint is a read: it names the handoff's generation in its query, and
 # the handoff tool may ask again as often as it needs.
@@ -84,6 +87,24 @@ class Internal::V1::HandoffsController < Internal::BaseController
   def reconcile_checkpoint
     reconciled = CheckpointReconcile.call(**checkpoint!)
     render json: { "entries" => reconciled.entries, "reservations" => reconciled.reservations }
+  end
+
+  # The re-cutover's checkpoint (§10.2 step 6, §10.5 steps 4 and 5), taken
+  # out of the prepared existing application, the outgoing `monolith` owner,
+  # in the rollback's parts and forms, loaded over what Timekeeping still
+  # holds from before the rollback. RecutoverLoad refuses it whole as
+  # CheckpointLoad::Refused, answered as checkpoint-refused above.
+  def load_recutover_checkpoint
+    input = contract_input!("#/$defs/recutover_checkpoint", body!)
+    loaded = RecutoverLoad.call(
+      CheckpointTake::Checkpoint.new(
+        generation: carried_generation!(input),
+        entries: input.fetch("entries"),
+        reservations: input.fetch("reservations").map { |reservation| reservation_of(reservation) },
+        **input.slice("entry_audits", "reservation_operations", "idempotency_receipts").symbolize_keys
+      )
+    )
+    render json: loaded.to_h
   end
 
   private
