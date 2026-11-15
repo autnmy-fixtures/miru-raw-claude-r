@@ -6,8 +6,10 @@
 # stays the projection. It is the row Timekeeping keeps, column for column,
 # so a checkpoint carries it between the two owners unchanged.
 #
-# It is inactive: no owner routes a command to it yet. Nothing here runs a
-# writer's rule; a row is copied as the checkpoint carries it (§8 item 1).
+# The gateway's `monolith` owner (Timekeeping::Gateway::Local) writes it; no
+# ownership record names that owner until a rollback. Nothing here runs a
+# writer's rule: the owner runs today's rules before it saves, and a row a
+# checkpoint carries is copied as it is (§8 item 1).
 class Timekeeping::Entry < ApplicationRecord
   self.table_name = "timekeeping_entries"
 
@@ -32,6 +34,15 @@ class Timekeeping::Entry < ApplicationRecord
   def to_contract
     { "id" => id, "company_id" => company_id, "version" => version }
       .merge(Timekeeping::StoredEntries::FIELDS.index_with { |field| contract_value(field) })
+  end
+
+  # What `audited` records for the update just saved: each of `columns` it
+  # changed, as [before, after] in contract form (§3.4), as Timekeeping's
+  # Entry#audited_update_changes records it.
+  def audited_update_changes(columns)
+    saved_changes.slice(*columns).to_h do |field, values|
+      [field, values.map { |value| Timekeeping::StoredEntries::FORMATS.fetch(field, :itself.to_proc).call(value) }]
+    end
   end
 
   # True exactly when the entry holds a reservation with the edit lock

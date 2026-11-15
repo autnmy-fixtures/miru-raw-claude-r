@@ -21,6 +21,15 @@ module TimekeepingOwnershipStates
   def set_timekeeping_ownership!(attributes)
     Timekeeping::Ownership.current.tap { |ownership| ownership.update!(attributes) }
   end
+
+  # Sets the prepared application's entry id sequence above every id in
+  # timesheet_entries, as a rollback sets it (§10.3), so an entry the
+  # `monolith` owner creates never takes the id of a projected one. It sets
+  # it `margin` above, so ids a spec assigns itself stay below it.
+  def advance_local_entry_ids!(margin: 10_000)
+    connection = Timekeeping::Entry.connection
+    connection.execute("SELECT setval(#{connection.quote(Timekeeping::Entry.sequence_name)}, #{TimesheetEntry.maximum(:id).to_i + margin})")
+  end
 end
 
 RSpec.configure do |config|

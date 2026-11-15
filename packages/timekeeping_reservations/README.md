@@ -30,8 +30,10 @@ The prepared application's provider is `Timekeeping::LocalReservations`
 (`app/services/timekeeping/local_reservations.rb`, §10.2 step 4). It persists what the table decides in
 `timekeeping_reservations` and keeps the protocol in `timekeeping_reservation_operations`. Its entry
 store is `Timekeeping::LocalEntries` (`app/services/timekeeping/local_entries.rb`), over the prepared
-application's own `timekeeping_entries`, which have Timekeeping's `entries` shape; no owner routes to
-either yet. An entry change there records its audit row and its entry snapshot through
+application's own `timekeeping_entries`, which have Timekeeping's `entries` shape. The gateway's
+`monolith` owner, `Timekeeping::Gateway::Local` (`app/services/timekeeping/gateway/local.rb`), writes
+those entries for the single-entry commands so far, under today's `TimesheetEntry` rules; no owner
+routes reservations to the provider yet. An entry change there records its audit row and its entry snapshot through
 `Timekeeping::LocalEntryChange`, into the prepared application's outbox (`timekeeping_outbox_snapshots`,
 Timekeeping's `outbox_snapshots` shape), and `Timekeeping::LocalRelay` drains that outbox into
 `timesheet_entries` through the projection consumer, on its own `timekeeping_relay` queue

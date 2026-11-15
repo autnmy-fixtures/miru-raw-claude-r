@@ -17,10 +17,11 @@
 #
 # The legacy owner (§10.2 step 2) runs today's model code unchanged. The
 # timekeeping owner (Remote) forwards the single-entry and bulk commands, the
-# import batches and agent detach to Timekeeping's entry API; the commands it
-# does not forward yet, and every command under the monolith owner, are
-# refused, never written locally, because a local write there would be a
-# second writer.
+# import batches and agent detach to Timekeeping's entry API. The monolith
+# owner (Local), the prepared application after a rollback (§10.5), runs the
+# single-entry commands over its own entry table. The commands an owner does
+# not run yet are refused, never written to timesheet_entries, because a
+# write there would be a second writer.
 module Timekeeping::Gateway
   class OwnerUnavailable < StandardError; end
 
@@ -76,7 +77,11 @@ module Timekeeping::Gateway
   SetLocked = Data.define(:entries, :locked)
   MarkBilled = Data.define(:entries)
 
-  OWNERS = { "legacy" => Timekeeping::Gateway::Legacy, "timekeeping" => Timekeeping::Gateway::Remote }.freeze
+  OWNERS = {
+    "legacy" => Timekeeping::Gateway::Legacy,
+    "timekeeping" => Timekeeping::Gateway::Remote,
+    "monolith" => Timekeeping::Gateway::Local
+  }.freeze
 
   COMMAND_KEY = :timekeeping_gateway_command
   private_constant :COMMAND_KEY
