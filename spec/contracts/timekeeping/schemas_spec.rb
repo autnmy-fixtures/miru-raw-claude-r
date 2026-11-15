@@ -38,6 +38,7 @@ RSpec.describe "Timekeeping contract schemas" do
       "POST /internal/v1/projection/entry_snapshots",
       "GET /internal/v1/handoff",
       "POST /internal/v1/handoff/steps/{step}",
+      "GET /internal/v1/handoff/checkpoint",
       "POST /internal/v1/handoff/checkpoint",
       "POST /internal/v1/handoff/checkpoint/reconcile"
     )

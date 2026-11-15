@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://contracts.timekeeping.internal/v1/handoff_api.json",
   "title": "Timekeeping handoff API v1: Timekeeping's side of the handoff procedure",
-  "description": "Provider: Timekeeping. Consumer: the handoff tool, run from the existing application (docs/architecture/timekeeping-soa.md §10.1, §10.5). The two applications share no database (§11.2), so the tool moves Timekeeping's copy of the ownership record and carries the checkpoint to it over this API. No call needs an Idempotency-Key: every step names the generation and state it expects, so a replay is refused as out-of-step and changes nothing; a second load is already-loaded; reconcile writes nothing. A resumed handoff reads the copy first and re-runs the step that did not commit.",
+  "description": "Provider: Timekeeping. Consumer: the handoff tool, run from the existing application (docs/architecture/timekeeping-soa.md §10.1, §10.5). The two applications share no database (§11.2), so the tool moves Timekeeping's copy of the ownership record and carries the checkpoint to it over this API. No call needs an Idempotency-Key: every step names the generation and state it expects, so a replay is refused as out-of-step and changes nothing; a second load is already-loaded; reconcile writes nothing; taking a checkpoint out of Timekeeping, the outgoing owner of a rollback, is a read. A resumed handoff reads the copy first and re-runs the step that did not commit.",
   "x-headers": {
     "every": ["Authorization", "X-Request-Id"],
     "mutating": ["X-Ownership-Generation"]
@@ -16,6 +16,11 @@
       "method": "POST", "path": "/internal/v1/handoff/steps/{step}", "mutating": true,
       "request": "#/$defs/step_request",
       "responses": { "200": "#/$defs/handoff_status" }
+    },
+    "take_checkpoint": {
+      "method": "GET", "path": "/internal/v1/handoff/checkpoint", "mutating": false,
+      "query": "#/$defs/checkpoint_query",
+      "responses": { "200": "#/$defs/taken_checkpoint" }
     },
     "load_checkpoint": {
       "method": "POST", "path": "/internal/v1/handoff/checkpoint", "mutating": true,
@@ -112,6 +117,90 @@
         "reservations": { "type": "array", "items": { "$ref": "#/$defs/reservation" } }
       },
       "required": ["generation", "entries", "reservations"],
+      "additionalProperties": false
+    },
+    "checkpoint_query": {
+      "description": "The handoff's generation, as a query parameter. The take refuses any other as out-of-step.",
+      "type": "object",
+      "properties": {
+        "generation": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" }
+      },
+      "required": ["generation"],
+      "additionalProperties": false
+    },
+    "entry_audit": {
+      "description": "One entry audit row (§3.2), with its id: an audit row has no other identity, so the incoming owner keeps it to reconcile it by id.",
+      "type": "object",
+      "properties": {
+        "id": { "$ref": "common.json#/$defs/id" },
+        "entry_id": { "$ref": "common.json#/$defs/id" },
+        "company_id": { "$ref": "common.json#/$defs/id" },
+        "version": { "$ref": "common.json#/$defs/version" },
+        "action": { "enum": ["create", "update"] },
+        "actor": { "type": "string", "minLength": 1 },
+        "agent_id": { "$ref": "common.json#/$defs/nullable_id" },
+        "writer": { "type": "string", "minLength": 1 },
+        "request_id": { "type": "string", "minLength": 1 },
+        "audited_changes": { "type": "object" },
+        "created_at": { "$ref": "common.json#/$defs/timestamp" }
+      },
+      "required": ["id", "entry_id", "company_id", "version", "action", "actor", "agent_id", "writer", "request_id", "audited_changes", "created_at"],
+      "additionalProperties": false
+    },
+    "operation_receipt": {
+      "description": "One terminal invoice-operation receipt (§5.3), identified by (invoice_id, operation_id). A committed one describes the operation it resolved; the no-op abort of an operation never prepared (§9.3) has a null company_id, kind and invoice_state and no entry_ids.",
+      "type": "object",
+      "properties": {
+        "invoice_id": { "$ref": "common.json#/$defs/id" },
+        "operation_id": { "type": "string", "format": "uuid" },
+        "company_id": { "$ref": "common.json#/$defs/nullable_id" },
+        "kind": { "enum": ["save", "discard", "destroy", null] },
+        "invoice_state": { "enum": ["draft", "non_draft", null] },
+        "entry_ids": { "$ref": "common.json#/$defs/ids" },
+        "state": { "enum": ["committed", "aborted"] },
+        "created_at": { "$ref": "common.json#/$defs/timestamp" },
+        "updated_at": { "$ref": "common.json#/$defs/timestamp" }
+      },
+      "required": ["invoice_id", "operation_id", "company_id", "kind", "invoice_state", "entry_ids", "state", "created_at", "updated_at"],
+      "additionalProperties": false,
+      "if": { "properties": { "state": { "const": "committed" } } },
+      "then": {
+        "properties": {
+          "company_id": { "$ref": "common.json#/$defs/id" },
+          "kind": { "enum": ["save", "discard", "destroy"] },
+          "invoice_state": { "enum": ["draft", "non_draft"] }
+        }
+      }
+    },
+    "idempotency_receipt": {
+      "description": "One entry API idempotency receipt (§9.4), identified by (company_id, key): the answer a mutating call gave and the digest of the request it answered (IdempotencyReceipt.digest), so a client retry after the handoff replays it.",
+      "type": "object",
+      "properties": {
+        "company_id": { "$ref": "common.json#/$defs/id" },
+        "key": { "type": "string", "minLength": 1 },
+        "request_digest": { "type": "string", "minLength": 1 },
+        "status": { "type": "integer", "minimum": 200, "maximum": 299 },
+        "response": { "type": "object" },
+        "created_at": { "$ref": "common.json#/$defs/timestamp" }
+      },
+      "required": ["company_id", "key", "request_digest", "status", "response", "created_at"],
+      "additionalProperties": false
+    },
+    "taken_checkpoint": {
+      "description": "The frozen checkpoint of §10.5 step 4 taken out of Timekeeping as the outgoing owner of a rollback (§10.2 step 6), at generation: every entry as the full entry, discarded ones included, at the version Timekeeping holds; every reservation, committed, including those of destroyed invoices (§7.3); the entry audit rows; every terminal invoice-operation receipt; and the entry API's idempotency receipts. Every value is as stored (§8 item 1). The incoming owner's entry sequence is set above the highest entry id (§10.3).",
+      "type": "object",
+      "properties": {
+        "generation": { "$ref": "common.json#/$defs/generation" },
+        "entries": { "type": "array", "items": { "$ref": "common.json#/$defs/entry" } },
+        "reservations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/reservation", "properties": { "state": { "const": "committed" } } }
+        },
+        "entry_audits": { "type": "array", "items": { "$ref": "#/$defs/entry_audit" } },
+        "reservation_operations": { "type": "array", "items": { "$ref": "#/$defs/operation_receipt" } },
+        "idempotency_receipts": { "type": "array", "items": { "$ref": "#/$defs/idempotency_receipt" } }
+      },
+      "required": ["generation", "entries", "reservations", "entry_audits", "reservation_operations", "idempotency_receipts"],
       "additionalProperties": false
     },
     "checkpoint_receipt": {

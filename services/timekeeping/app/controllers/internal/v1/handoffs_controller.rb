@@ -8,6 +8,7 @@
 #
 #   GET  /internal/v1/handoff                       the copy, and where the relay stands
 #   POST /internal/v1/handoff/steps/{step}          HandoffFence: close, freeze, flip, abort
+#   GET  /internal/v1/handoff/checkpoint            CheckpointTake (§10.5 step 4, out of Timekeeping)
 #   POST /internal/v1/handoff/checkpoint            CheckpointLoad (§10.5 steps 4 and 5)
 #   POST /internal/v1/handoff/checkpoint/reconcile  CheckpointReconcile (step 6)
 #
@@ -15,7 +16,9 @@
 # calls are not admitted writes: each service guards itself by the step the
 # copy is at, so a replay is refused out of step and changes nothing, and no
 # Idempotency-Key is needed. The generation travels in X-Ownership-Generation
-# as on every mutating call (§5.1), and must be the body's.
+# as on every mutating call (§5.1), and must be the body's. Taking a
+# checkpoint is a read: it names the handoff's generation in its query, and
+# the handoff tool may ask again as often as it needs.
 #
 # A checkpoint body is read exactly as sent (JSON.parse of the raw body), not
 # through Rails' parameter parsing, which would rewrite a [null] inside an
@@ -49,6 +52,12 @@ class Internal::V1::HandoffsController < Internal::BaseController
     answer_problem!(Problem.new(slug: "checkpoint-differs", status: 409, detail: error.message, lists: error.lists))
   end
 
+  # Settle left an operation unresolved (§10.5 step 2). Frozen, nothing can
+  # resolve it any more, so no retry changes this: the handoff is aborted.
+  rescue_from CheckpointTake::Unsettled do |error|
+    answer_problem!(Problem.new(slug: "checkpoint-unsettled", status: 409, detail: error.message, lists: error.lists))
+  end
+
   def show
     render json: status_of(Ownership.current)
   end
@@ -56,6 +65,14 @@ class Internal::V1::HandoffsController < Internal::BaseController
   def step
     generation = carried_generation!(contract_input!("#/$defs/step_request", body!))
     render json: status_of(HandoffFence.call(params[:step].to_sym, generation:))
+  end
+
+  # The rollback's checkpoint (§10.2 step 6, §10.5 step 4), taken out of
+  # Timekeeping as the outgoing owner at the query's generation, for the
+  # handoff tool to load into the prepared existing application.
+  def take_checkpoint
+    query = contract_input!("#/$defs/checkpoint_query", request.query_parameters)
+    render json: CheckpointTake.take(generation: Integer(query.fetch("generation"), 10)).to_h
   end
 
   def load_checkpoint

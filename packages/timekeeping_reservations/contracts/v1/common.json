@@ -98,11 +98,12 @@
         "https://contracts.timekeeping.internal/problems/drain-timeout",
         "https://contracts.timekeeping.internal/problems/already-loaded",
         "https://contracts.timekeeping.internal/problems/checkpoint-refused",
-        "https://contracts.timekeeping.internal/problems/checkpoint-differs"
+        "https://contracts.timekeeping.internal/problems/checkpoint-differs",
+        "https://contracts.timekeeping.internal/problems/checkpoint-unsettled"
       ]
     },
     "problem": {
-      "description": "application/problem+json (RFC 9457) with its extensions: retryable, errors for validation-failed, refused for reservation-refused, and lists for checkpoint-refused and checkpoint-differs.",
+      "description": "application/problem+json (RFC 9457) with its extensions: retryable, errors for validation-failed, refused for reservation-refused, and lists for checkpoint-refused, checkpoint-differs and checkpoint-unsettled.",
       "type": "object",
       "properties": {
         "type": { "$ref": "#/$defs/problem_type" },
@@ -130,7 +131,7 @@
           }
         },
         "lists": {
-          "description": "checkpoint-refused and checkpoint-differs only (handoff_api.json): each check that failed, and the entry ids, or receipt identifiers, it found (§10.4).",
+          "description": "checkpoint-refused, checkpoint-differs and checkpoint-unsettled only (handoff_api.json): each check that failed, and the entry ids, or receipt identifiers, it found (§10.4, §10.5 step 2).",
           "type": "object",
           "minProperties": 1,
           "additionalProperties": {
