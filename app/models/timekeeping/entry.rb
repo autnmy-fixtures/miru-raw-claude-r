@@ -20,6 +20,12 @@ class Timekeeping::Entry < ApplicationRecord
   scope :of_company, ->(company_id) { where(company_id:) }
   scope :kept, -> { where(discarded_at: nil) }
 
+  # The fields a prepare answers for each entry of the desired set
+  # (reservation_api.json#/$defs/prepared_entry), read from the contract
+  # itself.
+  PREPARED_FIELDS = Timekeeping::Contracts.document(:reservation_api)
+    .dig("$defs", "prepared_entry", "properties").keys.freeze
+
   # The columns of one contract entry (common.json#/$defs/entry), as a row
   # takes them: every field but the derived `locked`, which is the
   # reservations' to say (§7.1). Active Record casts the carried strings.
@@ -34,6 +40,13 @@ class Timekeeping::Entry < ApplicationRecord
   def to_contract
     { "id" => id, "company_id" => company_id, "version" => version }
       .merge(Timekeeping::StoredEntries::FIELDS.index_with { |field| contract_value(field) })
+  end
+
+  # The entry's prepare facts in contract form, as Timekeeping's
+  # ReservationProtocol renders them: the value the `timekeeping` owner's
+  # reservation client answers for the same entry (L8).
+  def to_prepared
+    Timekeeping::ReservationClient::PreparedEntry.new(**PREPARED_FIELDS.to_h { |field| [field.to_sym, contract_value(field)] })
   end
 
   # What `audited` records for the update just saved: each of `columns` it

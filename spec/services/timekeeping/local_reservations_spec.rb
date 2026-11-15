@@ -15,12 +15,20 @@ RSpec.describe Timekeeping::LocalReservations do
 
   # An entry store over today's timesheet_entries, standing in for the
   # authoritative store of the owner the provider serves. It records what
-  # it is told about changed reservations.
+  # it is told about changed reservations, and each read of the prepare
+  # facts with the reservation rows standing at that moment.
   let(:entry_store) do
     Class.new do
       def locked = (@locked ||= [])
 
       def changed = (@changed ||= [])
+
+      def facts_read = (@facts_read ||= [])
+
+      def prepared(ids)
+        facts_read << [ids, Timekeeping::Reservation.where(entry_id: ids).order(:entry_id).pluck(:entry_id, :state)]
+        ids.map { |id| "facts of #{id}" }
+      end
 
       def reservations_changed!(was_locked, operation:)
         changed << [operation.operation_id, was_locked]
@@ -73,10 +81,38 @@ RSpec.describe Timekeeping::LocalReservations do
       result = provider.prepare(op)
 
       aggregate_failures do
-        expect(result).to eq(described_class::Prepared.new(entries: [x, y].map { |entry| TimekeepingReservations::Entry.new(id: entry.id, company_id: tenant_a.company.id) }))
+        expect(result).to eq(described_class::Prepared.new(entries: ["facts of #{x.id}", "facts of #{y.id}"]))
         expect(reservations).to eq([x, y].map { |entry| reservation(entry, draft, state: :provisional, operation_id: op.operation_id) })
         expect(receipt(draft, op)).to eq("prepared")
         expect(entry_store.locked).to eq([[x.id, y.id].sort])
+      end
+    end
+
+    it "reads the facts of the desired set, in its order, once the change is written" do
+      committed!(operation(draft, entry_ids: [y.id]))
+      entry_store.facts_read.clear
+      op = operation(draft, entry_ids: [x.id, y.id].reverse)
+
+      result = provider.prepare(op)
+
+      aggregate_failures do
+        expect(result.entries).to eq([y, x].map { |entry| "facts of #{entry.id}" })
+        expect(entry_store.facts_read).to eq([[[y.id, x.id], [[x.id, "provisional"], [y.id, "committed"]].sort]])
+      end
+    end
+
+    it "reads no facts for a refusal, a stored receipt or an unresolved earlier operation" do
+      committed!(operation(other_draft, entry_ids: [x.id]))
+      done = operation(draft, entry_ids: [y.id])
+      committed!(done)
+      provider.prepare(operation(sent))
+      entry_store.facts_read.clear
+
+      aggregate_failures do
+        expect(provider.prepare(operation(draft, entry_ids: [x.id]))).to be_a(TimekeepingReservations::Refused)
+        expect(provider.prepare(done)).to eq(described_class::Receipt.new(status: :committed))
+        expect(provider.prepare(operation(sent, entry_ids: [x.id]))).to be_a(described_class::Unresolved)
+        expect(entry_store.facts_read).to eq([])
       end
     end
 
@@ -126,10 +162,10 @@ RSpec.describe Timekeeping::LocalReservations do
 
     it "is idempotent: a replay answers prepared again and reserves nothing twice" do
       op = operation(draft, entry_ids: [x.id])
-      provider.prepare(op)
+      first = provider.prepare(op)
       before = table_state
 
-      expect(provider.prepare(op)).to be_a(described_class::Prepared)
+      expect(provider.prepare(op)).to eq(first)
       expect(table_state).to eq(before)
     end
 

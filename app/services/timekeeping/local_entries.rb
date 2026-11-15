@@ -11,6 +11,12 @@
 # { id => TimekeepingReservations::Entry } for the ids that exist, discarded
 # ones included: existence and company are what the rule decides on (L8).
 #
+# `prepared(ids)` answers the prepare facts of each id that exists, in the
+# order asked (Timekeeping::Entry#to_prepared): project, user, duration, work
+# date and the version the change left, as Timekeeping's prepare answers
+# them. LocalReservations reads them after it wrote the change, in the same
+# transaction, from the rows `lock` already holds.
+#
 # `reservations_changed!` records each entry whose reservations a change
 # just wrote, as ReservationProtocol.record_changes! records Timekeeping's:
 # the entry is saved as its next version, with the outbox snapshot that
@@ -27,6 +33,10 @@ class Timekeeping::LocalEntries
   def lock(ids)
     Timekeeping::Entry.where(id: ids).order(:id).lock.pluck(:id, :company_id)
       .to_h { |id, company_id| [id, TimekeepingReservations::Entry.new(id:, company_id:)] }
+  end
+
+  def prepared(ids)
+    Timekeeping::Entry.where(id: ids).index_by(&:id).values_at(*ids).compact.map(&:to_prepared)
   end
 
   # `was_locked` is { id => locked before the change } for every entry whose

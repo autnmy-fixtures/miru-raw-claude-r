@@ -33,7 +33,10 @@ store is `Timekeeping::LocalEntries` (`app/services/timekeeping/local_entries.rb
 application's own `timekeeping_entries`, which have Timekeeping's `entries` shape. Every entry whose
 reservations a prepare, commit or abort changes is saved there as its next version, with an entry
 snapshot that carries its derived `locked` and no audit row, as `ReservationProtocol` records
-Timekeeping's. The gateway's
+Timekeeping's. A prepare answers each entry of the desired set with the facts line-item validation
+needs (`prepared_entry` in `reservation_api.json`: company, project, user, duration, work date, and the
+version the prepare left it at), as `Timekeeping::ReservationClient::PreparedEntry`, the value the
+`timekeeping` owner's client answers for the same entry. The gateway's
 `monolith` owner, `Timekeeping::Gateway::Local` (`app/services/timekeeping/gateway/local.rb`), writes
 those entries for the single-entry and bulk commands, the import batches and agent detach, under today's
 `TimesheetEntry` rules, and `Timekeeping::EntryReads` reads them back for the entry API's own reads; no
