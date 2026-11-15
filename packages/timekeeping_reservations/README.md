@@ -42,7 +42,13 @@ those entries for the single-entry and bulk commands, the import batches and age
 `TimesheetEntry` rules, and `Timekeeping::EntryReads` reads them back for the entry API's own reads.
 Invoice candidate selection under that owner reads them too, through `Timekeeping::LocalEntries#candidates`:
 the same arguments and `Candidate` values as the entry client's `candidates`, selected with `selectable?`
-as Timekeeping's `CandidateList` selects them. No owner routes reservations to the provider yet. An entry change there records its audit row and its
+as Timekeeping's `CandidateList` selects them. Under that owner the invoice reservation boundary prepares
+through the provider, by way of `Timekeeping::LocalReservationClient`
+(`app/services/timekeeping/local_reservation_client.rb`): it admits the prepare under the intent's
+generation in its own transaction, as Timekeeping admits one under `X-Ownership-Generation`, and answers
+as `Timekeeping::ReservationClient` does (`Prepared`, a `Receipt` with the contract's string status, or
+the contract's problem raised), so the boundary runs the same save order under either owner. Commit and
+abort are not delivered to the provider yet. An entry change there records its audit row and its
 entry snapshot through `Timekeeping::LocalEntryChange`, into the prepared application's outbox
 (`timekeeping_outbox_snapshots`, Timekeeping's `outbox_snapshots` shape), and `Timekeeping::LocalRelay`
 drains that outbox into `timesheet_entries` through the projection consumer, on its own

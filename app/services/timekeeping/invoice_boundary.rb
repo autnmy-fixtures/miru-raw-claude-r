@@ -22,9 +22,11 @@
 #
 # The owner is the one the ownership record names. `legacy` keeps today's
 # lock callbacks (§3.1): the change runs as it does today and no intent is
-# opened. `timekeeping` prepares over HTTP. `monolith` arrives with its own
-# entry store (§10.5); until then the boundary refuses under it, as the
-# gateway and the worker do.
+# opened. `timekeeping` prepares over HTTP (Timekeeping::ReservationClient).
+# `monolith`, the prepared application after a rollback (§10.5), prepares
+# in-process against its own reservation table
+# (Timekeeping::LocalReservationClient), which answers as the client does, so
+# the steps below are the same under either owner.
 class Timekeeping::InvoiceBoundary
   # One invoice operation that changes a reservation set. `entry_ids` is the
   # desired set (§7.2): every entry the invoice's remaining direct and grouped
@@ -59,7 +61,10 @@ class Timekeeping::InvoiceBoundary
 
   class OwnerUnavailable < StandardError; end
 
-  PROVIDERS = { "timekeeping" => -> { Timekeeping::ReservationClient.new } }.freeze
+  PROVIDERS = {
+    "timekeeping" => -> { Timekeeping::ReservationClient.new },
+    "monolith" => -> { Timekeeping::LocalReservationClient.new }
+  }.freeze
 
   # Total attempts, as ApplicationJob counts them (§11.1): two retries (§9.4).
   PREPARE_ATTEMPTS = 3

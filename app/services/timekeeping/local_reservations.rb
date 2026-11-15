@@ -4,14 +4,17 @@
 # (docs/architecture/timekeeping-soa.md §10.2 step 4, §10.5): prepare, commit
 # and abort of §5.3, run in-process against the local reservation table and
 # decided by the shared decision table (§7.2), which nobody re-implements.
-# It is inactive: the gateway routes no owner to it until the `monolith`
-# owner is built.
+# Under the `monolith` owner the invoice reservation boundary prepares through
+# it, by way of Timekeeping::LocalReservationClient, which admits each call
+# under the intent's generation and answers as the `timekeeping` owner's
+# client does. Commit and abort are not delivered to it yet.
 #
 # It keeps the protocol Timekeeping keeps: idempotency and a terminal receipt
 # per (invoice, operation), at most one unresolved operation per invoice
 # (`resolves`), and an abort of an operation never prepared as a no-op that
 # still leaves a receipt (§9.3). It checks no generation: it runs in-process,
-# inside the gateway's own admitted transaction (§10.1).
+# inside its caller's admitted transaction (§10.1), and joins it as a
+# savepoint.
 #
 # `entries` is the authoritative entry store of the owner it serves: for the
 # `monolith` owner, Timekeeping::LocalEntries over timekeeping_entries. Its

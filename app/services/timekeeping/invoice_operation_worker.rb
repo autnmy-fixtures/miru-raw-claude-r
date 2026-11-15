@@ -19,10 +19,12 @@
 #      holds back another's.
 #
 # The owner is the one the ownership record names now. Only `timekeeping`
-# has a reservation provider over the wire so far. `monolith` arrives with its
-# own entry store (§10.5), and `legacy` keeps today's callbacks and opens no
-# intent. A sweep with something to deliver under either is refused, after
-# recovery, and nothing is marked delivered.
+# takes delivery so far. Under `monolith` the boundary already prepares
+# in-process (Timekeeping::LocalReservationClient), but commit and abort are
+# not delivered to the prepared application's provider yet (§10.5), and
+# `legacy` keeps today's callbacks and opens no intent. A sweep with
+# something to deliver under either is refused, after recovery, and nothing
+# is marked delivered.
 class Timekeeping::InvoiceOperationWorker
   # How long a save may hold its intent pending: three prepare attempts of at
   # most 2 s each with jitter (§9.4), then the invoice transaction. Past it,
