@@ -75,15 +75,22 @@ class Ownership < ApplicationRecord
   # The record held FOR SHARE for a step of the first cutover that runs on
   # this copy (§10.5 steps 4 to 6: CheckpointLoad, CheckpointReconcile), or
   # OutOfStep unless it is frozen under the legacy owner at `generation`.
-  # Held for the rest of the caller's transaction, so the fence cannot flip
-  # or abort the handoff under it. Must run inside that transaction.
   def self.lock_frozen_legacy!(step, generation)
+    lock_frozen!(step, generation, owner: "legacy")
+  end
+
+  # The record held FOR SHARE for a checkpoint step (§10.5 steps 4 to 6), or
+  # OutOfStep unless it is frozen under `owner`, the handoff's outgoing
+  # owner, at `generation`. Held for the rest of the caller's transaction, so
+  # the fence cannot flip or abort the handoff under it. Must run inside that
+  # transaction.
+  def self.lock_frozen!(step, generation, owner:)
     lock_shared!.tap do |ownership|
       TimekeepingReservations::Handoff.ensure_in_step!(step, FROZEN, ownership, generation)
-      next if ownership.owner_legacy?
+      next if ownership.owner == owner
 
       raise TimekeepingReservations::Handoff::OutOfStep,
-        "Timekeeping handoff: #{step} expects owner legacy, found #{ownership.summary}; nothing changed"
+        "Timekeeping handoff: #{step} expects owner #{owner}, found #{ownership.summary}; nothing changed"
     end
   end
 
