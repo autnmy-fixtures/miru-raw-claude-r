@@ -18,6 +18,11 @@ module TimekeepingContracts
   #   misordered step is out-of-step and changes nothing;
   # - load and reconcile only while the copy is frozen under the legacy owner
   #   at the checkpoint's generation, and a second load already-loaded;
+  # - the rollback's take (take_checkpoint) only while the copy is frozen
+  #   under the timekeeping owner at the query's generation. It answers what
+  #   the fake holds as the owner (#held): the entries and reservations a load
+  #   stored, and whatever a test sets with #hold!, as the writes Timekeeping
+  #   took after the cutover. It writes nothing;
   # - reconcile against the checkpoint it loaded: an entry missing,
   #   unexpected or different, or another set of reservations for an entry,
   #   is checkpoint-differs with its lists, and nothing changes;
@@ -31,8 +36,9 @@ module TimekeepingContracts
   #
   # Of the load's checkpoint-refused checks (§10.4) it keeps only the one the
   # outbox needs, not_a_contract_entry. It keeps none of the other rules of
-  # Timekeeping's own services: the load's other refusals, the 60 s drain,
-  # and the entry and reservation tables themselves. Those are tested in
+  # Timekeeping's own services: the load's other refusals, the take's
+  # checkpoint-unsettled (it holds no pending operation), the 60 s drain, and
+  # the entry and reservation tables themselves. Those are tested in
   # services/timekeeping. A test that needs one of their refusals scripts it
   # with #fail_next.
   class FakeHandoff
@@ -45,9 +51,13 @@ module TimekeepingContracts
     SNAPSHOT_TYPE = "timekeeping.entry_snapshot.v1"
 
     HANDLERS = {
-      read_handoff: :read_handoff, run_step: :run_step,
+      read_handoff: :read_handoff, run_step: :run_step, take_checkpoint: :take_checkpoint,
       load_checkpoint: :load_checkpoint, reconcile_checkpoint: :reconcile_checkpoint
     }.freeze
+
+    # The parts of a taken checkpoint (taken_checkpoint) other than its
+    # generation: what Timekeeping holds as the owner.
+    HELD = %w[entries reservations entry_audits reservation_operations idempotency_receipts].freeze
 
     # Timekeeping's copy of the ownership record (§10.1).
     Copy = Data.define(:generation, :owner, :state)
@@ -55,8 +65,10 @@ module TimekeepingContracts
     Call = Data.define(:operation, :params, :input, :request_id)
 
     # `loaded` is the checkpoint the load stored, as carried: { "generation",
-    # "entries", "reservations" }, or nil before a load.
-    attr_reader :copy, :violations, :calls, :outbox, :loaded
+    # "entries", "reservations" }, or nil before a load. `held` is what
+    # Timekeeping holds as the owner, by HELD part, in the contract's form:
+    # what the take answers.
+    attr_reader :copy, :violations, :calls, :outbox, :loaded, :held
 
     # The copy starts where Timekeeping's does before any handoff: the
     # column defaults, generation 0, legacy, open.
@@ -64,6 +76,7 @@ module TimekeepingContracts
       @copy = Copy.new(generation:, owner:, state:)
       @token_key = token_key
       @loaded = nil
+      @held = HELD.index_with { [] }
       @outbox = []
       @delivered = 0
       @scripted = []
@@ -87,6 +100,20 @@ module TimekeepingContracts
       undelivered.each_slice(500).map do |batch|
         FakeRelay.new(token_key: @token_key).deliver(app, batch).tap { @delivered += batch.size }
       end
+    end
+
+    # Sets what Timekeeping holds as the owner, part by part (HELD), in the
+    # contract's form, for the rollback's take to answer: the writes it took
+    # after the cutover. A part not named keeps what it held. A part outside
+    # the contract raises, because it is a bug in the test.
+    def hold!(**parts)
+      unknown = parts.keys.map(&:to_s) - HELD
+      raise ArgumentError, "FakeHandoff holds only #{HELD.join(', ')}, not #{unknown.join(', ')}" if unknown.any?
+
+      held = @held.merge(parts.transform_keys(&:to_s))
+      TimekeepingContracts.validate!(CONTRACT, "#/$defs/taken_checkpoint", { "generation" => @copy.generation, **held })
+      @held = held
+      self
     end
 
     # The next call of operation answers this problem instead of running, and
@@ -151,9 +178,13 @@ module TimekeepingContracts
       end
 
       def read_input(request, operation)
-        return {} unless operation.request
-
-        TimekeepingContracts.validate!(CONTRACT, operation.request, JSON.parse(request.body.read.presence || "{}"))
+        if operation.request
+          TimekeepingContracts.validate!(CONTRACT, operation.request, JSON.parse(request.body.read.presence || "{}"))
+        elsif operation.query
+          TimekeepingContracts.validate!(CONTRACT, operation.query, Rack::Utils.parse_query(request.query_string))
+        else
+          {}
+        end
       rescue JSON::ParserError, Violation => error
         violation!(error.message)
       end
@@ -207,32 +238,44 @@ module TimekeepingContracts
         out_of_step!(error)
       end
 
+      # The rollback's checkpoint out of Timekeeping, the outgoing owner: what
+      # it holds, at the query's generation. A read.
+      def take_checkpoint(_params, input)
+        generation = Integer(input.fetch("generation"), 10)
+        ensure_frozen!(:checkpoint, generation, owner: "timekeeping")
+
+        [200, { "generation" => generation, **@held }]
+      end
+
       def load_checkpoint(_params, input)
-        ensure_frozen_legacy!(:load, input.fetch("generation"))
+        ensure_frozen!(:load, input.fetch("generation"), owner: "legacy")
         halt(*problem(409, "already-loaded", detail: "Timekeeping already holds entries; nothing loaded")) if @loaded
         ensure_contract_entries!(input.fetch("entries"))
 
         @loaded = input
+        @held = @held.merge(input.slice("entries", "reservations"))
         @outbox.concat(input.fetch("entries").sort_by { |entry| entry.fetch("id") }.map { |entry| snapshot(entry) })
         receipt(input)
       end
 
       def reconcile_checkpoint(_params, input)
-        ensure_frozen_legacy!(:reconcile, input.fetch("generation"))
+        ensure_frozen!(:reconcile, input.fetch("generation"), owner: "legacy")
         lists = differences(input, @loaded || { "entries" => [], "reservations" => [] })
         halt(*problem(409, "checkpoint-differs", detail: "the checkpoint differs from what Timekeeping holds", lists:)) if lists.any?
 
         receipt(input)
       end
 
-      # Where the provider's Ownership.lock_frozen_legacy! lets a load or a
-      # reconcile run: frozen at the handoff's generation, under legacy.
-      def ensure_frozen_legacy!(name, generation)
+      # Where the provider's Ownership.lock_frozen! lets a checkpoint step run:
+      # frozen at the handoff's generation, under the outgoing owner, legacy
+      # for the first cutover's load and reconcile, timekeeping for the
+      # rollback's take.
+      def ensure_frozen!(name, generation, owner:)
         TimekeepingReservations::Handoff.ensure_in_step!(name, %w[frozen], @copy, generation)
-        return if @copy.owner == "legacy"
+        return if @copy.owner == owner
 
         raise TimekeepingReservations::Handoff::OutOfStep,
-          "Timekeeping handoff: #{name} runs only for the first cutover, found owner #{@copy.owner}; nothing changed"
+          "Timekeeping handoff: #{name} expects owner #{owner}, found owner #{@copy.owner}; nothing changed"
       rescue TimekeepingReservations::Handoff::OutOfStep => error
         out_of_step!(error)
       end

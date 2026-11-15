@@ -14,12 +14,15 @@ RSpec.describe TimekeepingContracts::FakeHandoff do
     TimekeepingContracts.sign({ "sub" => "service:timekeeping-handoff", "aud" => "handoff" }.merge(overrides), key:)
   end
 
-  def request(operation_name, body: nil, generation: body&.fetch("generation"), token: handoff_token, without: [], **params)
+  def request(operation_name, body: nil, query: nil, generation: body&.fetch("generation"), token: handoff_token, without: [], **params)
     operation = TimekeepingContracts.operation(operation_name)
     sent = { "Authorization" => "Bearer #{token}", "X-Request-Id" => "handoff-1" }
     sent = sent.merge("X-Ownership-Generation" => generation.to_s, "Content-Type" => "application/json") if operation.mutating
-    http.run_request(operation.verb.downcase.to_sym, operation.path_for(**params), body && JSON.generate(body), sent.except(*without))
+    path = [operation.path_for(**params), query && URI.encode_www_form(query)].compact.join("?")
+    http.run_request(operation.verb.downcase.to_sym, path, body && JSON.generate(body), sent.except(*without))
   end
+
+  def take(generation, **options) = request(:take_checkpoint, query: { "generation" => generation.to_s }, **options)
 
   def step(name, generation) = request(:run_step, step: name.to_s, body: { "generation" => generation })
 
@@ -185,6 +188,120 @@ RSpec.describe TimekeepingContracts::FakeHandoff do
       frozen!
 
       expect(request(:reconcile_checkpoint, body: checkpoint).body["lists"]).to include("entry_missing" => [101, 102, 205])
+    end
+  end
+
+  describe "the rollback's checkpoint, taken out of Timekeeping" do
+    subject!(:fake) { described_class.new(generation: 1, owner: "timekeeping").install! }
+
+    let(:audit) do
+      { "id" => 9, "entry_id" => 101, "company_id" => 1, "version" => 1, "action" => "create", "actor" => "user:7", "agent_id" => nil,
+        "writer" => "web", "request_id" => "req-1", "audited_changes" => { "note" => nil }, "created_at" => "2026-11-02T09:15:30.123456Z" }
+    end
+    let(:receipt) do
+      { "company_id" => 2, "key" => "web-1", "request_digest" => "d2", "status" => 201, "response" => { "entry" => { "id" => 205 } },
+        "created_at" => "2026-11-02T09:15:30.123456Z" }
+    end
+    let(:noop_abort) do
+      { "invoice_id" => 701, "operation_id" => "8f14e45f-ceea-467f-a0e3-b4a1c3d2e5f6", "company_id" => nil, "kind" => nil, "invoice_state" => nil,
+        "entry_ids" => [], "state" => "aborted", "created_at" => "2026-11-02T09:15:30.123456Z", "updated_at" => "2026-11-02T09:15:30.123456Z" }
+    end
+
+    def frozen_for_rollback!
+      step(:close, 1)
+      step(:freeze, 2)
+    end
+
+    it "answers what it holds while frozen under timekeeping at the query's generation, and writes nothing" do
+      fake.hold!(entries:, reservations:, entry_audits: [audit], reservation_operations: [noop_abort], idempotency_receipts: [receipt])
+      frozen_for_rollback!
+
+      taken = take(2)
+
+      expect(taken.status).to eq(200)
+      expect(taken.body).to eq(
+        "generation" => 2, "entries" => entries, "reservations" => reservations,
+        "entry_audits" => [audit], "reservation_operations" => [noop_abort], "idempotency_receipts" => [receipt]
+      )
+      expect(taken.body.dig("entries", 0, "duration")).to eq(479.99999)
+      TimekeepingContracts.validate!(:handoff_api, "#/$defs/taken_checkpoint", taken.body)
+      expect(fake.calls.last).to have_attributes(operation: :take_checkpoint, input: { "generation" => "2" })
+      expect(take(2).body).to eq(taken.body)
+      expect(fake.copy).to eq(described_class::Copy.new(generation: 2, owner: "timekeeping", state: "frozen"))
+      expect(fake.outbox).to be_empty
+    end
+
+    it "answers an empty checkpoint when it holds nothing" do
+      frozen_for_rollback!
+
+      expect(take(2).body).to eq("generation" => 2, **described_class::HELD.index_with { [] })
+    end
+
+    it "holds what a first cutover loaded, so the rollback takes back what the cutover carried" do
+      legacy = described_class.new.install!
+      frozen!
+      request(:load_checkpoint, body: checkpoint)
+      step(:flip, 1)
+      step(:close, 1)
+      step(:freeze, 2)
+
+      taken = take(2)
+
+      expect(taken.body.slice("entries", "reservations")).to eq(checkpoint.slice("entries", "reservations"))
+      expect(taken.body.slice("entry_audits", "reservation_operations", "idempotency_receipts").values).to eq([[], [], []])
+      expect(legacy.violations).to be_empty
+    end
+
+    it "refuses the take anywhere but frozen under timekeeping at the query's generation, and changes nothing" do
+      fake.hold!(entries:)
+
+      [[-> { nil }, 1], [-> { step(:close, 1) }, 2], [-> { step(:freeze, 2) }, 1], [-> { nil }, 3]].each do |reach, asked|
+        reach.call
+        refused = take(asked)
+
+        expect([refused.status, refused.body["type"]]).to eq([409, type("out-of-step")]), "asked #{asked} at #{fake.copy.to_h}"
+      end
+      expect(fake.copy.state).to eq("frozen")
+    end
+
+    it "refuses the take under legacy: the first cutover's copy has nothing to give back" do
+      described_class.new.install!.tap do |legacy|
+        frozen!
+
+        refused = take(1)
+
+        expect([refused.status, refused.body["type"]]).to eq([409, type("out-of-step")])
+        expect(refused.body["detail"]).to include("expects owner timekeeping, found owner legacy")
+        expect(legacy.violations).to be_empty
+      end
+    end
+
+    it "answers a scripted checkpoint-unsettled with its lists" do
+      frozen_for_rollback!
+      fake.fail_next(:take_checkpoint, status: 409, slug: "checkpoint-unsettled", lists: { "provisional_reservation" => [101] })
+
+      refused = take(2)
+
+      expect([refused.status, refused.body["type"], refused.body["lists"]]).to eq([409, type("checkpoint-unsettled"), { "provisional_reservation" => [101] }])
+      expect(take(2).status).to eq(200)
+    end
+
+    it "records a query outside the contract", :violates do
+      frozen_for_rollback!
+
+      [{}, { "generation" => "-1" }, { "generation" => "02" }, { "generation" => "two" }, { "generation" => "2", "owner" => "timekeeping" }].each do |query|
+        expect(request(:take_checkpoint, query: query.presence).status).to eq(400), query.inspect
+      end
+      expect(fake.violations.size).to eq(5)
+    end
+
+    it "refuses to hold a part outside the contract, keeping what it held" do
+      fake.hold!(entries:)
+      provisional = reservations.first.merge("state" => "provisional")
+
+      expect { fake.hold!(reservations: [provisional]) }.to raise_error(TimekeepingContracts::Violation, /taken_checkpoint/)
+      expect { fake.hold!(payments: []) }.to raise_error(ArgumentError, /payments/)
+      expect(fake.held).to eq(described_class::HELD.index_with { [] }.merge("entries" => entries))
     end
   end
 
