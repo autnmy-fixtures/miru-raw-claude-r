@@ -71,6 +71,15 @@ writes no outbox snapshot: freeze already drained Timekeeping's outbox into the 
 versions the checkpoint carries. A checkpoint that does not hold together is refused whole as
 `Refused`, with what each check found.
 
+`Timekeeping::RollbackReconcile` (`app/services/timekeeping/rollback_reconcile.rb`, §10.5 step 6) then
+compares the loaded tables with the same checkpoint, under the same guard, and writes nothing. Every
+check is exact: entries (every column by id, `version` and the derived `locked` included), each
+entry's reservations, audit rows by id, operation receipts by `invoice_id/operation_id` and
+idempotency receipts by `company_id/key`. It also runs the first cutover's checks of the existing
+application's tables (`Timekeeping::CheckpointReconcile.differences`): kept invoices' lines against
+the active reservations, `timesheet_entries` against the carried entries, and money by financial
+snapshot. Any difference raises `CheckpointReconcile::Differs`, and the handoff is aborted.
+
 Timekeeping's provider is `ReservationProtocol` (`services/timekeeping/app/services/reservation_protocol.rb`),
 behind the reservation API's three endpoints. It keeps the same protocol on tables with the same shape,
 `reservations` and `reservation_operations`, so a checkpoint carries reservations and receipts either way
