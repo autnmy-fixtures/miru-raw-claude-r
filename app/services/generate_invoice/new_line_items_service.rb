@@ -6,10 +6,19 @@ module GenerateInvoice
     # §3.3 rule 1): a read that decides money reads the owner of the entries.
     # Under `legacy` that is today's table. Under `timekeeping` it is the
     # owner's candidates, never the projection, which may lag behind it, so a
-    # new entry can be invoiced at once (§12.4 "relay paused"). The `monolith`
-    # owner arrives with its own entry store (§10.5); until then selection
-    # refuses under it, as the gateway and the invoice boundary do.
-    CANDIDATE_READS = { "legacy" => :table_candidates, "timekeeping" => :owner_candidates }.freeze
+    # new entry can be invoiced at once (§12.4 "relay paused"). Under
+    # `monolith`, the prepared application after a rollback (§10.5), it is
+    # that owner's own entry table, read the same way.
+    CANDIDATE_READS = {
+      "legacy" => :table_candidates, "timekeeping" => :owner_candidates, "monolith" => :owner_candidates
+    }.freeze
+
+    # Who answers an owner's candidates: each takes the same arguments and
+    # answers the same Timekeeping::EntryClient::Candidate values.
+    CANDIDATE_OWNERS = {
+      "timekeeping" => -> { Timekeeping::EntryClient.new },
+      "monolith" => -> { Timekeeping::LocalEntries.new }
+    }.freeze
 
     # An owner's candidate with the catalogue records the suggestions read,
     # shaped as a loaded TimesheetEntry is.
@@ -111,7 +120,7 @@ module GenerateInvoice
       # unbilled are the contract's own conditions.
       def owner_candidates
         filters = TimeEntries::Filters.process(params)
-        entries = Timekeeping::EntryClient.new.candidates(
+        entries = CANDIDATE_OWNERS.fetch(owner).call.candidates(
           company: client.company,
           client_id: client.id,
           project_ids: selected_project_ids(filters),

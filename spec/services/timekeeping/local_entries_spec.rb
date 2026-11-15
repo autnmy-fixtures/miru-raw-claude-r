@@ -4,7 +4,8 @@ require "rails_helper"
 
 # The prepared application's entry store (docs/architecture/timekeeping-soa.md
 # §3.1, §10.5): what Timekeeping::LocalReservations locks and reads its facts
-# from once the `monolith` owner is built. Nothing routes to it yet.
+# from once the `monolith` owner is built, and the candidates invoice
+# selection reads under that owner.
 RSpec.describe Timekeeping::LocalEntries do
   subject(:store) { described_class.new }
 
@@ -137,6 +138,110 @@ RSpec.describe Timekeeping::LocalEntries do
       store.reservations_changed!({ 1 => false }, operation:)
 
       expect([bystander.reload.version, bystander.outbox_snapshots.count]).to eq([1, 0])
+    end
+  end
+
+  describe "#candidates" do
+    let(:company) { Company.new(id: 42) }
+    let(:project_id) { 7 }
+
+    def held!(id, company_id: 42, project_id: 7, user_id: 9, **attributes)
+      Timekeeping::Entry.create!(
+        id:, company_id:, project_id:, user_id:, duration: 60.0, work_date: Date.new(2026, 11, 2),
+        bill_status: "unbilled", **attributes
+      )
+    end
+
+    def reserve!(entry, state:, disposition:, invoice_id: 10)
+      Timekeeping::Reservation.create!(
+        entry_id: entry.id, invoice_id:, company_id: entry.company_id, state:, disposition:, edit_lock: true,
+        operation_id: (SecureRandom.uuid if state == "provisional")
+      )
+    end
+
+    def candidate_ids(**query)
+      store.candidates(company:, client_id: 3, project_ids: [project_id], **query).map(&:id)
+    end
+
+    it "answers each kept, unbilled entry of the company's named projects as the entry client's Candidate, by id" do
+      second = held!(5, note: "Second", duration: 90.7, work_date: Date.new(2026, 11, 3))
+      first = held!(4)
+      held!(6, discarded_at: Time.current)
+      held!(7, bill_status: "billed")
+      held!(8, bill_status: "non_billable")
+      held!(9, project_id: 70)
+      held!(10, company_id: 43)
+
+      answered = store.candidates(company:, client_id: 3, project_ids: [project_id])
+
+      expect(answered.map(&:id)).to eq([first.id, second.id])
+      expect(answered.last).to eq(Timekeeping::EntryClient::Candidate.new(
+        id: 5, company_id: 42, project_id: 7, user_id: 9, note: "Second", work_date: Date.new(2026, 11, 3), duration: 90.7
+      ))
+    end
+
+    it "leaves out an entry an invoice holds by an active or a provisional reservation, not by a retained one (L3, L4)" do
+      active, provisional, retained, free = [1, 2, 3, 4].map { |id| held!(id) }
+      reserve!(active, state: "committed", disposition: "active")
+      reserve!(provisional, state: "provisional", disposition: "active")
+      reserve!(retained, state: "committed", disposition: "retained")
+
+      expect(candidate_ids).to eq([retained.id, free.id])
+    end
+
+    it "narrows by each filter the entry client carries" do
+      mine = held!(1, user_id: 9, work_date: Date.new(2026, 11, 2))
+      held!(2, user_id: 11, work_date: Date.new(2026, 11, 2))
+      selected = held!(3, user_id: 9, work_date: Date.new(2026, 11, 3))
+      held!(4, user_id: 9, work_date: Date.new(2026, 10, 1))
+
+      expect(candidate_ids(user_ids: [9], exclude_ids: [selected.id], work_dates: Date.new(2026, 11, 1)..Date.new(2026, 11, 30)))
+        .to eq([mine.id])
+      expect(candidate_ids(user_ids: nil).size).to eq(4)
+      expect(candidate_ids(user_ids: [])).to eq([])
+      expect(store.candidates(company:, client_id: 3, project_ids: [])).to eq([])
+    end
+
+    # The search GenerateInvoice::NewLineItemsService runs today through
+    # TimesheetEntry.pg_search, as Timekeeping's own candidates spec pins it.
+    describe "search_term" do
+      let!(:prep) { held!(1, note: "Salad prep for the lunch menu") }
+      let!(:baking) { held!(2, note: "Baking sourdough") }
+      let!(:lunch) { held!(3, note: "Lunch salads, lunch service, lunch prep") }
+      let!(:silent) { held!(4, note: nil) }
+
+      {
+        "a word prefix" => ["sal", -> { [prep, lunch] }],
+        "an english stem" => ["bakes", -> { [baking] }],
+        "every word of the term" => ["lunch prep", -> { [lunch, prep] }],
+        "a term in any case" => ["SOURDOUGH", -> { [baking] }],
+        "a word nothing matches" => ["invoice", -> { [] }]
+      }.each do |name, (term, expected)|
+        it "matches #{name}" do
+          expect(candidate_ids(search_term: term)).to eq(instance_exec(&expected).map(&:id))
+        end
+      end
+
+      it "orders by rank first, then by id" do
+        expect(candidate_ids(search_term: "lunch")).to eq([lunch.id, prep.id])
+      end
+
+      it "treats quotes, colons and question marks as spaces instead of failing the query" do
+        expect(candidate_ids(search_term: "salad's: prep?")).to contain_exactly(prep.id, lunch.id)
+      end
+
+      it "is no search when blank" do
+        expect(candidate_ids(search_term: " ")).to eq([prep, baking, lunch, silent].map(&:id))
+      end
+    end
+
+    it "reads only the prepared application's table, never the projection" do
+      held!(1)
+      sql = []
+      record = ->(*, payload) { sql << payload[:sql] }
+      ActiveSupport::Notifications.subscribed(record, "sql.active_record") { candidate_ids(search_term: "x") }
+
+      expect(sql.grep(/timesheet_entries/)).to eq([])
     end
   end
 
