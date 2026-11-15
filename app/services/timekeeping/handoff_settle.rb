@@ -26,8 +26,8 @@
 # and settle runs again, or the handoff aborts. Running it again is safe:
 # recovery and delivery are idempotent by operation.
 #
-# Delivery to the `monolith` owner arrives with its entry store, so a settle
-# with anything to deliver under it is refused, as the worker refuses.
+# Delivery to the `monolith` owner is not wired yet, so a settle with
+# anything to deliver under it is refused, as the worker refuses.
 module Timekeeping::HandoffSettle
   STATES = %w[closed].freeze
 

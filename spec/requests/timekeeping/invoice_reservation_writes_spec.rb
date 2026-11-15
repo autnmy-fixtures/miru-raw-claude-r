@@ -304,6 +304,168 @@ RSpec.describe "Timekeeping invoice writes through the reservation boundary", ty
     end
   end
 
+  # Under `monolith`, the prepared application after a rollback (§10.5), the
+  # same endpoints prepare in-process against its own reservation table and
+  # entries (Timekeeping::LocalReservationClient): no call reaches
+  # Timekeeping, and no invoice write touches timesheet_entries. Commit and
+  # abort are not delivered to it by the worker yet, so these examples
+  # deliver them as the worker will.
+  describe "under the monolith owner" do
+    let(:first_id) { TimesheetEntry.maximum(:id).to_i + 1_000 }
+    let(:local) { Timekeeping::LocalReservations.new(entries: Timekeeping::LocalEntries.new) }
+    let(:held_x) { held_entry(tenant_a, offset: 0) }
+    let(:held_y) { held_entry(tenant_a, offset: 1) }
+
+    before do
+      held_x
+      held_y
+      set_timekeeping_ownership!(TimekeepingOwnershipStates::AFTER_HANDOFF_BEGUN.fetch("rolled back to the prepared application"))
+    end
+
+    after { expect(fake.calls).to be_empty }
+
+    # An entry the prepared application holds that the projection does not
+    # (§3.3 rule 1): its own table is authoritative under this owner.
+    def held_entry(tenant, offset:)
+      Timekeeping::Entry.create!(
+        id: first_id + offset, company_id: tenant.company.id, project_id: tenant.project.id, user_id: tenant.employee.id,
+        duration: 90.7, work_date: Date.current, bill_status: "unbilled"
+      )
+    end
+
+    def local_reservations
+      Timekeeping::Reservation.order(:entry_id).pluck(:entry_id, :invoice_id, :state, :disposition, :edit_lock)
+    end
+
+    # Commit or abort of every undelivered outcome, as the worker will
+    # deliver it under this owner.
+    def deliver_locally!
+      Timekeeping::InvoiceOperation.undelivered.order(:id).each do |intent|
+        local.public_send(intent.delivery, invoice_id: intent.invoice_id, operation_id: intent.operation_id)
+        intent.mark_delivered!
+      end
+    end
+
+    def local_invoice_with_lines
+      create_invoice(lines: [direct(held_x), grouped(held_x, held_y)])
+      expect(response).to have_http_status(:ok)
+      deliver_locally!
+      Invoice.find(json_response["id"])
+    end
+
+    it "creates a draft over the prepared application's entries, and writes no timesheet_entries row (§3.2, §12.2)" do
+      expect(TimesheetEntry.where(id: [held_x.id, held_y.id])).to be_empty
+
+      writes = timesheet_entry_writes { create_invoice(lines: [direct(held_x), grouped(held_x, held_y)]) }
+
+      expect(response).to have_http_status(:ok)
+      invoice = Invoice.find(json_response["id"])
+      aggregate_failures do
+        expect(writes).to eq([])
+        expect(intents.sole).to have_attributes(invoice_id: invoice.id, kind: "save", state: "succeeded", generation: 2)
+        expect(intents.sole.entry_ids).to eq([held_x.id, held_y.id])
+        expect(invoice.invoice_line_items.order(:id).map { |line| [line.timesheet_entry_id, line.linked_timesheet_entry_ids.sort] })
+          .to eq([[held_x.id, []], [nil, [held_x.id, held_y.id]]])
+        expect(local_reservations).to eq([
+          [held_x.id, invoice.id, "provisional", "active", true], [held_y.id, invoice.id, "provisional", "active", true]
+        ])
+        expect([held_x, held_y].map { |entry| entry.reload.outbox_snapshots.order(:version).last.snapshot.dig("data", "locked") }).to eq([true, true])
+      end
+
+      deliver_locally!
+      expect(local_reservations.pluck(2)).to eq(%w[committed committed])
+    end
+
+    it "prepares a save of a non-draft as non-draft, with no edit lock (L1)" do
+      create_invoice(status: "sent", lines: [direct(held_x)])
+
+      expect(response).to have_http_status(:ok)
+      expect(local_reservations).to eq([[held_x.id, json_response["id"], "provisional", "active", false]])
+    end
+
+    it "keeps an entry another line references when a grouped line is removed, and releases the rest (F3)" do
+      invoice = local_invoice_with_lines
+      grouped_line = invoice.invoice_line_items.find_by!(timesheet_entry_id: nil)
+
+      update_invoice(invoice, invoice_line_items_attributes: [{ id: grouped_line.id, _destroy: "1" }])
+
+      expect(response).to have_http_status(:ok)
+      expect(intents.last).to have_attributes(state: "succeeded", entry_ids: [held_x.id])
+
+      deliver_locally!
+      expect(local_reservations).to eq([[held_x.id, invoice.id, "committed", "active", true]])
+    end
+
+    it "carries an undelivered outcome to the next save of the invoice, which applies it first (§5.3)" do
+      create_invoice(lines: [direct(held_x)])
+      invoice = Invoice.find(json_response["id"])
+
+      update_invoice(invoice, invoice_line_items_attributes: [{ id: invoice.invoice_line_items.sole.id, _destroy: "1" }])
+
+      expect(response).to have_http_status(:ok)
+      expect(Timekeeping::ReservationOperation.order(:id).pluck(:operation_id, :state))
+        .to eq([[intents.first.operation_id, "committed"], [intents.last.operation_id, "prepared"]])
+      deliver_locally!
+      expect(local_reservations).to eq([])
+    end
+
+    it "refuses an entry already on another invoice before the invoice is written (F1)" do
+      local_invoice_with_lines
+
+      expect { create_invoice(lines: [direct(held_y)]) }.not_to change(Invoice, :count)
+
+      expect(response).to have_http_status(:unprocessable_entity)
+      expect(json_response["errors"]).to eq(I18n.t("invoices.reservation.refused.on_other_invoice", entry_id: held_y.id))
+      expect(intents.last.state).to eq("failed")
+    end
+
+    it "refuses another tenant's entry (L8, §6.3)" do
+      other = held_entry(tenant_b, offset: 2)
+
+      expect { create_invoice(lines: [direct(other)]) }.not_to change(Invoice, :count)
+
+      expect(response).to have_http_status(:unprocessable_entity)
+      expect(json_response["errors"]).to eq(I18n.t("invoices.reservation.refused.wrong_company", entry_id: other.id))
+      expect(local_reservations).to eq([])
+    end
+
+    it "refuses an entry only the projection holds: the prepared application is authoritative (§5.3)" do
+      projected = unbilled_entry(tenant_a)
+
+      expect { create_invoice(lines: [grouped(held_x, projected)]) }.not_to change { [Invoice.count, InvoiceLineItemTimeEntry.count] }
+
+      expect(response).to have_http_status(:unprocessable_entity)
+      expect(json_response["errors"]).to eq(I18n.t("invoices.reservation.refused.not_found", entry_id: projected.id))
+      expect(intents.sole.state).to eq("failed")
+    end
+
+    it "releases a discarded draft's entries (F2)" do
+      invoice = local_invoice_with_lines
+
+      send_request :delete, api_v1_invoice_path(invoice), headers: auth_headers(admin)
+
+      expect(response).to have_http_status(:no_content)
+      expect(invoice.reload).to be_discarded
+      expect(intents.last).to have_attributes(kind: "discard", state: "succeeded")
+      deliver_locally!
+      expect(local_reservations).to eq([])
+    end
+
+    it "keeps a destroyed non-draft's entries as retained (§7.3, K7)" do
+      create_invoice(status: "sent", lines: [direct(held_x)])
+      invoice = Invoice.find(json_response["id"])
+      deliver_locally!
+
+      send_request :post, api_v1_invoices_bulk_deletion_index_path, params: { invoices_ids: [invoice.id] }, headers: auth_headers(admin)
+
+      expect(response).to have_http_status(:no_content)
+      expect(Invoice.exists?(invoice.id)).to be(false)
+      expect(intents.last).to have_attributes(kind: "destroy", state: "succeeded")
+      deliver_locally!
+      expect(local_reservations).to eq([[held_x.id, invoice.id, "committed", "retained", false]])
+    end
+  end
+
   describe "under the legacy owner" do
     it "writes invoices as today, with no intent and no call" do
       create_invoice(lines: [direct(entry_x), grouped(entry_x, entry_y)])

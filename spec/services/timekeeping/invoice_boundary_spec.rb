@@ -312,18 +312,162 @@ RSpec.describe Timekeeping::InvoiceBoundary do
       expect([received, intents, fake.calls]).to eq([nil, [], []])
     end
 
-    it "refuses under the monolith owner until its provider exists, before any intent is written" do
-      set_timekeeping_ownership!(generation: 2, owner: "monolith", state: "open")
-
-      expect { boundary.run(change, &rename) }.to raise_error(described_class::OwnerUnavailable, /owner monolith/)
-      expect(intents).to be_empty
-    end
-
     it "refuses as moving while a handoff has admission closed, before any intent is written" do
       set_timekeeping_ownership!(generation: 2, owner: "timekeeping", state: "closed")
 
       expect { boundary.run(change, &rename) }.to raise_error(Timekeeping::Ownership::Moving)
       expect(intents).to be_empty
+    end
+  end
+
+  # Under `monolith`, the prepared application after a rollback (§10.5), the
+  # boundary prepares in-process against its own reservation table, through
+  # Timekeeping::LocalReservationClient, and runs the same save order: no
+  # call reaches Timekeeping.
+  describe "under the monolith owner" do
+    let(:held) { held_entry(company) }
+    let(:local) { Timekeeping::LocalReservations.new(entries: Timekeeping::LocalEntries.new) }
+
+    before do
+      set_timekeeping_ownership!(TimekeepingOwnershipStates::AFTER_HANDOFF_BEGUN.fetch("rolled back to the prepared application"))
+    end
+
+    after { expect(fake.calls).to be_empty }
+
+    # An entry the prepared application holds; the projection need not.
+    def held_entry(owner, offset: 0)
+      Timekeeping::Entry.create!(
+        id: TimesheetEntry.maximum(:id).to_i + 1_000 + offset, company_id: owner.id, project_id: 7, user_id: 3,
+        duration: 90.7, work_date: Date.new(2026, 11, 2), bill_status: "unbilled"
+      )
+    end
+
+    def local_reservations
+      Timekeeping::Reservation.order(:entry_id, :invoice_id).pluck(:entry_id, :invoice_id, :state)
+    end
+
+    # Commit or abort as the worker will deliver it under this owner.
+    def deliver_locally(intent)
+      local.public_send(intent.reload.delivery, invoice_id: intent.invoice_id, operation_id: intent.operation_id)
+    end
+
+    it "prepares the desired set locally, runs the change with the prepared entries and records success (§9.2 steps 1-3)" do
+      received = nil
+
+      result = boundary.run(change(entry_ids: [held.id], invoice_state: :draft)) do |entries|
+        received = entries
+        invoice.update!(reference: "after")
+      end
+
+      aggregate_failures do
+        expect(result).to have_attributes(intent: intents.sole, replayed: false, value: true)
+        expect(intents.sole).to have_attributes(state: "succeeded", generation: 2, entry_ids: [held.id], delivered_at: nil)
+        expect(invoice.reload.reference).to eq("after")
+        expect(received).to eq([Timekeeping::ReservationClient::PreparedEntry.new(
+          id: held.id, company_id: company.id, project_id: 7, user_id: 3, duration: 90.7, work_date: "2026-11-02", version: 2
+        )])
+        expect(local_reservations).to eq([[held.id, invoice.id, "provisional"]])
+      end
+    end
+
+    it "carries the earlier undelivered outcome in resolves, and the local provider applies it first (§5.3)" do
+      first = boundary.run(change(entry_ids: [held.id]), &rename).intent
+
+      boundary.run(change(entry_ids: [held.id]), &rename)
+
+      expect(Timekeeping::ReservationOperation.order(:id).pluck(:operation_id, :state))
+        .to eq([[first.operation_id, "committed"], [intents.last.operation_id, "prepared"]])
+      expect(local_reservations).to eq([[held.id, invoice.id, "committed"]])
+    end
+
+    it "fails an explicit double allocation with the refused entry, before the change runs (F1)" do
+      other = create(:invoice, company:, status: :sent)
+      boundary.run(change(entry_ids: [held.id], target: other)) { :reserved }
+
+      expect { boundary.run(change(entry_ids: [held.id]), &rename) }.to raise_error(failure(:reservation_refused, retryable: false)) { |error|
+        expect(error.refused).to eq([TimekeepingReservations::Refusal.new(entry_id: held.id, reason: :on_other_invoice)])
+      }
+      expect([intents.last.state, invoice.reload.reference]).to eq(["failed", "before"])
+    end
+
+    it "refuses the other tenant's entry and an entry the prepared application does not hold (L8, §6.3)" do
+      foreign = held_entry(other_company, offset: 1)
+      projected_only = create(:timesheet_entry)
+
+      expect { boundary.run(change(entry_ids: [foreign.id, projected_only.id]), &rename) }.to raise_error(described_class::Failed) { |error|
+        expect(error.refused).to eq([
+          TimekeepingReservations::Refusal.new(entry_id: foreign.id, reason: :wrong_company),
+          TimekeepingReservations::Refusal.new(entry_id: projected_only.id, reason: :not_found)
+        ])
+      }
+      expect(local_reservations).to eq([])
+    end
+
+    it "fails as retryable while the prepared application holds an earlier operation of the invoice unresolved" do
+      stray = TimekeepingReservations::Operation.new(
+        invoice_id: invoice.id, operation_id: SecureRandom.uuid, company_id: company.id, kind: :save, invoice_state: :non_draft, entry_ids: [held.id]
+      )
+      local.prepare(stray)
+
+      expect { boundary.run(change(entry_ids: [held.id]), &rename) }.to raise_error(failure(:operation_unresolved, retryable: true))
+      expect([intents.sole.state, pauses]).to eq(["failed", []])
+    end
+
+    it "fails on a stale generation, without retrying it, and reserves nothing" do
+      intent = Timekeeping::InvoiceOperation.open!(invoice_id: invoice.id, company_id: company.id, kind: :save, entry_ids: [held.id])
+      set_timekeeping_ownership!(generation: 3, owner: "monolith", state: "open")
+
+      expect { boundary.perform(intent, invoice_state: :non_draft, &rename) }.to raise_error(failure(:stale_generation, retryable: false))
+      expect([intent.reload.state, local_reservations, pauses]).to eq(["failed", [], []])
+    end
+
+    it "fails a change that rolled back, and the failed intent is the abort it queues (§9.2 step 4)" do
+      expect {
+        boundary.run(change(entry_ids: [held.id])) do
+          invoice.update!(reference: "after")
+          raise ActiveRecord::RecordInvalid
+        end
+      }.to raise_error(ActiveRecord::RecordInvalid)
+
+      intent = intents.sole
+      expect([intent.state, invoice.reload.reference, local_reservations]).to eq(["failed", "before", [[held.id, invoice.id, "provisional"]]])
+
+      deliver_locally(intent)
+      expect(local_reservations).to eq([])
+    end
+
+    describe "a prepare that answers a terminal receipt (§9.2 step 3, §12.4)" do
+      it "returns the existing outcome of a committed save, and runs nothing again" do
+        intent = boundary.run(change(entry_ids: [held.id]), &rename).intent
+        deliver_locally(intent)
+
+        result = boundary.perform(intent.reload, invoice_state: :non_draft) { raise "must not run" }
+
+        expect(result).to eq(described_class::Result.new(intent:, value: nil, replayed: true))
+        expect(intent.reload.state).to eq("succeeded")
+      end
+
+      it "fails the replay of an aborted save" do
+        expect { boundary.run(change(entry_ids: [held.id])) { raise ActiveRecord::RecordInvalid } }.to raise_error(ActiveRecord::RecordInvalid)
+        intent = intents.sole
+        deliver_locally(intent)
+
+        expect { boundary.perform(intent.reload, invoice_state: :non_draft) { raise "must not run" } }
+          .to raise_error(failure(:aborted, retryable: false))
+      end
+
+      it "fails as retryable, changing nothing, when the intent is still pending and its operation committed" do
+        intent = Timekeeping::InvoiceOperation.open!(invoice_id: invoice.id, company_id: company.id, kind: :save, entry_ids: [held.id])
+        operation = TimekeepingReservations::Operation.new(
+          invoice_id: invoice.id, operation_id: intent.operation_id, company_id: company.id, kind: :save, invoice_state: :non_draft, entry_ids: [held.id]
+        )
+        local.prepare(operation)
+        local.commit(invoice_id: invoice.id, operation_id: intent.operation_id)
+
+        expect { boundary.perform(intent, invoice_state: :non_draft) { raise "must not run" } }
+          .to raise_error(failure(:unreconciled, retryable: true))
+        expect([intent.reload.state, invoice.reload.reference]).to eq(["pending", "before"])
+      end
     end
   end
 
