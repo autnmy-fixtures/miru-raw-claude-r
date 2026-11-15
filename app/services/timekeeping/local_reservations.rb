@@ -20,6 +20,12 @@
 # answers { id => TimekeepingReservations::Entry } for the ids that exist.
 # The unique indexes of the table are the backstop, not the lock.
 #
+# Its `prepared(ids)` answers, in the order asked, the prepare facts of each
+# id that exists (reservation_api.json#/$defs/prepared_entry), as the entries
+# stand after the change: Timekeeping::ReservationClient::PreparedEntry, the
+# value the `timekeeping` owner's client answers, so line-item validation
+# reads either owner's prepare the same way (L8).
+#
 # Its `reservations_changed!(was_locked, operation:)` is told, in the same
 # transaction and after the rows are written, every locked entry whose
 # reservations changed, with whether the entry was locked before the change
@@ -32,7 +38,9 @@ class Timekeeping::LocalReservations
   Rule = TimekeepingReservations
 
   # 200 prepared: the entries of the desired set, authoritative for
-  # existence and company (L8).
+  # existence and company (L8), with the facts line-item validation needs,
+  # in the desired set's order and at the versions the prepare left them,
+  # as Timekeeping's ReservationProtocol answers them.
   Prepared = Data.define(:entries)
   # 200 with the stored terminal receipt: nothing changed.
   Receipt = Data.define(:status)
@@ -111,14 +119,17 @@ class Timekeeping::LocalReservations
       Receipt.new(status: record.state.to_sym)
     end
 
+    # The facts are read once the change is written, so each entry carries
+    # the version its reservation change gave it.
     def reserve(operation, record)
-      change_reservations(operation) do |entries, reservations|
-        result = Rule.prepare(operation, entries:, reservations:)
-        next [reservations, result] if result.is_a?(Rule::Refused)
-
-        record || Timekeeping::ReservationOperation.create!(**Timekeeping::ReservationOperation.row_for(operation), state: :prepared)
-        [result.reservations, Prepared.new(entries: entries.values_at(*operation.entry_ids).compact)]
+      result = change_reservations(operation) do |entries, reservations|
+        answer = Rule.prepare(operation, entries:, reservations:)
+        [answer.is_a?(Rule::Refused) ? reservations : answer.reservations, answer]
       end
+      return result if result.is_a?(Rule::Refused)
+
+      record || Timekeeping::ReservationOperation.create!(**Timekeeping::ReservationOperation.row_for(operation), state: :prepared)
+      Prepared.new(entries: @entries.prepared(operation.entry_ids))
     end
 
     def resolve(record, outcome)

@@ -46,6 +46,38 @@ RSpec.describe Timekeeping::LocalEntries do
     end
   end
 
+  describe "#prepared" do
+    def facts(id:, company_id:, version: 1)
+      Timekeeping::ReservationClient::PreparedEntry.new(
+        id:, company_id:, project_id: 7, user_id: 9, duration: 60.0, work_date: "2026-11-02", version:
+      )
+    end
+
+    it "answers each entry that exists with its prepare facts, in the order asked, discarded ones included" do
+      entry!(id: 3, company_id: 42)
+      entry!(id: 1, company_id: 43, discarded_at: Time.current).update!(version: 4)
+
+      expect(store.prepared([3, 2, 1])).to eq([facts(id: 3, company_id: 42), facts(id: 1, company_id: 43, version: 4)])
+    end
+
+    it "answers the contract's prepared entry, as the reservation client takes it" do
+      entry = entry!(id: 1, company_id: 42)
+      entry.update!(duration: 479.99999)
+
+      answered = store.prepared([1]).sole.to_h.stringify_keys
+
+      aggregate_failures do
+        expect(Timekeeping::Contracts.errors(:reservation_api, "#/$defs/prepared_entry", answered)).to eq([])
+        expect(Timekeeping::ReservationClient::PreparedEntry.members.map(&:to_s)).to eq(Timekeeping::Entry::PREPARED_FIELDS)
+        expect(answered).to include("duration" => 479.99999, "work_date" => "2026-11-02")
+      end
+    end
+
+    it "answers nothing for no ids" do
+      expect(store.prepared([])).to eq([])
+    end
+  end
+
   describe "#reservations_changed!" do
     let(:company) { create(:company) }
     let(:operation) do
@@ -145,13 +177,43 @@ RSpec.describe Timekeeping::LocalEntries do
       op = operation([1])
 
       aggregate_failures do
-        expect(provider.prepare(op)).to eq(
-          Timekeeping::LocalReservations::Prepared.new(entries: [TimekeepingReservations::Entry.new(id: 1, company_id: company.id)])
-        )
+        expect(provider.prepare(op).entries.map { |facts| facts.to_h.slice(:id, :company_id) }).to eq([{ id: 1, company_id: company.id }])
         expect(provider.commit(invoice_id: 10, operation_id: op.operation_id))
           .to eq(Timekeeping::LocalReservations::Receipt.new(status: :committed))
         expect(entry.reload.to_contract).to include("locked" => true)
       end
+    end
+
+    it "answers the desired set's facts at the versions the prepare left them, as Timekeeping's prepare does (L8)" do
+      kept = held_entry
+      committed!(operation([kept.id], invoice_state: :non_draft))
+      added = held_entry(id: kept.id + 1)
+      added.update!(duration: 479.99999)
+
+      result = provider.prepare(operation([added.id, kept.id], invoice_state: :non_draft))
+
+      aggregate_failures do
+        expect(result.entries).to eq([
+          Timekeeping::ReservationClient::PreparedEntry.new(
+            id: added.id, company_id: company.id, project_id: tenant_a.project.id, user_id: tenant_a.employee.id,
+            duration: 479.99999, work_date: Date.current.iso8601, version: 2
+          ),
+          Timekeeping::ReservationClient::PreparedEntry.new(
+            id: kept.id, company_id: company.id, project_id: tenant_a.project.id, user_id: tenant_a.employee.id,
+            duration: 60.0, work_date: Date.current.iso8601, version: 3
+          )
+        ])
+        expect([added.reload.version, kept.reload.version]).to eq([2, 3])
+      end
+    end
+
+    it "hands line-item validation the same references as Timekeeping's prepared answer" do
+      entry = held_entry
+      prepared = provider.prepare(operation([entry.id]))
+
+      references = Timekeeping::EntryReferences.within(prepared.entries) { Timekeeping::EntryReferences.current.find([entry.id]) }
+
+      expect(references).to eq(entry.id => Timekeeping::EntryReferences::Reference.new(id: entry.id, company_id: company.id))
     end
 
     it "refuses an entry it does not hold and another company's, with nothing reserved or written (L8)" do
