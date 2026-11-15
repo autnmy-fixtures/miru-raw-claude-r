@@ -14,10 +14,17 @@ RSpec.describe Timekeeping::LocalReservations do
   subject(:provider) { described_class.new(entries: entry_store) }
 
   # An entry store over today's timesheet_entries, standing in for the
-  # authoritative store of the owner the provider serves.
+  # authoritative store of the owner the provider serves. It records what
+  # it is told about changed reservations.
   let(:entry_store) do
     Class.new do
       def locked = (@locked ||= [])
+
+      def changed = (@changed ||= [])
+
+      def reservations_changed!(was_locked, operation:)
+        changed << [operation.operation_id, was_locked]
+      end
 
       def lock(ids)
         locked << ids
@@ -273,6 +280,82 @@ RSpec.describe Timekeeping::LocalReservations do
 
       expect(provider.abort(invoice_id: draft.id, operation_id: op.operation_id)).to eq(described_class::Receipt.new(status: :committed))
       expect(reservations).to eq([reservation(x, draft)])
+    end
+  end
+
+  describe "telling the entry store which entries' reservations changed (§5.4)" do
+    it "names each entry a prepare reserves, as not locked before" do
+      op = operation(draft, entry_ids: [y.id, x.id])
+
+      provider.prepare(op)
+
+      expect(entry_store.changed).to eq([[op.operation_id, { x.id => false, y.id => false }]])
+    end
+
+    it "names each entry a commit makes active, as locked before, when the draft's provisional lock held it" do
+      op = operation(draft, entry_ids: [x.id])
+      provider.prepare(op)
+      entry_store.changed.clear
+
+      provider.commit(invoice_id: draft.id, operation_id: op.operation_id)
+
+      expect(entry_store.changed).to eq([[op.operation_id, { x.id => true }]])
+    end
+
+    it "names a non-draft's entry as not locked before, since its reservation holds no edit lock" do
+      op = operation(sent, entry_ids: [x.id])
+      provider.prepare(op)
+      entry_store.changed.clear
+
+      provider.commit(invoice_id: sent.id, operation_id: op.operation_id)
+
+      expect(entry_store.changed).to eq([[op.operation_id, { x.id => false }]])
+    end
+
+    it "names only the entries whose reservations differ: a kept one is not, a released one is at commit (F3)" do
+      committed!(operation(draft, entry_ids: [x.id, y.id]))
+      entry_store.changed.clear
+      op = operation(draft, entry_ids: [x.id])
+
+      committed!(op)
+
+      expect(entry_store.changed).to eq([[op.operation_id, { y.id => true }]])
+    end
+
+    it "names each entry an abort drops, as locked before, and an earlier operation's entries when resolves settles it" do
+      earlier = operation(draft, entry_ids: [x.id])
+      provider.prepare(earlier)
+      entry_store.changed.clear
+      later = operation(draft, entry_ids: [y.id])
+
+      provider.prepare(later, resolves: { operation_id: earlier.operation_id, outcome: :aborted })
+      provider.abort(invoice_id: draft.id, operation_id: later.operation_id)
+
+      expect(entry_store.changed).to eq([
+        [earlier.operation_id, { x.id => true }],
+        [later.operation_id, { y.id => false }],
+        [later.operation_id, { y.id => true }]
+      ])
+    end
+
+    it "tells it nothing for a refusal, a replay, a receipt or an abort of an operation never prepared" do
+      committed!(operation(other_draft, entry_ids: [x.id]))
+      op = operation(draft, entry_ids: [y.id])
+      committed!(op)
+      entry_store.changed.clear
+
+      aggregate_failures do
+        expect(provider.prepare(operation(sent, entry_ids: [x.id]))).to be_a(TimekeepingReservations::Refused)
+        expect(provider.prepare(op)).to eq(described_class::Receipt.new(status: :committed))
+        expect(provider.commit(invoice_id: draft.id, operation_id: op.operation_id)).to eq(described_class::Receipt.new(status: :committed))
+        expect(provider.abort(invoice_id: sent.id, operation_id: SecureRandom.uuid)).to eq(described_class::Receipt.new(status: :aborted))
+      end
+      replayed = operation(other_draft, entry_ids: [x.id])
+      provider.prepare(replayed)
+      entry_store.changed.clear
+      provider.prepare(replayed)
+
+      expect(entry_store.changed).to eq([])
     end
   end
 

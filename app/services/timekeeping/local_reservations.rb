@@ -19,6 +19,15 @@
 # so reservation changes serialize with entry edits and with each other, and
 # answers { id => TimekeepingReservations::Entry } for the ids that exist.
 # The unique indexes of the table are the backstop, not the lock.
+#
+# Its `reservations_changed!(was_locked, operation:)` is told, in the same
+# transaction and after the rows are written, every locked entry whose
+# reservations changed, with whether the entry was locked before the change
+# ({ id => true | false }). Timekeeping's ReservationProtocol changes the same
+# set, so each owner gives the same entries their next version and outbox
+# snapshot, which carries the derived `locked` to the projection (§5.4). An
+# entry whose reservations are as they were is not named, and a call that
+# changes no reservation (a refusal, a receipt) does not call it.
 class Timekeeping::LocalReservations
   Rule = TimekeepingReservations
 
@@ -131,7 +140,16 @@ class Timekeeping::LocalReservations
       rows = Timekeeping::Reservation.where(entry_id: entry_ids).order(:id).lock.index_by(&:to_value)
       after, result = yield entries, rows.keys
       persist(rows, after)
+      changed = was_locked(rows.keys, after)
+      @entries.reservations_changed!(changed, operation:) if changed.any?
       result
+    end
+
+    # Each entry whose reservations differ after the change, with whether it
+    # was locked before it, as ReservationProtocol.record_changes! picks them.
+    def was_locked(before, after)
+      ((before - after) | (after - before)).map(&:entry_id).uniq.sort
+        .index_with { |entry_id| Rule.locked?(entry_id, before) }
     end
 
     # Deletes before inserting, so a reservation that replaces another never
