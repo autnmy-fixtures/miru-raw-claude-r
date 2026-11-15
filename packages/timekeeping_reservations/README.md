@@ -31,7 +31,12 @@ The prepared application's provider is `Timekeeping::LocalReservations`
 `timekeeping_reservations` and keeps the protocol in `timekeeping_reservation_operations`. Its entry
 store is `Timekeeping::LocalEntries` (`app/services/timekeeping/local_entries.rb`), over the prepared
 application's own `timekeeping_entries`, which have Timekeeping's `entries` shape; no owner routes to
-either yet. The existing application loads this file from `config/initializers/timekeeping.rb`.
+either yet. An entry change there records its audit row and its entry snapshot through
+`Timekeeping::LocalEntryChange`, into the prepared application's outbox (`timekeeping_outbox_snapshots`,
+Timekeeping's `outbox_snapshots` shape), and `Timekeeping::LocalRelay` drains that outbox into
+`timesheet_entries` through the projection consumer, on its own `timekeeping_relay` queue
+(`Timekeeping::LocalRelayJob`). The existing application loads this file from
+`config/initializers/timekeeping.rb`.
 
 Timekeeping's provider is `ReservationProtocol` (`services/timekeeping/app/services/reservation_protocol.rb`),
 behind the reservation API's three endpoints. It keeps the same protocol on tables with the same shape,

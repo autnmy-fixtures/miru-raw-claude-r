@@ -64,6 +64,16 @@ RSpec.describe "Solid Queue schedule" do
     expect(Timekeeping::InvoiceOperationsJob.new.queue_name).to eq("invoice_operations")
   end
 
+  it "runs the prepared application's Timekeeping relay on its own queue every second in the local runtime" do
+    task = config.dig("default", "dispatchers", 0, "recurring_tasks", "timekeeping_local_relay")
+    workers = config.dig("default", "workers")
+
+    expect(task).to include("class" => "Timekeeping::LocalRelayJob", "schedule" => "* * * * * *")
+    expect(Fugit.parse_cron(task.fetch("schedule")).rough_frequency).to eq(1)
+    expect(workers).to include(include("queues" => "timekeeping_relay", "threads" => 1, "processes" => 1))
+    expect(Timekeeping::LocalRelayJob.new.queue_name).to eq("timekeeping_relay")
+  end
+
   it "runs database backups every 30 minutes in production by default" do
     production_task = config.dig("production", "dispatchers", 0, "recurring_tasks", "database_backup")
 

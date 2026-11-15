@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_11_14_120000) do
+ActiveRecord::Schema[8.1].define(version: 2026_11_14_130000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
   enable_extension "pg_stat_statements"
@@ -1160,6 +1160,18 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_14_120000) do
     t.index ["company_id", "key"], name: "index_timekeeping_idempotency_receipts_on_company_id_and_key", unique: true
   end
 
+  create_table "timekeeping_outbox_snapshots", force: :cascade do |t|
+    t.bigint "company_id", null: false
+    t.datetime "created_at", null: false
+    t.datetime "delivered_at"
+    t.bigint "entry_id", null: false
+    t.string "request_id", null: false
+    t.jsonb "snapshot", null: false
+    t.bigint "version", null: false
+    t.index ["entry_id", "version"], name: "index_timekeeping_outbox_snapshots_on_entry_id_and_version", unique: true
+    t.index ["id"], name: "index_timekeeping_outbox_snapshots_undelivered", where: "(delivered_at IS NULL)"
+  end
+
   create_table "timekeeping_ownerships", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.bigint "generation", default: 0, null: false
@@ -1443,6 +1455,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_14_120000) do
   add_foreign_key "stripe_connected_accounts", "companies"
   add_foreign_key "tax_configurations", "companies"
   add_foreign_key "timekeeping_entry_audits", "timekeeping_entries", column: "entry_id"
+  add_foreign_key "timekeeping_outbox_snapshots", "timekeeping_entries", column: "entry_id"
   add_foreign_key "timeoff_entries", "custom_leaves", column: "custom_leave_id"
   add_foreign_key "timeoff_entries", "leave_types"
   add_foreign_key "timeoff_entries", "users"
