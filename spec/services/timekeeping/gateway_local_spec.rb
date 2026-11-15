@@ -81,9 +81,10 @@ RSpec.describe Timekeeping::Gateway::Local, type: :model do
     )
   end
 
-  it "runs only the single-entry and bulk commands so far" do
+  it "runs only the single-entry and bulk commands and agent detach so far" do
     expect(described_class::HANDLERS.keys).to contain_exactly(
-      gateway::CreateEntry, gateway::UpdateEntry, gateway::DiscardEntry, gateway::BulkMove, gateway::BulkDiscard
+      gateway::CreateEntry, gateway::UpdateEntry, gateway::DiscardEntry, gateway::BulkMove, gateway::BulkDiscard,
+      gateway::DetachAgent
     )
   end
 
@@ -549,13 +550,103 @@ RSpec.describe Timekeeping::Gateway::Local, type: :model do
     end
   end
 
-  it "refuses the commands it does not run yet, and writes nothing" do
-    entry = held_entry(tenant_a)
-    agent = create(:agent, company: tenant_a.company, user: tenant_a.employee)
-    entry.update!(agent_id: agent.id)
+  describe "W6 DetachAgent" do
+    let(:agent) { create(:agent, company: tenant_a.company, user: tenant_a.employee, default_project: tenant_a.project) }
+    let(:long_ago) { Time.zone.parse("2026-10-01 09:00:00") }
 
-    expect { gateway.call(gateway::DetachAgent.new(agent:)) }.to raise_error(gateway::OwnerUnavailable, /owner monolith .* DetachAgent refused/)
-    expect(entry.reload).to have_attributes(agent_id: agent.id, version: 1)
+    def detach = gateway::DetachAgent.new(agent:)
+
+    it "nulls agent_id on each entry of the agent's company that names it, discarded ones included, as its next version (K8)" do
+      Rails.event.set_context(request_id: "req-detach")
+      second = held_entry(tenant_a, offset: 1, agent_id: agent.id, updated_at: long_ago)
+      first = held_entry(tenant_a, offset: 0, agent_id: agent.id, updated_at: long_ago, discarded_at: long_ago)
+      unnamed = held_entry(tenant_a, offset: 2)
+
+      detached = written { detach }
+
+      aggregate_failures do
+        expect(detached).to eq([first.id, second.id])
+        [first, second].each do |entry|
+          entry.reload
+          expect(entry).to have_attributes(agent_id: nil, version: 2, updated_at: long_ago)
+          expect(entry.audits.sole).to have_attributes(
+            action: "update", version: 2, actor: "user:#{tenant_a.employee.id}", agent_id: nil,
+            writer: "agent_destroy", request_id: "req-detach", audited_changes: { "agent_id" => [agent.id, nil] }
+          )
+          expect_snapshot(entry)
+        end
+        expect(first.discarded_at).to eq(long_ago)
+        expect(unnamed.reload.version).to eq(1)
+        expect(unnamed.outbox_snapshots).to be_empty
+      end
+    end
+
+    it "runs no rule and reads no role, as update_all runs none: a billed, edit-locked entry outside the window is detached" do
+      entry = held_entry(
+        tenant_a, agent_id: agent.id, bill_status: "billed",
+        work_date: (tenant_a.company.timesheet_edit_days + 1).days.ago.to_date
+      )
+      reserve!(entry)
+
+      expect(written { detach }).to eq([entry.id])
+      expect(entry.reload).to have_attributes(agent_id: nil, bill_status: "billed", version: 2)
+      expect(entry.outbox_snapshots.sole.snapshot.dig("data", "locked")).to be(true)
+    end
+
+    it "never reaches another company's entry, even one that names the agent's id (§6.2, §6.3)" do
+      foreign = held_entry(tenant_b, user: tenant_b.employee, agent_id: agent.id)
+
+      expect(written { detach }).to eq([])
+      expect(foreign.reload).to have_attributes(agent_id: agent.id, version: 1)
+      expect(Timekeeping::OutboxSnapshot.count).to eq(0)
+    end
+
+    it "detaches nothing, and writes nothing, for an agent no entry names, so a repeat is harmless" do
+      held_entry(tenant_a, agent_id: agent.id)
+      written { detach }
+
+      expect { expect(written { detach }).to eq([]) }.not_to change { [Timekeeping::EntryAudit.count, Timekeeping::OutboxSnapshot.count] }
+    end
+
+    it "is the system actor when no user is signed in, as for a destroy from a job or the console" do
+      entry = held_entry(tenant_a, agent_id: agent.id)
+      Current.user = nil
+
+      written { detach }
+
+      expect(entry.audits.sole).to have_attributes(actor: "system", writer: "agent_destroy")
+    end
+
+    it "takes the named entries FOR UPDATE in id order, so it serializes with reservation changes and other writes (§9.4)" do
+      held_entry(tenant_a, agent_id: agent.id)
+      statements = []
+      collect = ->(*, payload) { statements << payload[:sql] if payload[:sql].include?('"timekeeping_entries"') }
+
+      ActiveSupport::Notifications.subscribed(collect, "sql.active_record") { gateway.call(detach) }
+
+      expect(statements.first).to match(/\ASELECT .* FROM "timekeeping_entries" WHERE .*ORDER BY "timekeeping_entries"."id" ASC FOR UPDATE\z/m)
+    end
+
+    it "reaches the projection through the local relay, which then names no agent (§3.3)" do
+      created = written { create_command(writer: "agent", source: "automation", agent:) }
+      Timekeeping::LocalRelay.new.run
+      expect(TimesheetEntry.find(created.id).agent_id).to eq(agent.id)
+
+      written { detach }
+      Timekeeping::LocalRelay.new.run
+
+      expect(TimesheetEntry.find(created.id)).to have_attributes(agent_id: nil, version: 2)
+    end
+  end
+
+  it "refuses the commands it does not run yet, and writes nothing" do
+    command = gateway::ImportBatch.new(
+      company: tenant_a.company, import_id: 41, batch_no: 1,
+      rows: [{ project: tenant_a.project, user: tenant_a.employee, duration: 30.0, work_date: Date.current, bill_status: "unbilled" }]
+    )
+
+    expect { gateway.call(command) }.to raise_error(gateway::OwnerUnavailable, /owner monolith .* ImportBatch refused/)
+    expect(Timekeeping::Entry.count).to eq(0)
   end
 
   it "refuses every command while a handoff away from it runs, with the retryable Moving (§10.1)" do

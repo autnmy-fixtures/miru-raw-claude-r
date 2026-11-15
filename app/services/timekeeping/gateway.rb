@@ -19,9 +19,9 @@
 # timekeeping owner (Remote) forwards the single-entry and bulk commands, the
 # import batches and agent detach to Timekeeping's entry API. The monolith
 # owner (Local), the prepared application after a rollback (§10.5), runs the
-# single-entry and bulk commands over its own entry table. The commands an
-# owner does not run yet are refused, never written to timesheet_entries,
-# because a write there would be a second writer.
+# single-entry and bulk commands and agent detach over its own entry table.
+# The commands an owner does not run yet are refused, never written to
+# timesheet_entries, because a write there would be a second writer.
 module Timekeeping::Gateway
   class OwnerUnavailable < StandardError; end
 

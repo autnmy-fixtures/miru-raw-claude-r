@@ -5,8 +5,8 @@
 # after a rollback. Entry writes go to local entry code, over its own
 # authoritative table, timekeeping_entries (Timekeeping::Entry). So far it
 # runs the single-entry commands of W1 web and mobile, W3 CLI (and so W3a
-# MCP) and W4 agent, and W2's bulk move and bulk discard; the gateway refuses
-# every other command under this owner.
+# MCP) and W4 agent, W2's bulk move and bulk discard, and W6's agent detach;
+# the gateway refuses every other command under this owner.
 #
 # The rules are today's, run by today's code: each command builds the
 # TimesheetEntry its legacy handler would save, in the same order, and asks
@@ -38,6 +38,16 @@
 # runs today's update rules on each entry's rules record; an entry they
 # reject is skipped and still answered, as it stands, never refused (A9's
 # silent skip, K12). A discard runs no rule, as today's discard runs none.
+#
+# W6's agent detach is what `dependent: :nullify` did (K8), as Timekeeping's
+# EntryDetach does it: every entry of the agent's company that names the
+# agent, discarded ones included, is held FOR UPDATE in id order and has its
+# agent_id nulled as its next version, with no rule run and no role read, as
+# update_all runs none, and updated_at kept, as update_all keeps it. Another
+# company's entry is never reached (§6.2, §6.3). It answers the ids it
+# detached. The agent row is deleted by the destroy that sent the command,
+# in the same transaction, so the destroy and the detach commit together or
+# not at all (§3.4).
 #
 # The whole command runs inside the gateway's fence transaction (§10.1), so
 # the entry, its audit row and its outbox row commit together, under the
@@ -112,6 +122,15 @@ module Timekeeping::Gateway::Local
         saved(entry, claims)
         entry.id
       end
+    },
+    gateway::DetachAgent => ->(command) {
+      agent = command.agent
+      claims = claims(writer: "agent_destroy", company: agent.company, project: nil)
+      Timekeeping::Entry.of_company(agent.company_id).where(agent_id: agent.id).order(:id).lock.includes(:reservations).map do |entry|
+        entry.agent_id = nil
+        changed!(entry, claims, touch: false)
+        entry.id
+      end
     }
   }.freeze
 
@@ -183,17 +202,25 @@ module Timekeeping::Gateway::Local
   private_class_method :rules_record
 
   # Saves the change made to the held `entry` as its next version, with its
-  # audit and outbox rows, and answers the entry. A change that changes
-  # nothing writes nothing, as an update with no changes saves nothing today.
+  # audit and outbox rows, and answers the entry.
   def self.saved(entry, claims)
-    if entry.changed?
-      entry.version += 1
-      entry.save!
-      Timekeeping::LocalEntryChange.record!(entry, action: "update", audited_changes: entry.audited_update_changes(AUDITED), claims:)
-    end
+    changed!(entry, claims)
     answer(entry)
   end
   private_class_method :saved
+
+  # Saves the change made to the held `entry` as its next version, with its
+  # audit and outbox rows. A change that changes nothing writes nothing, as
+  # an update with no changes saves nothing today. `touch: false` keeps
+  # updated_at, for a change that today's code makes with update_all.
+  def self.changed!(entry, claims, touch: true)
+    return unless entry.changed?
+
+    entry.version += 1
+    entry.save!(touch:)
+    Timekeeping::LocalEntryChange.record!(entry, action: "update", audited_changes: entry.audited_update_changes(AUDITED), claims:)
+  end
+  private_class_method :changed!
 
   # The entry as written, for rendering only, as the timekeeping owner
   # answers Timekeeping's entry: a read-only TimesheetEntry, never saved.
@@ -206,7 +233,7 @@ module Timekeeping::Gateway::Local
   # The caller of the command (§6.1), as the timekeeping owner signs it:
   # Current.user, or the system actor when there is none. The audit row
   # names who made the change, the acting agent and the writer from it; W2
-  # is always the bulk writer.
+  # is always the bulk writer, and W6 the agent_destroy writer.
   def self.claims(writer:, company:, project:, agent: nil)
     Timekeeping::UserToken.caller_claims(
       user: Current.user, company:, writer:, project:, agent:,
