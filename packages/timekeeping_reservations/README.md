@@ -39,8 +39,10 @@ version the prepare left it at), as `Timekeeping::ReservationClient::PreparedEnt
 `timekeeping` owner's client answers for the same entry. The gateway's
 `monolith` owner, `Timekeeping::Gateway::Local` (`app/services/timekeeping/gateway/local.rb`), writes
 those entries for the single-entry and bulk commands, the import batches and agent detach, under today's
-`TimesheetEntry` rules, and `Timekeeping::EntryReads` reads them back for the entry API's own reads; no
-owner routes reservations to the provider yet. An entry change there records its audit row and its
+`TimesheetEntry` rules, and `Timekeeping::EntryReads` reads them back for the entry API's own reads.
+Invoice candidate selection under that owner reads them too, through `Timekeeping::LocalEntries#candidates`:
+the same arguments and `Candidate` values as the entry client's `candidates`, selected with `selectable?`
+as Timekeeping's `CandidateList` selects them. No owner routes reservations to the provider yet. An entry change there records its audit row and its
 entry snapshot through `Timekeeping::LocalEntryChange`, into the prepared application's outbox
 (`timekeeping_outbox_snapshots`, Timekeeping's `outbox_snapshots` shape), and `Timekeeping::LocalRelay`
 drains that outbox into `timesheet_entries` through the projection consumer, on its own

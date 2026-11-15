@@ -17,8 +17,15 @@ class Timekeeping::Entry < ApplicationRecord
   has_many :audits, class_name: "Timekeeping::EntryAudit", inverse_of: :entry, dependent: :restrict_with_exception
   has_many :outbox_snapshots, class_name: "Timekeeping::OutboxSnapshot", inverse_of: :entry, dependent: :restrict_with_exception
 
+  include PgSearch::Model
+
   scope :of_company, ->(company_id) { where(company_id:) }
   scope :kept, -> { where(discarded_at: nil) }
+
+  # TimesheetEntry's note search, declared the same way, so candidate
+  # selection under the `monolith` owner selects and ranks by a search term
+  # as today's selection does (Timekeeping::LocalEntries#candidates).
+  pg_search_scope :pg_search, against: [:note], using: { tsearch: { prefix: true, dictionary: "english" } }
 
   # The fields a prepare answers for each entry of the desired set
   # (reservation_api.json#/$defs/prepared_entry), read from the contract

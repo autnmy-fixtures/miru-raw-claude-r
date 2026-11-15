@@ -8,8 +8,10 @@ require "rails_helper"
 # candidates, never the projection, which may lag: an entry the relay has not
 # projected yet is suggested and invoiced at once (§12.4 and §13 item 5,
 # "relay paused"), and an entry an invoice holds is not suggested, by the
-# owner's reservations. Under `legacy` nothing changes: no call, today's query
-# (pinned by spec/requests/api/v1/invoices/line_items/index_spec.rb).
+# owner's reservations. Under `monolith` they are the prepared application's
+# own candidates, selected the same way, with no call. Under `legacy` nothing
+# changes: no call, today's query (pinned by
+# spec/requests/api/v1/invoices/line_items/index_spec.rb).
 RSpec.describe "Timekeeping invoice candidate selection", type: :request do
   include_context "with two Timekeeping tenants"
   include TimekeepingContracts::ReservationDriver
@@ -183,11 +185,102 @@ RSpec.describe "Timekeeping invoice candidate selection", type: :request do
     expect(fake.calls).to be_empty
   end
 
-  it "refuses under the monolith owner, which has no entry store yet" do
-    set_timekeeping_ownership!(TimekeepingOwnershipStates::AFTER_HANDOFF_BEGUN.fetch("rolled back to the prepared application"))
+  # Under `monolith`, the prepared application after a rollback (§10.5), the
+  # suggestions are its own entry table's candidates, read the same way: no
+  # call to Timekeeping, and an entry the local relay has not projected yet
+  # is suggested at once.
+  describe "under the monolith owner" do
+    let(:first_id) { TimesheetEntry.maximum(:id).to_i + 1_000 }
 
-    expect {
-      send_request :get, api_v1_line_items_invoices_path(client_id: tenant_a.client.id), headers: auth_headers(admin)
-    }.to raise_error(Timekeeping::Gateway::OwnerUnavailable, /candidate selection: owner monolith/)
+    before do
+      set_timekeeping_ownership!(TimekeepingOwnershipStates::AFTER_HANDOFF_BEGUN.fetch("rolled back to the prepared application"))
+    end
+
+    after { expect(fake.calls).to be_empty }
+
+    # An entry the prepared application holds that the projection does not.
+    def held_entry(tenant, offset:, user: tenant.employee, **attributes)
+      Timekeeping::Entry.create!(
+        id: first_id + offset, company_id: tenant.company.id, project_id: tenant.project.id, user_id: user.id,
+        duration: 90.7, work_date: Date.current, note: "Fresh work", bill_status: "unbilled", **attributes
+      )
+    end
+
+    it "suggests an entry the projection does not hold yet, as the timekeeping owner suggests one" do
+      fresh = held_entry(tenant_a, offset: 0)
+      expect(TimesheetEntry.where(id: fresh.id)).to be_empty
+
+      body = suggestions
+
+      expect(body["new_line_item_entries"]).to eq([{
+        "selection_id" => "timesheet-entry-#{fresh.id}", "timesheet_entry_id" => fresh.id,
+        "linked_timesheet_entry_ids" => [], "user_id" => member.id, "project_id" => tenant_a.project.id,
+        "project_name" => tenant_a.project.name, "first_name" => member.first_name, "last_name" => member.last_name,
+        "name" => nil, "description" => "Fresh work", "date" => Date.current.iso8601, "date_range" => nil,
+        "quantity" => 90.7, "rate" => JSON.parse(rate.to_json), "entry_count" => nil
+      }])
+      expect(body["total_new_line_items"]).to eq(1)
+      expect(body["filter_options"]["team_members"]).to eq([{ "label" => member.full_name, "value" => member.id }])
+    end
+
+    it "never suggests a projection row the prepared application does not hold" do
+      unbilled_entry(tenant_a)
+
+      expect(suggested_ids).to eq([])
+    end
+
+    it "groups the held candidates by project, member and rate" do
+      first = held_entry(tenant_a, offset: 0, duration: 60.0)
+      second = held_entry(tenant_a, offset: 1)
+
+      group = suggestions(group_by_project: true)["new_line_item_entries"].sole
+
+      expect(group).to include(
+        "timesheet_entry_id" => nil, "project_id" => tenant_a.project.id, "entry_count" => 2,
+        "description" => "#{member.full_name} - 2 entries", "quantity" => 150.7
+      )
+      expect(group["linked_timesheet_entry_ids"]).to eq([first.id, second.id])
+    end
+
+    it "does not suggest an entry an invoice holds by its local reservation, and suggests a retained one (L3)" do
+      held = held_entry(tenant_a, offset: 0)
+      retained = held_entry(tenant_a, offset: 1)
+      free = held_entry(tenant_a, offset: 2)
+      Timekeeping::Reservation.create!(
+        entry_id: held.id, invoice_id: 9_001, company_id: tenant_a.company.id, state: "committed", disposition: "active", edit_lock: true
+      )
+      Timekeeping::Reservation.create!(
+        entry_id: retained.id, invoice_id: 9_002, company_id: tenant_a.company.id, state: "committed", disposition: "retained", edit_lock: true
+      )
+
+      expect(suggested_ids).to eq([retained.id, free.id])
+    end
+
+    it "applies the selected entries and today's filters" do
+      selected = held_entry(tenant_a, offset: 0, work_date: 1.week.ago.to_date)
+      match = held_entry(tenant_a, offset: 1, work_date: 1.week.ago.to_date, note: "Sprint review")
+      held_entry(tenant_a, offset: 2, work_date: 3.weeks.ago.to_date, note: "Sprint review")
+      held_entry(tenant_a, offset: 3, user: admin, work_date: 1.week.ago.to_date, note: "Sprint review")
+      from, to = 1.week.ago.beginning_of_week.to_date, 1.week.ago.end_of_week.to_date
+
+      ids = suggested_ids(
+        selected_entries: [selected.id], team_member: [member.id], search_term: "Sprint",
+        date_range: "custom", from: from.iso8601, to: to.iso8601
+      )
+
+      expect(ids).to eq([match.id])
+    end
+
+    it "suggests only the caller's tenant's entries (§6.3)" do
+      own = held_entry(tenant_a, offset: 0)
+      held_entry(tenant_b, offset: 1)
+      foreign = Timekeeping::Entry.create!(
+        id: first_id + 2, company_id: tenant_b.company.id, project_id: tenant_a.project.id, user_id: member.id,
+        duration: 30.0, work_date: Date.current, bill_status: "unbilled"
+      )
+
+      expect(suggested_ids).to eq([own.id])
+      expect(suggested_ids).not_to include(foreign.id)
+    end
   end
 end
