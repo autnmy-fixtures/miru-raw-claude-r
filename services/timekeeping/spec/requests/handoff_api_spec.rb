@@ -100,7 +100,7 @@ RSpec.describe "Handoff API" do
     Ownership.current.update!(generation: 1, owner: "legacy", state: "frozen")
   end
 
-  it "is a valid schema listing the five operations the handoff tool calls, and every step of the state machine" do
+  it "is a valid schema listing the six operations the handoff tool calls, and every step of the state machine" do
     expect(JSONSchemer.valid_schema?(contract_document(:handoff_api))).to be(true)
     expect(contract_document(:handoff_api).dig("$defs", "step", "enum")).to eq(TimekeepingReservations::Handoff::STEPS.keys.map(&:to_s))
 
@@ -111,7 +111,8 @@ RSpec.describe "Handoff API" do
       "POST /internal/v1/handoff/steps/{step}",
       "GET /internal/v1/handoff/checkpoint",
       "POST /internal/v1/handoff/checkpoint",
-      "POST /internal/v1/handoff/checkpoint/reconcile"
+      "POST /internal/v1/handoff/checkpoint/reconcile",
+      "POST /internal/v1/handoff/recutover/checkpoint"
     )
   end
 

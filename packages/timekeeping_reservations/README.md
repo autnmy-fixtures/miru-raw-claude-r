@@ -108,7 +108,8 @@ written over by id. Reservations, audit rows, terminal receipts and idempotency 
 Both sequences are set above the highest carried ids. It refuses, writing nothing, a checkpoint that
 does not hold together or that would drop what Timekeeping holds: an entry missing or behind the
 version held, or an audit row or receipt not carried exactly as held. Loading it again leaves the same
-tables.
+tables. The handoff tool carries it there over the handoff API (`load_recutover_checkpoint`,
+`POST /internal/v1/handoff/recutover/checkpoint`), which answers how many rows of each part it loaded.
 
 Timekeeping's provider is `ReservationProtocol` (`services/timekeeping/app/services/reservation_protocol.rb`),
 behind the reservation API's three endpoints. It keeps the same protocol on tables with the same shape,
@@ -166,7 +167,7 @@ The existing application reads them at run time through `Timekeeping::Contracts`
 | `contracts/v1/entry_api.json` | Entry API (§5.2) and the user token (§6.1) | Timekeeping | Write gateway | `TimekeepingContracts::FakeTimekeeping` |
 | `contracts/v1/reservation_api.json` | Prepare, commit, abort (§5.3) | Timekeeping | Invoice reservation boundary, invoice operation worker | `TimekeepingContracts::FakeTimekeeping` |
 | `contracts/v1/entry_snapshot.json` | Entry snapshot event and its delivery (§5.4) | Timekeeping relay | Projection consumer | `TimekeepingContracts::FakeRelay` |
-| `contracts/v1/handoff_api.json` | Timekeeping's side of the handoff procedure (§10.1, §10.5): its copy of the ownership record, the relay's progress, the fence steps, the first cutover's checkpoint load and reconcile, and the rollback's checkpoint taken out of Timekeeping | Timekeeping | The handoff tools, `Timekeeping::FirstCutover` and `Timekeeping::Rollback`, through `Timekeeping::HandoffClient` | `TimekeepingContracts::FakeHandoff` |
+| `contracts/v1/handoff_api.json` | Timekeeping's side of the handoff procedure (§10.1, §10.5): its copy of the ownership record, the relay's progress, the fence steps, the first cutover's checkpoint load and reconcile, the rollback's checkpoint taken out of Timekeeping, and the re-cutover's checkpoint loaded into it | Timekeeping | The handoff tools, `Timekeeping::FirstCutover` and `Timekeeping::Rollback`, through `Timekeeping::HandoffClient` | `TimekeepingContracts::FakeHandoff` |
 | `contracts/v1/common.json` | Entry, problem types, ids, generation, duration | — | — | — |
 
 Each contract file carries two extensions that JSON Schema ignores:
@@ -196,7 +197,8 @@ Each contract file carries two extensions that JSON Schema ignores:
   `service:timekeeping-handoff`; a user token or the relay's is refused. Its calls carry
   `X-Ownership-Generation`, which must equal the body's `generation`, and no `Idempotency-Key`: every
   step names the generation and state it expects, so a replay is `409 out-of-step` and changes
-  nothing; a second load is `409 already-loaded`; reconcile writes nothing. A step whose lock waits
+  nothing; a second first-cutover load is `409 already-loaded`, while the re-cutover's load, run
+  again, leaves the same tables and answers the same; reconcile writes nothing. A step whose lock waits
   out the admitted calls is a retryable `503 drain-timeout`. A load that does not hold together is
   `422 checkpoint-refused`, and a reconcile that finds a difference `409 checkpoint-differs`, each
   listing what every failed check found in the problem's `lists` extension.

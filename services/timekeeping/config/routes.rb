@@ -34,6 +34,7 @@ Rails.application.routes.draw do
       get "handoff/checkpoint", to: "handoffs#take_checkpoint"
       post "handoff/checkpoint", to: "handoffs#load_checkpoint"
       post "handoff/checkpoint/reconcile", to: "handoffs#reconcile_checkpoint"
+      post "handoff/recutover/checkpoint", to: "handoffs#load_recutover_checkpoint"
     end
   end
 end
