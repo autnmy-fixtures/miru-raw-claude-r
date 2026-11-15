@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_11_11_150000) do
+ActiveRecord::Schema[8.1].define(version: 2026_11_14_120000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
   enable_extension "pg_stat_statements"
@@ -1105,6 +1105,61 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_11_150000) do
     t.index ["discarded_at"], name: "index_tax_configurations_on_discarded_at"
   end
 
+  create_table "timekeeping_entries", force: :cascade do |t|
+    t.bigint "agent_id"
+    t.string "bill_status", null: false
+    t.bigint "company_id", null: false
+    t.datetime "created_at", null: false
+    t.datetime "discarded_at"
+    t.float "duration", null: false
+    t.string "external_run_id"
+    t.string "external_session_id"
+    t.text "note", default: ""
+    t.bigint "project_id", null: false
+    t.jsonb "proof_metadata", default: {}, null: false
+    t.text "proof_url"
+    t.string "review_status", default: "not_required", null: false
+    t.string "source", default: "manual", null: false
+    t.jsonb "source_metadata", default: {}, null: false
+    t.datetime "updated_at", null: false
+    t.bigint "user_id", null: false
+    t.bigint "version", default: 1, null: false
+    t.date "work_date", null: false
+    t.index ["agent_id"], name: "index_timekeeping_entries_on_agent_id"
+    t.index ["company_id", "project_id", "work_date"], name: "index_timekeeping_entries_on_company_project_work_date"
+    t.index ["company_id", "user_id", "work_date"], name: "index_timekeeping_entries_on_company_user_work_date"
+    t.check_constraint "bill_status::text = ANY (ARRAY['non_billable'::character varying, 'unbilled'::character varying, 'billed'::character varying]::text[])", name: "timekeeping_entries_bill_status"
+    t.check_constraint "review_status::text = ANY (ARRAY['not_required'::character varying, 'pending_review'::character varying, 'approved'::character varying, 'rejected'::character varying]::text[])", name: "timekeeping_entries_review_status"
+    t.check_constraint "source::text = ANY (ARRAY['manual'::character varying, 'cli'::character varying, 'mcp'::character varying, 'automation'::character varying, 'import'::character varying]::text[])", name: "timekeeping_entries_source"
+    t.check_constraint "version >= 1", name: "timekeeping_entries_version_positive"
+  end
+
+  create_table "timekeeping_entry_audits", force: :cascade do |t|
+    t.string "action", null: false
+    t.string "actor", null: false
+    t.bigint "agent_id"
+    t.jsonb "audited_changes", null: false
+    t.bigint "company_id", null: false
+    t.datetime "created_at", null: false
+    t.bigint "entry_id", null: false
+    t.string "request_id", null: false
+    t.bigint "version", null: false
+    t.string "writer", null: false
+    t.index ["company_id"], name: "index_timekeeping_entry_audits_on_company_id"
+    t.index ["entry_id"], name: "index_timekeeping_entry_audits_on_entry_id"
+    t.check_constraint "action::text = ANY (ARRAY['create'::character varying, 'update'::character varying]::text[])", name: "timekeeping_entry_audits_action"
+  end
+
+  create_table "timekeeping_idempotency_receipts", force: :cascade do |t|
+    t.bigint "company_id", null: false
+    t.datetime "created_at", null: false
+    t.string "key", null: false
+    t.string "request_digest", null: false
+    t.jsonb "response", null: false
+    t.integer "status", null: false
+    t.index ["company_id", "key"], name: "index_timekeeping_idempotency_receipts_on_company_id_and_key", unique: true
+  end
+
   create_table "timekeeping_ownerships", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.bigint "generation", default: 0, null: false
@@ -1387,6 +1442,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_11_150000) do
   add_foreign_key "solid_queue_scheduled_executions", "solid_queue_jobs", column: "job_id", on_delete: :cascade
   add_foreign_key "stripe_connected_accounts", "companies"
   add_foreign_key "tax_configurations", "companies"
+  add_foreign_key "timekeeping_entry_audits", "timekeeping_entries", column: "entry_id"
   add_foreign_key "timeoff_entries", "custom_leaves", column: "custom_leave_id"
   add_foreign_key "timeoff_entries", "leave_types"
   add_foreign_key "timeoff_entries", "users"
