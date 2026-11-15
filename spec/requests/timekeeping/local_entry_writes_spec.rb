@@ -2,13 +2,15 @@
 
 require "rails_helper"
 
-# Entry creates under the `monolith` owner (docs/architecture/timekeeping-soa.md
-# §3.1, §10.5), through the real entry points of W1 web, W3 CLI, W3a MCP and
-# W4 agent: each lands in the prepared application's own entry table with its
+# Entry writes and reads under the `monolith` owner
+# (docs/architecture/timekeeping-soa.md §3.1, §3.3 rule 1, §10.5), through
+# the real entry points of W1 web and mobile, W3 CLI, W3a MCP and W4 agent:
+# each write lands in the prepared application's own entry table with its
 # audit and outbox rows, answers today's public JSON, and writes nothing to
-# timesheet_entries, which the local relay then projects (§3.2, §12.2).
-# Update and discard go through the same owner once the entry reads under
-# `monolith` exist; gateway_local_spec.rb covers them at the gateway.
+# timesheet_entries, which the local relay then projects (§3.2, §12.2). The
+# time-tracking list and the lookup before an update or discard read that
+# same table, so an entry the relay has not projected yet is listed and
+# edited at once (§12.4 "relay paused"), authorized on the owner's state.
 RSpec.describe "Timekeeping entry writes under the monolith owner", type: :request do
   include_context "with two Timekeeping tenants"
   include TimekeepingSingleWriterGuard
@@ -105,5 +107,136 @@ RSpec.describe "Timekeeping entry writes under the monolith owner", type: :reque
     Timekeeping::LocalRelay.new.run
 
     expect(Timekeeping::StoredEntries.all.find { |row| row.fetch("id") == entry.id }).to eq(entry.to_contract)
+  end
+
+  describe "reads and edits from the prepared application's table" do
+    let(:first_id) { TimesheetEntry.maximum(:id).to_i + 1_000 }
+    let(:november) { { from: "2026-11-01", to: "2026-11-30" } }
+
+    # An entry the prepared application holds that the relay has not
+    # projected: no timesheet_entries row holds it (§12.4 "relay paused").
+    def held_entry(tenant, offset: 0, user: tenant.employee, **attributes)
+      Timekeeping::Entry.create!(
+        id: first_id + offset, company_id: tenant.company.id, project_id: tenant.project.id, user_id: user.id,
+        duration: 60.0, work_date: Date.current, note: "Before", bill_status: "unbilled", **attributes
+      )
+    end
+
+    def list(path: api_v1_timesheet_entry_index_path, user: employee)
+      send_request :get, path, params: november, headers: auth_headers(user)
+      expect(response).to have_http_status(:ok)
+      json_response.fetch("entries")
+    end
+
+    def listed_ids(entries) = entries.values.flatten.pluck("id")
+
+    # Runs the block and fails if anything read timesheet_entries.
+    def without_projection_reads(&reader)
+      queries = []
+      callback = ->(*, payload) { queries << payload[:sql] if payload[:sql].include?(%("timesheet_entries")) }
+      ActiveSupport::Notifications.subscribed(callback, "sql.active_record", &reader)
+      expect(queries).to eq([]), "the request read the projection"
+    end
+
+    it "W1 lists the owner's entries with today's JSON, on the web and mobile routes and for MCP's miru.time.list" do
+      sign_in employee
+      older = held_entry(tenant_a, offset: 0, work_date: Date.new(2026, 11, 2), duration: 90.7, note: "Older")
+      newer = held_entry(tenant_a, offset: 1, work_date: Date.new(2026, 11, 4), note: "Newer", source: "cli")
+      held_entry(tenant_a, offset: 2, work_date: Date.new(2026, 11, 3), discarded_at: Time.current)
+      held_entry(tenant_b, offset: 3, user: tenant_b.employee, work_date: Date.new(2026, 11, 3))
+
+      entries = nil
+      without_projection_reads { entries = list }
+
+      expect(entries.keys).to eq(%w[2026-11-04 2026-11-02])
+      expect(entries.fetch("2026-11-02").sole).to include(
+        "id" => older.id, "duration" => 90.7, "note" => "Older", "type" => "timesheet", "bill_status" => "unbilled",
+        "project" => tenant_a.project.name, "project_id" => tenant_a.project.id, "client" => tenant_a.client.name,
+        "team_member" => employee.full_name
+      )
+      expect(listed_ids(list(path: "/api/v1/mobile/timesheet_entries"))).to eq([newer.id, older.id])
+      result = MCP::Miru::Tools::TimeListTool.call(**november, server_context: { authorization: cli_token })
+      expect(result.error?).to be(false)
+      expect(listed_ids(JSON.parse(result.content.sole[:text]).dig("data", "entries"))).to eq([newer.id, older.id])
+    end
+
+    it "W1 edits and discards an entry the projection does not hold, in the owner's table" do
+      sign_in employee
+      entry = held_entry(tenant_a)
+
+      without_projection_writes do
+        send_request :patch, api_v1_timesheet_entry_path(entry.id), params: {
+          project_id: tenant_a.project.id, timesheet_entry: { duration: 45, work_date: Date.current.iso8601, note: "Edited" }
+        }, headers: auth_headers(employee)
+        expect(response).to have_http_status(:ok)
+        expect(json_response["entry"]).to include("id" => entry.id, "note" => "Edited", "duration" => 45.0)
+
+        send_request :delete, api_v1_timesheet_entry_path(entry.id), headers: auth_headers(employee)
+        expect(response).to have_http_status(:ok)
+        expect(json_response["notice"]).to eq(I18n.t("timesheet_entry.destroy.message"))
+      end
+
+      expect(entry.reload).to have_attributes(version: 3, note: "Edited", duration: 45.0, discarded_at: be_present)
+      expect(entry.audits.order(:id).pluck(:action, :writer)).to eq([%w[update web], %w[update web]])
+      expect(TimesheetEntry.where(id: entry.id)).to be_empty
+    end
+
+    it "W1 judges the edit lock on the owner's state: an entry its reservations lock is refused to an employee (L1, §7.1)" do
+      sign_in employee
+      entry = held_entry(tenant_a)
+      Timekeeping::Reservation.create!(
+        entry_id: entry.id, invoice_id: 10, company_id: tenant_a.company.id, state: "committed", disposition: "active", edit_lock: true
+      )
+
+      send_request :patch, api_v1_timesheet_entry_path(entry.id), params: {
+        project_id: tenant_a.project.id, timesheet_entry: { duration: 45, work_date: Date.current.iso8601, note: "Edited" }
+      }, headers: auth_headers(employee)
+
+      expect(response).to have_http_status(:unprocessable_content)
+      expect(json_response["errors"]).to eq("Cannot edit a locked timesheet entry. Please contact admin.")
+      expect(entry.reload).to have_attributes(version: 1, note: "Before")
+    end
+
+    it "W1 authorizes on the owner's state: an entry the owner holds billed is refused (A3)" do
+      sign_in employee
+      entry = held_entry(tenant_a, bill_status: "billed")
+
+      send_request :delete, api_v1_timesheet_entry_path(entry.id), headers: auth_headers(employee)
+
+      expect(response).to have_http_status(:forbidden)
+      expect(entry.reload).to have_attributes(version: 1, discarded_at: nil)
+    end
+
+    it "W1 answers today's not-found for an entry the owner does not hold kept in the company (§6.3)" do
+      sign_in employee
+      foreign = held_entry(tenant_b, offset: 0, user: tenant_b.employee)
+      discarded = held_entry(tenant_a, offset: 1, discarded_at: Time.current)
+
+      [foreign.id, discarded.id, "not-an-id"].each do |id|
+        send_request :delete, api_v1_timesheet_entry_path(id), headers: auth_headers(employee)
+        expect(response).to have_http_status(:not_found)
+      end
+      expect(foreign.reload).to have_attributes(version: 1, discarded_at: nil)
+    end
+
+    it "W3 CLI edits and W3a MCP discards the caller's own entry, and another member's is not-found (A7)" do
+      entry = held_entry(tenant_a)
+      theirs = held_entry(tenant_a, offset: 1, user: tenant_a.admin)
+
+      without_projection_writes do
+        send_request :patch, api_v1_cli_timesheet_entry_path(entry.id), params: { timesheet_entry: {
+          project_id: tenant_a.project.id, duration_minutes: 45, work_date: Date.current.iso8601, note: "edited"
+        } }, headers: cli_auth_headers(cli_token)
+        expect(response).to have_http_status(:ok)
+        result = MCP::Miru::Tools::TimeDeleteTool.call(id: entry.id, server_context: { authorization: cli_token })
+        expect(result.error?).to be(false)
+      end
+      send_request :delete, api_v1_cli_timesheet_entry_path(theirs.id), headers: cli_auth_headers(cli_token)
+
+      expect(response).to have_http_status(:not_found)
+      expect(entry.reload).to have_attributes(note: "edited", discarded_at: be_present)
+      expect(entry.audits.order(:id).pluck(:writer)).to eq(%w[cli mcp])
+      expect(theirs.reload.discarded_at).to be_nil
+    end
   end
 end
