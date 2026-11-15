@@ -30,7 +30,10 @@ The prepared application's provider is `Timekeeping::LocalReservations`
 (`app/services/timekeeping/local_reservations.rb`, §10.2 step 4). It persists what the table decides in
 `timekeeping_reservations` and keeps the protocol in `timekeeping_reservation_operations`. Its entry
 store is `Timekeeping::LocalEntries` (`app/services/timekeeping/local_entries.rb`), over the prepared
-application's own `timekeeping_entries`, which have Timekeeping's `entries` shape. The gateway's
+application's own `timekeeping_entries`, which have Timekeeping's `entries` shape. Every entry whose
+reservations a prepare, commit or abort changes is saved there as its next version, with an entry
+snapshot that carries its derived `locked` and no audit row, as `ReservationProtocol` records
+Timekeeping's. The gateway's
 `monolith` owner, `Timekeeping::Gateway::Local` (`app/services/timekeeping/gateway/local.rb`), writes
 those entries for the single-entry and bulk commands, the import batches and agent detach, under today's
 `TimesheetEntry` rules, and `Timekeeping::EntryReads` reads them back for the entry API's own reads; no
