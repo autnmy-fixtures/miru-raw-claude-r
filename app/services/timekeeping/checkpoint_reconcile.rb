@@ -35,6 +35,10 @@
 #
 # It writes nothing and explains nothing away: any difference raises Differs,
 # and the handoff tool aborts the handoff (§10.5 step 6).
+#
+# The rollback's reconcile (Timekeeping::RollbackReconcile) runs the same
+# checks through .differences, against the checkpoint taken from Timekeeping,
+# under its own guard.
 module Timekeeping::CheckpointReconcile
   OutOfStep = TimekeepingReservations::Handoff::OutOfStep
 
@@ -83,9 +87,23 @@ module Timekeeping::CheckpointReconcile
     Timekeeping::Ownership.transaction do
       Timekeeping::Ownership.lock_frozen_legacy!(:reconcile, generation)
 
-      ensure_agrees!(carried(entries, reservations, financial_snapshot), held)
+      lists = differences(entries:, reservations:, financial_snapshot:)
+      raise Differs, lists if lists.any?
+
       Reconciled.new(entries: entries.size, reservations: reservations.size)
     end
+  end
+
+  # What each check finds between the checkpoint and this application's
+  # tables, by check, leaving out the checks that agree; empty when every
+  # check agrees. The caller holds the ownership record. The rollback's
+  # reconcile (Timekeeping::RollbackReconcile) runs the same checks, as these
+  # tables play the same part under either outgoing owner.
+  def self.differences(entries:, reservations:, financial_snapshot:)
+    carried_state = carried(entries, reservations, financial_snapshot)
+    held_state = held
+
+    CHECKS.transform_values { |check| check.call(carried_state, held_state).uniq.sort }.reject { |_, found| found.empty? }
   end
 
   def self.carried(entries, reservations, financial_snapshot)
@@ -117,10 +135,4 @@ module Timekeeping::CheckpointReconcile
     (direct + linked).to_set
   end
   private_class_method :kept_invoice_references
-
-  def self.ensure_agrees!(carried, held)
-    lists = CHECKS.transform_values { |check| check.call(carried, held).uniq.sort }.reject { |_, found| found.empty? }
-    raise Differs, lists if lists.any?
-  end
-  private_class_method :ensure_agrees!
 end
