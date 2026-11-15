@@ -28,8 +28,10 @@ of §7.2 that refuse, in order: `not_found`, `wrong_company` (L8), `on_other_inv
 
 The prepared application's provider is `Timekeeping::LocalReservations`
 (`app/services/timekeeping/local_reservations.rb`, §10.2 step 4). It persists what the table decides in
-`timekeeping_reservations` and keeps the protocol in `timekeeping_reservation_operations`. The existing
-application loads this file from `config/initializers/timekeeping.rb`.
+`timekeeping_reservations` and keeps the protocol in `timekeeping_reservation_operations`. Its entry
+store is `Timekeeping::LocalEntries` (`app/services/timekeeping/local_entries.rb`), over the prepared
+application's own `timekeeping_entries`, which have Timekeeping's `entries` shape; no owner routes to
+either yet. The existing application loads this file from `config/initializers/timekeeping.rb`.
 
 Timekeeping's provider is `ReservationProtocol` (`services/timekeeping/app/services/reservation_protocol.rb`),
 behind the reservation API's three endpoints. It keeps the same protocol on tables with the same shape,

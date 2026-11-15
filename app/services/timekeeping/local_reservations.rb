@@ -13,7 +13,8 @@
 # still leaves a receipt (§9.3). It checks no generation: it runs in-process,
 # inside the gateway's own admitted transaction (§10.1).
 #
-# `entries` is the authoritative entry store of the owner it serves. Its
+# `entries` is the authoritative entry store of the owner it serves: for the
+# `monolith` owner, Timekeeping::LocalEntries over timekeeping_entries. Its
 # `lock(ids)` takes the entry rows SELECT ... FOR UPDATE in id order (§9.4),
 # so reservation changes serialize with entry edits and with each other, and
 # answers { id => TimekeepingReservations::Entry } for the ids that exist.
