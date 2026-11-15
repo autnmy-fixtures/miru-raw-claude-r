@@ -373,7 +373,7 @@ RSpec.describe "Timekeeping invoice writes through the reservation boundary", ty
       end
 
       deliver_locally!
-      expect(local_reservations.map { |row| row[2] }).to eq(%w[committed committed])
+      expect(local_reservations.pluck(2)).to eq(%w[committed committed])
     end
 
     it "prepares a save of a non-draft as non-draft, with no edit lock (L1)" do
