@@ -81,8 +81,10 @@ RSpec.describe Timekeeping::Gateway::Local, type: :model do
     )
   end
 
-  it "runs only the single-entry commands so far" do
-    expect(described_class::HANDLERS.keys).to contain_exactly(gateway::CreateEntry, gateway::UpdateEntry, gateway::DiscardEntry)
+  it "runs only the single-entry and bulk commands so far" do
+    expect(described_class::HANDLERS.keys).to contain_exactly(
+      gateway::CreateEntry, gateway::UpdateEntry, gateway::DiscardEntry, gateway::BulkMove, gateway::BulkDiscard
+    )
   end
 
   it "records the columns `audited` records on TimesheetEntry today, and writes every column the two tables share but its own" do
@@ -368,12 +370,192 @@ RSpec.describe Timekeeping::Gateway::Local, type: :model do
     end
   end
 
+  describe "W2 bulk" do
+    let(:target) { create(:project, client: tenant_a.client, billable: true) }
+
+    # The caller's selection, as the controller hands it to the gateway:
+    # the owner's reads of the entries the policy scope admits (A6).
+    def selection(*entries) = entries.map { |entry| read(entry) }
+
+    def bulk_move(*entries, project: target) = gateway::BulkMove.new(entries: selection(*entries), project:)
+    def bulk_discard(*entries, tenant: tenant_a) = gateway::BulkDiscard.new(entries: selection(*entries), company: tenant.company)
+
+    # Runs the command and expects it refused as A9's lock, with nothing
+    # written to any entry.
+    def expect_locked(command, *entries)
+      expect { gateway.call(command) }.to raise_error(gateway::Locked) { |error| expect(error.status).to eq(403) }
+      entries.each { |entry| expect(entry.reload).to have_attributes(version: 1, project_id: tenant_a.project.id, discarded_at: nil) }
+      expect(Timekeeping::OutboxSnapshot.count).to eq(0)
+    end
+
+    describe "BulkMove" do
+      let!(:first) { held_entry(tenant_a, offset: 0) }
+      let!(:second) { held_entry(tenant_a, offset: 1, duration: 90.7) }
+
+      it "moves each entry as its next version, with its bulk audit row and its snapshot, and answers them in id order" do
+        Rails.event.set_context(request_id: "req-bulk")
+
+        moved = written { bulk_move(second, first) }
+
+        aggregate_failures do
+          [first, second].each do |entry|
+            entry.reload
+            expect(entry).to have_attributes(project_id: target.id, version: 2)
+            expect(entry.audits.sole).to have_attributes(
+              action: "update", version: 2, actor: "user:#{tenant_a.employee.id}", writer: "bulk", request_id: "req-bulk",
+              audited_changes: { "project_id" => [tenant_a.project.id, target.id] }
+            )
+            expect_snapshot(entry)
+          end
+          expect(moved).to all(be_readonly)
+          expect(moved.map(&:id)).to eq([first.id, second.id])
+          expect(moved.map(&:project_id)).to eq([target.id, target.id])
+          expect(moved.last.duration).to eq(90.7)
+          expect(moved.first.snippet).to include(project: target.name, client: tenant_a.client.name)
+        end
+      end
+
+      it "skips, and still answers as it stands, an employee's entry the edit lock holds (A9's silent skip, K12)" do
+        reserve!(first)
+
+        moved = written { bulk_move(first, second) }
+
+        aggregate_failures do
+          expect(first.reload).to have_attributes(project_id: tenant_a.project.id, version: 1)
+          expect(first.outbox_snapshots).to be_empty
+          expect(second.reload).to have_attributes(project_id: target.id, version: 2)
+          expect(moved.map { |entry| [entry.id, entry.project_id, entry.locked] })
+            .to eq([[first.id, tenant_a.project.id, true], [second.id, target.id, false]])
+        end
+      end
+
+      it "lets an admin move an entry the edit lock holds, and its snapshot still carries the lock" do
+        reserve!(first)
+        act_as(tenant_a.admin, tenant_a)
+
+        written { bulk_move(first) }
+
+        expect(first.reload.project_id).to eq(target.id)
+        expect(first.outbox_snapshots.sole.snapshot.dig("data", "locked")).to be(true)
+      end
+
+      it "skips an unbilled entry moved to a non-billable project, as today's rules reject it" do
+        non_billable = create(:project, client: tenant_a.client, billable: false)
+        third = held_entry(tenant_a, offset: 2, bill_status: "non_billable")
+
+        moved = written { bulk_move(first, third, project: non_billable) }
+
+        expect(first.reload).to have_attributes(project_id: tenant_a.project.id, version: 1)
+        expect(third.reload).to have_attributes(project_id: non_billable.id, version: 2)
+        expect(moved.map(&:id)).to eq([first.id, third.id])
+      end
+
+      it "writes nothing for an entry already in the target project, and still answers it" do
+        moved = written { bulk_move(first, project: tenant_a.project) }
+
+        expect(moved.map(&:id)).to eq([first.id])
+        expect([first.reload.version, first.outbox_snapshots.count]).to eq([1, 0])
+      end
+
+      it "refuses the whole move as locked when one entry is billed, for every role (A9, A3)" do
+        second.update!(bill_status: "billed")
+        act_as(member_of(tenant_a.company, role: :owner), tenant_a)
+
+        expect_locked(bulk_move(first, second), first, second)
+      end
+
+      it "refuses the whole move as locked for an employee outside the edit window, and lets an admin through (A9, A4)" do
+        second.update!(work_date: (tenant_a.company.timesheet_edit_days + 1).days.ago.to_date)
+
+        expect_locked(bulk_move(first, second), first, second)
+
+        act_as(tenant_a.admin, tenant_a)
+        written { bulk_move(first, second) }
+        expect([first.reload.project_id, second.reload.project_id]).to eq([target.id, target.id])
+      end
+
+      it "judges the lock on the entries as held, not as the controller read them (§6.2)" do
+        command = bulk_move(first, second)
+        second.update!(bill_status: "billed")
+
+        expect_locked(command, first, second)
+      end
+
+      it "leaves out an entry of another company, a discarded one and a missing one (§6.3)" do
+        foreign = held_entry(tenant_b, offset: 2, user: tenant_b.employee)
+        discarded = held_entry(tenant_a, offset: 3, discarded_at: Time.current)
+        missing = read(held_entry(tenant_a, offset: 4)).tap { Timekeeping::Entry.find(first_id + 4).destroy! }
+        command = gateway::BulkMove.new(entries: selection(first, foreign, discarded) << missing, project: target)
+
+        moved = written { command }
+
+        expect(moved.map(&:id)).to eq([first.id])
+        expect(foreign.reload).to have_attributes(project_id: tenant_b.project.id, version: 1)
+        expect(discarded.reload).to have_attributes(project_id: tenant_a.project.id, version: 1)
+      end
+
+      it "takes the named entries FOR UPDATE in id order, so it serializes with reservation changes and other bulk writes (§9.4)" do
+        statements = []
+        collect = ->(*, payload) { statements << payload[:sql] if payload[:sql].include?('"timekeeping_entries"') }
+
+        command = bulk_move(second, first)
+        ActiveSupport::Notifications.subscribed(collect, "sql.active_record") { gateway.call(command) }
+
+        expect(statements.first).to match(/\ASELECT .* FROM "timekeeping_entries" WHERE .*ORDER BY "timekeeping_entries"."id" ASC FOR UPDATE\z/m)
+      end
+    end
+
+    describe "BulkDiscard" do
+      let!(:first) { held_entry(tenant_a, offset: 0) }
+      let!(:second) { held_entry(tenant_a, offset: 1) }
+
+      it "discards each entry as its next version, with its bulk audit row and its snapshot, and answers the ids" do
+        discarded = written { bulk_discard(second, first) }
+
+        aggregate_failures do
+          expect(discarded).to eq([first.id, second.id])
+          [first, second].each do |entry|
+            entry.reload
+            expect(entry).to have_attributes(discarded_at: be_present, version: 2)
+            expect(entry.audits.sole).to have_attributes(action: "update", writer: "bulk")
+            expect(entry.audits.sole.audited_changes.keys).to eq(["discarded_at"])
+            expect_snapshot(entry)
+          end
+        end
+      end
+
+      it "discards an employee's own locked entry, as today's discard validates nothing" do
+        reserve!(first)
+
+        expect(written { bulk_discard(first) }).to eq([first.id])
+        expect(first.reload.discarded_at).to be_present
+      end
+
+      it "refuses the whole discard as locked when one entry is billed or, for an employee, outside the edit window (A9)" do
+        second.update!(bill_status: "billed")
+        expect_locked(bulk_discard(first, second), first, second)
+
+        second.update!(bill_status: "unbilled", work_date: (tenant_a.company.timesheet_edit_days + 1).days.ago.to_date)
+        expect_locked(bulk_discard(first, second), first, second)
+      end
+
+      it "answers nothing for a selection it holds none of, so the controller answers today's failure" do
+        foreign = held_entry(tenant_b, offset: 2, user: tenant_b.employee)
+
+        expect(written { bulk_discard(foreign) }).to eq([])
+        expect(written { bulk_discard }).to eq([])
+        expect(foreign.reload.discarded_at).to be_nil
+      end
+    end
+  end
+
   it "refuses the commands it does not run yet, and writes nothing" do
     entry = held_entry(tenant_a)
-    command = gateway::BulkDiscard.new(entries: TimesheetEntry.where(id: entry.id), company: tenant_a.company)
+    agent = create(:agent, company: tenant_a.company, user: tenant_a.employee)
+    entry.update!(agent_id: agent.id)
 
-    expect { gateway.call(command) }.to raise_error(gateway::OwnerUnavailable, /owner monolith .* BulkDiscard refused/)
-    expect(entry.reload.discarded_at).to be_nil
+    expect { gateway.call(gateway::DetachAgent.new(agent:)) }.to raise_error(gateway::OwnerUnavailable, /owner monolith .* DetachAgent refused/)
+    expect(entry.reload).to have_attributes(agent_id: agent.id, version: 1)
   end
 
   it "refuses every command while a handoff away from it runs, with the retryable Moving (§10.1)" do
