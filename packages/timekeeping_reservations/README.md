@@ -101,6 +101,14 @@ Timekeeping (`handoff_api.json#/$defs/taken_checkpoint`). It runs only while thi
 reservation or a prepared operation is left, and writes nothing. It reads those tables through
 `Timekeeping::PreparedRows`, the same reader `Timekeeping::RollbackReconcile` compares against, so the
 two directions read one rendering.
+Timekeeping's `RecutoverLoad` (`services/timekeeping/app/services/recutover_load.rb`, §10.5 steps 4
+and 5) loads that checkpoint while Timekeeping's copy is `frozen` under owner `monolith`. Timekeeping
+still holds what it held at the rollback, so the load replaces it in one transaction. Entries are
+written over by id. Reservations, audit rows, terminal receipts and idempotency receipts are replaced.
+Both sequences are set above the highest carried ids. It refuses, writing nothing, a checkpoint that
+does not hold together or that would drop what Timekeeping holds: an entry missing or behind the
+version held, or an audit row or receipt not carried exactly as held. Loading it again leaves the same
+tables.
 
 Timekeeping's provider is `ReservationProtocol` (`services/timekeeping/app/services/reservation_protocol.rb`),
 behind the reservation API's three endpoints. It keeps the same protocol on tables with the same shape,
