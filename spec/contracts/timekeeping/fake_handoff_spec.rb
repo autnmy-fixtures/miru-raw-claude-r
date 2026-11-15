@@ -303,6 +303,19 @@ RSpec.describe TimekeepingContracts::FakeHandoff do
       expect { fake.hold!(payments: []) }.to raise_error(ArgumentError, /payments/)
       expect(fake.held).to eq(described_class::HELD.index_with { [] }.merge("entries" => entries))
     end
+
+    it "takes an entry write as the owner: the take answers the written entry, and its snapshot waits in the outbox" do
+      fake.hold!(entries:)
+      written = entries.find { |held| held.fetch("id") == 205 }.merge("note" => "Proofing", "version" => 2)
+
+      fake.write!(written)
+
+      expect(fake.held.fetch("entries").map { |held| held.values_at("id", "version") }).to eq([[101, 1], [102, 1], [205, 2]])
+      expect(fake.undelivered.map { |snapshot| snapshot.values_at("entry_id", "version") }).to eq([[205, 2]])
+      expect(request(:read_handoff).body["outbox"]).to eq("latest_position" => 1, "undelivered" => 1)
+      frozen_for_rollback!
+      expect(take(2).body.fetch("entries").find { |held| held.fetch("id") == 205 }).to eq(written)
+    end
   end
 
   it "relays the loaded snapshots to the projection endpoint, after which the outbox is drained" do

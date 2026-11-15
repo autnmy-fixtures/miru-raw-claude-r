@@ -75,9 +75,8 @@
 # within one process; Timekeeping::FirstCutoverJournal keeps it in a file,
 # across processes (the timekeeping:first_cutover task).
 #
-# Rollback and re-cutover take this shape in the other direction once the
-# prepared application's entry store exists; under any owner but legacy this
-# tool finds no position and changes nothing.
+# The rollback takes this shape in the other direction (Timekeeping::Rollback);
+# under any owner but legacy this tool finds no position and changes nothing.
 class Timekeeping::FirstCutover
   # The run cannot go on from where it stands: both copies are where no step
   # of this cutover leaves them, or the checkpoint a resumed transfer needs

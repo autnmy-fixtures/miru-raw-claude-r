@@ -21,14 +21,15 @@ module TimekeepingContracts
   # - the rollback's take (take_checkpoint) only while the copy is frozen
   #   under the timekeeping owner at the query's generation. It answers what
   #   the fake holds as the owner (#held): the entries and reservations a load
-  #   stored, and whatever a test sets with #hold!, as the writes Timekeeping
-  #   took after the cutover. It writes nothing;
+  #   stored, and whatever a test sets with #hold! or #write!, as the writes
+  #   Timekeeping took after the cutover. It writes nothing;
   # - reconcile against the checkpoint it loaded: an entry missing,
   #   unexpected or different, or another set of reservations for an entry,
   #   is checkpoint-differs with its lists, and nothing changes;
   # - the outbox: a load writes one entry snapshot per entry, at the version
-  #   and with the `locked` the checkpoint carries, undelivered until #relay!
-  #   delivers them, so the tool can wait for the drain (§10.5 step 3).
+  #   and with the `locked` the checkpoint carries, and #write! one per entry
+  #   it writes, each undelivered until #relay! delivers them, so the tool can
+  #   wait for the drain (§10.5 step 3).
   #
   # Every request is checked against the contract; a consumer's mismatch
   # answers 400 and is recorded in #violations. Every answer the fake gives is
@@ -113,6 +114,19 @@ module TimekeepingContracts
       held = @held.merge(parts.transform_keys(&:to_s))
       TimekeepingContracts.validate!(CONTRACT, "#/$defs/taken_checkpoint", { "generation" => @copy.generation, **held })
       @held = held
+      self
+    end
+
+    # Timekeeping takes these entry writes as the owner, in the contract's
+    # full-entry form: each replaces the held entry of its id, or is added,
+    # and its snapshot goes into the outbox, undelivered until #relay!
+    # delivers it, so the rollback must drain it (§10.5 step 3). The test
+    # bumps each entry's version, as Timekeeping's writes do.
+    def write!(*entries)
+      written = entries.index_by { |entry| entry.fetch("id") }
+      held = @held.fetch("entries").reject { |entry| written.key?(entry.fetch("id")) } + written.values
+      hold!(entries: held.sort_by { |entry| entry.fetch("id") })
+      @outbox.concat(written.values.map { |entry| snapshot(entry) })
       self
     end
 
