@@ -32,7 +32,7 @@ The prepared application's provider is `Timekeeping::LocalReservations`
 store is `Timekeeping::LocalEntries` (`app/services/timekeeping/local_entries.rb`), over the prepared
 application's own `timekeeping_entries`, which have Timekeeping's `entries` shape. The gateway's
 `monolith` owner, `Timekeeping::Gateway::Local` (`app/services/timekeeping/gateway/local.rb`), writes
-those entries for the single-entry and bulk commands and agent detach so far, under today's
+those entries for the single-entry and bulk commands, the import batches and agent detach, under today's
 `TimesheetEntry` rules, and `Timekeeping::EntryReads` reads them back for the entry API's own reads; no
 owner routes reservations to the provider yet. An entry change there records its audit row and its
 entry snapshot through `Timekeeping::LocalEntryChange`, into the prepared application's outbox

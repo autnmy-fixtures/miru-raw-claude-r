@@ -81,11 +81,12 @@ RSpec.describe Timekeeping::Gateway::Local, type: :model do
     )
   end
 
-  it "runs only the single-entry and bulk commands and agent detach so far" do
+  it "runs the single-entry, bulk and import commands and agent detach, the same commands the timekeeping owner forwards" do
     expect(described_class::HANDLERS.keys).to contain_exactly(
       gateway::CreateEntry, gateway::UpdateEntry, gateway::DiscardEntry, gateway::BulkMove, gateway::BulkDiscard,
-      gateway::DetachAgent
+      gateway::ImportBatch, gateway::DetachAgent
     )
+    expect(described_class::HANDLERS.keys).to match_array(Timekeeping::Gateway::Remote::REQUESTS.keys)
   end
 
   it "records the columns `audited` records on TimesheetEntry today, and writes every column the two tables share but its own" do
@@ -639,14 +640,138 @@ RSpec.describe Timekeeping::Gateway::Local, type: :model do
     end
   end
 
-  it "refuses the commands it does not run yet, and writes nothing" do
-    command = gateway::ImportBatch.new(
-      company: tenant_a.company, import_id: 41, batch_no: 1,
-      rows: [{ project: tenant_a.project, user: tenant_a.employee, duration: 30.0, work_date: Date.current, bill_status: "unbilled" }]
-    )
+  describe "W5 ImportBatch" do
+    let(:non_billable) { create(:project, client: tenant_a.client, billable: false) }
 
-    expect { gateway.call(command) }.to raise_error(gateway::OwnerUnavailable, /owner monolith .* ImportBatch refused/)
-    expect(Timekeeping::Entry.count).to eq(0)
+    # The import job runs with no signed-in user (§1.3).
+    before { Current.user = nil }
+
+    def row(project: tenant_a.project, **attributes)
+      {
+        project:, user: tenant_a.employee, duration: 75.0, work_date: Date.new(2026, 1, 2), note: "Imported",
+        bill_status: "unbilled", source: "import", source_metadata: { tool: "harvest" }, **attributes
+      }
+    end
+
+    def batch(*rows, company: tenant_a.company)
+      gateway::ImportBatch.new(company:, import_id: "41-run", batch_no: 2, rows:)
+    end
+
+    it "creates each row in the importing company as version 1, with its create audit as the system import writer and its snapshot" do
+      Rails.event.set_context(request_id: "req-import")
+
+      result = written { batch(row, row(project: non_billable, bill_status: "non_billable", note: "Internal")) }
+
+      entries = Timekeeping::Entry.order(:id).to_a
+      aggregate_failures do
+        expect(result).to eq(gateway::ImportBatch::Result.new(created_ids: entries.map(&:id), row_errors: {}))
+        expect(entries.first).to have_attributes(
+          company_id: tenant_a.company.id, project_id: tenant_a.project.id, user_id: tenant_a.employee.id, agent_id: nil,
+          duration: 75.0, work_date: Date.new(2026, 1, 2), note: "Imported", bill_status: "unbilled",
+          review_status: "not_required", source: "import", source_metadata: { "tool" => "harvest" }, version: 1
+        )
+        expect(entries.second).to have_attributes(project_id: non_billable.id, bill_status: "non_billable", note: "Internal")
+        entries.each do |entry|
+          expect(entry.audits.sole).to have_attributes(
+            action: "create", version: 1, company_id: tenant_a.company.id, actor: "system", agent_id: nil,
+            writer: "import", request_id: "req-import", audited_changes: entry.to_contract.slice(*described_class::AUDITED)
+          )
+          expect_snapshot(entry)
+        end
+      end
+    end
+
+    it "creates a billed row unbilled and then marks it billed, as two versions, as today's create! then update! (§1.3)" do
+      result = written { batch(row(bill_status: "billed")) }
+
+      entry = Timekeeping::Entry.find(result.created_ids.sole)
+      aggregate_failures do
+        expect(entry).to have_attributes(bill_status: "billed", version: 2)
+        expect(entry.audits.order(:version).map { |audit| [audit.action, audit.version] }).to eq([["create", 1], ["update", 2]])
+        expect(entry.audits.find_by(version: 1).audited_changes["bill_status"]).to eq("unbilled")
+        expect(entry.audits.find_by(version: 2).audited_changes).to eq("bill_status" => %w[unbilled billed])
+        expect(entry.outbox_snapshots.order(:version).map { |snapshot| snapshot.snapshot.dig("data", "bill_status") }).to eq(%w[unbilled billed])
+        expect_snapshot(entry)
+      end
+    end
+
+    it "fails a row today's create rules reject alone, with today's message by its index, and keeps the rest of the batch" do
+      result = written { batch(row(note: "First"), row(duration: 6_000_001), row(project: non_billable, bill_status: "unbilled"), row(note: "Last")) }
+
+      aggregate_failures do
+        expect(Timekeeping::Entry.order(:id).pluck(:note)).to eq(%w[First Last])
+        expect(result.created_ids).to eq(Timekeeping::Entry.order(:id).ids)
+        expect(result.row_errors).to eq(
+          1 => "Duration must be less than or equal to 6000000",
+          2 => I18n.t("errors.validate_billable_project")
+        )
+        expect(Timekeeping::EntryAudit.count).to eq(2)
+        expect(Timekeeping::OutboxSnapshot.count).to eq(2)
+      end
+    end
+
+    it "answers the same as the legacy owner for the same rows, from the same rules" do
+      rows = [row(note: "First"), row(duration: -1), row(bill_status: "billed"), row(project: non_billable, bill_status: "unbilled")]
+
+      local = written { batch(*rows) }
+      set_timekeeping_ownership!(TimekeepingOwnershipStates::BEFORE_FIRST_HANDOFF)
+      legacy = gateway.call(batch(*rows))
+
+      expect(local.row_errors).to eq(legacy.row_errors)
+      expect(local.created_ids.size).to eq(legacy.created_ids.size)
+      expect(Timekeeping::Entry.order(:id).map { |entry| [entry.note, entry.bill_status, entry.duration] })
+        .to eq(TimesheetEntry.where(id: legacy.created_ids).order(:id).map { |entry| [entry.note, entry.bill_status, entry.duration] })
+    end
+
+    it "tells today's listeners of each entry it created, as today's after_create does for each imported row" do
+      notified = []
+      allow(Rails.event).to receive(:notify).and_wrap_original do |original, event, *rest|
+        notified << event.record.id if event.is_a?(TimesheetEntries::Created)
+        original.call(event, *rest)
+      end
+
+      result = written { batch(row, row(duration: -1), row(bill_status: "billed")) }
+
+      expect(notified).to eq(result.created_ids)
+    end
+
+    it "names the signed-in user as the actor when there is one, still as the import writer" do
+      act_as(tenant_a.admin, tenant_a)
+
+      result = written { batch(row) }
+
+      expect(Timekeeping::Entry.find(result.created_ids.sole).audits.sole).to have_attributes(actor: "user:#{tenant_a.admin.id}", writer: "import")
+    end
+
+    it "refuses the whole batch, with nothing written, when a row names another company's project (§6.3)" do
+      command = batch(row, row(project: tenant_b.project, user: tenant_b.employee))
+
+      expect { written { command } }.to raise_error(gateway::Refused, /project #{tenant_b.project.id} is not in company #{tenant_a.company.id}/) { |error|
+        expect(error.status).to eq(403)
+      }
+      expect(Timekeeping::Entry.count).to eq(0)
+      expect(Timekeeping::OutboxSnapshot.count).to eq(0)
+    end
+
+    it "reaches the projection only through the local relay, billed as the last version (§3.3)" do
+      result = written { batch(row, row(bill_status: "billed")) }
+      expect(TimesheetEntry.where(id: result.created_ids)).to be_empty
+
+      Timekeeping::LocalRelay.new.run
+
+      expect(TimesheetEntry.where(id: result.created_ids).order(:id).map { |entry| [entry.bill_status, entry.version] })
+        .to eq([["unbilled", 1], ["billed", 2]])
+    end
+  end
+
+  it "refuses W7's invoice callbacks, which the invoice reservation boundary replaces (§7), and writes nothing" do
+    entry = held_entry(tenant_a)
+
+    [gateway::MarkBilled.new(entries: TimesheetEntry.none), gateway::SetLocked.new(entries: TimesheetEntry.none, locked: true)].each do |command|
+      expect { gateway.call(command) }.to raise_error(gateway::OwnerUnavailable, /owner monolith .* #{command.class.name.demodulize} refused/)
+    end
+    expect(entry.reload).to have_attributes(bill_status: "unbilled", version: 1)
+    expect(Timekeeping::OutboxSnapshot.count).to eq(0)
   end
 
   it "refuses every command while a handoff away from it runs, with the retryable Moving (§10.1)" do
