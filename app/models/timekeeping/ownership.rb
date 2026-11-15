@@ -68,12 +68,24 @@ class Timekeeping::Ownership < ApplicationRecord
   # transaction, so the fence cannot flip or abort the handoff under it. Must
   # run inside that transaction. Timekeeping's copy has the same guard.
   def self.lock_frozen_legacy!(step, generation)
+    lock_frozen!(step, generation, owner: "legacy")
+  end
+
+  # The record held FOR SHARE for a checkpoint step that runs on this copy
+  # (§10.5 steps 4 to 6), or OutOfStep unless it is frozen under `owner`, the
+  # handoff's outgoing owner, at `generation`: `legacy` for the first
+  # cutover's steps, `timekeeping` for the rollback's load
+  # (Timekeeping::CheckpointLoad). Held for the rest of the caller's
+  # transaction, so the fence cannot flip or abort the handoff under it. Must
+  # run inside that transaction. Timekeeping's Ownership.lock_frozen! is the
+  # same guard.
+  def self.lock_frozen!(step, generation, owner:)
     lock_shared!.tap do |ownership|
       TimekeepingReservations::Handoff.ensure_in_step!(step, FROZEN, ownership, generation)
-      next if ownership.owner_legacy?
+      next if ownership.owner == owner
 
       raise TimekeepingReservations::Handoff::OutOfStep,
-        "Timekeeping handoff: #{step} expects owner legacy, found #{ownership.summary}; nothing changed"
+        "Timekeeping handoff: #{step} expects owner #{owner}, found #{ownership.summary}; nothing changed"
     end
   end
 

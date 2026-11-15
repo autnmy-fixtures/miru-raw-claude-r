@@ -59,6 +59,18 @@ drains that outbox into `timesheet_entries` through the projection consumer, on 
 `timekeeping_relay` queue (`Timekeeping::LocalRelayJob`). The existing application loads this file from
 `config/initializers/timekeeping.rb`.
 
+A rollback fills those tables from the checkpoint taken out of Timekeeping
+(`Timekeeping::HandoffClient#take_checkpoint`). `Timekeeping::CheckpointLoad`
+(`app/services/timekeeping/checkpoint_load.rb`, §10.5 steps 4 and 5) runs that load. It runs only while the
+existing application's copy of the ownership record is `frozen` under owner `timekeeping` at the
+handoff's generation (`Timekeeping::Ownership.lock_frozen!`). It loads only into empty tables
+(`AlreadyLoaded` otherwise). In one transaction it copies every part as carried: entries, committed
+reservations, audit rows with their ids, terminal operation receipts and idempotency receipts. It then
+sets the entry and audit sequences above the highest carried ids, and never moves them back (§10.3). It
+writes no outbox snapshot: freeze already drained Timekeeping's outbox into the projection, at the
+versions the checkpoint carries. A checkpoint that does not hold together is refused whole as
+`Refused`, with what each check found.
+
 Timekeeping's provider is `ReservationProtocol` (`services/timekeeping/app/services/reservation_protocol.rb`),
 behind the reservation API's three endpoints. It keeps the same protocol on tables with the same shape,
 `reservations` and `reservation_operations`, so a checkpoint carries reservations and receipts either way
