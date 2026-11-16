@@ -75,6 +75,15 @@
 #                                    every outcome delivered, the resent
 #                                    commit change nothing and the retry go
 #                                    through
+#   bin/timekeeping-demo hard-delete
+#                                    the hard-delete-of-a-non-draft part of
+#                                    the failure injection (§12.4, §9.3): a
+#                                    bulk delete of a sent invoice with a
+#                                    payment fails and changes nothing; one
+#                                    with none keeps its entry's edit lock,
+#                                    retained, until a successor draft takes
+#                                    it over; while Timekeeping or the
+#                                    prepared application owns the entries
 #   bin/timekeeping-demo down        stop everything; the databases are kept
 #   bin/timekeeping-demo compose …   any other docker compose command
 #
@@ -517,6 +526,21 @@ cmd_billing_handoff() {
   echo "== billing handoff: the handoff's step 1 waited for the paused billing write, billing writes were refused with 503 ownership-moving while it ran, and accepted again once it finished"
 }
 
+# The hard-delete-of-a-non-draft part of §12.4's failure injection (§9.3,
+# §7.3), while Timekeeping or the prepared application owns the entries: one
+# step in miru-web (bin/rails timekeeping:hard_delete,
+# Timekeeping::HardDeleteCheck). Its failure is the one a user meets, a
+# recorded payment refusing the destroy, so nothing is stopped or started.
+cmd_hard_delete() {
+  local run
+  require_env_file
+  processes "${EXISTING_SERVICES[@]}" "${TIMEKEEPING_SERVICES[@]}" > /dev/null
+  run="$(date -u +%Y%m%dT%H%M%SZ)-$(secret 2)"
+  echo "== hard delete: run ${run}"
+  compose exec -T --env "RUN=${run}" miru-web bin/rails timekeeping:hard_delete
+  echo "== hard delete: a failed hard delete of a non-draft changed nothing, and a successful one kept the edit lock until a successor took the entry over"
+}
+
 cmd_handoff() {
   case "${1:-}" in
     first_cutover|first_cutover:abort|rollback|rollback:abort|recutover|recutover:abort) ;;
@@ -549,6 +573,7 @@ case "${1:-}" in
   billing-handoff) cmd_billing_handoff ;;
   save-failures) cmd_save_failures ;;
   reservation-failures) cmd_reservation_failures ;;
+  hard-delete) cmd_hard_delete ;;
   down) compose down ;;
   compose) shift; compose "$@" ;;
   ""|help|-h|--help) usage ;;

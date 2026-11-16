@@ -330,9 +330,9 @@ RSpec.describe "Timekeeping local demo runtime" do
     # :refused exit. A handoff task stops on its first run, as with
     # timekeeping-web stopped, and finishes when run again, unless
     # FAKE_HANDOFF_FINISHES is set, when it finishes at once.
-    # FAKE_SAVE_FAILURES_STATUS is how timekeeping:save_failures exits, and
+    # FAKE_SAVE_FAILURES_STATUS is how timekeeping:save_failures exits,
     # FAKE_RESERVATION_PAUSED_STATUS how timekeeping:reservation_failures:paused
-    # exits.
+    # exits, and FAKE_HARD_DELETE_STATUS how timekeeping:hard_delete exits.
     context "with running applications" do
       let(:record_dir) { dir.join("deploys") }
       let(:fakes) { {} }
@@ -392,6 +392,9 @@ RSpec.describe "Timekeeping local demo runtime" do
                   *timekeeping:save_failures*)
                     echo "save failures: every case held"
                     exit "${FAKE_SAVE_FAILURES_STATUS:-0}" ;;
+                  *timekeeping:hard_delete*)
+                    echo "hard delete: every case held"
+                    exit "${FAKE_HARD_DELETE_STATUS:-0}" ;;
                   *timekeeping:reservation_failures:paused*)
                     echo "reservation failures: refused and lost, miru-jobs stopped: $([ -e "${state}/stopped-miru-jobs" ] && echo yes || echo no)"
                     exit "${FAKE_RESERVATION_PAUSED_STATUS:-0}" ;;
@@ -753,6 +756,40 @@ RSpec.describe "Timekeeping local demo runtime" do
             expect(status).not_to be_success
             expect(err).to include("timekeeping-web is not running")
             expect(docker_calls.grep(/timekeeping:save_failures/)).to be_empty
+          end
+        end
+      end
+
+      describe "the hard-delete-of-a-non-draft part of the failure injection (§12.4, §9.3)" do
+        it "runs the one step in the existing application under a run name, and stops and starts nothing" do
+          out, err, status = run("hard-delete")
+          expect(status).to be_success, err
+
+          step = docker_calls.grep(/timekeeping:hard_delete/).sole
+          expect(step).to match(/exec -T --env RUN=\d{8}T\d{6}Z-\h{4} miru-web bin\/rails timekeeping:hard_delete\z/)
+          expect(out).to include("hard delete: every case held", "kept the edit lock until a successor took the entry over")
+          expect(docker_calls.join("\n")).not_to match(/ (stop|start|up|build|kill) /)
+        end
+
+        context "when the step fails" do
+          let(:fakes) { { "FAKE_HARD_DELETE_STATUS" => "1" } }
+
+          it "fails, and says nothing held" do
+            out, _err, status = run("hard-delete")
+
+            expect(status).not_to be_success
+            expect(out).not_to include("kept the edit lock until a successor took the entry over")
+          end
+        end
+
+        context "when a process is not running" do
+          it "runs nothing" do
+            run("compose", "stop", "miru-jobs")
+            _out, err, status = run("hard-delete")
+
+            expect(status).not_to be_success
+            expect(err).to include("miru-jobs is not running")
+            expect(docker_calls.grep(/timekeeping:hard_delete/)).to be_empty
           end
         end
       end
