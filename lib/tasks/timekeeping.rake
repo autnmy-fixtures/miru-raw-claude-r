@@ -847,3 +847,28 @@ namespace :timekeeping do
     end
   end
 end
+
+module TimekeepingTenantIsolationTask
+  def self.check
+    Timekeeping::TenantIsolationCheck.new(
+      client: Timekeeping::PublicApi::Client.new(base_url: ENV.fetch("MIRU_URL", "http://127.0.0.1:3000")),
+      password: ENV.fetch("MIRU_SEED_PASSWORD") { abort "MIRU_SEED_PASSWORD is the seeded users' password; the check signs in with it" },
+      run: ENV.fetch("RUN") { abort "RUN names the writes of one run" },
+      logger: TimekeepingFirstCutoverTask.logger,
+      options: Timekeeping::TenantIsolationCheck::Options.new(wait: Integer(ENV.fetch("CHECK_WAIT", Timekeeping::PublicApi::DEFAULT_WAIT)))
+    )
+  end
+
+  def self.run
+    check.call
+  rescue Timekeeping::TenantIsolationCheck::Failed, Timekeeping::InternalApi::Error => error
+    abort "Timekeeping tenant-isolation proof failed: #{error.message}"
+  end
+end
+
+namespace :timekeeping do
+  desc "Neither business reads, writes, prepares or projects the other's entries; the ownership guards hold; no single-writer violation (docs/architecture/timekeeping-soa.md 13 item 7; RUN)"
+  task tenant_isolation: :environment do
+    TimekeepingTenantIsolationTask.run
+  end
+end

@@ -116,6 +116,15 @@
 #                                    its second delivery of every one changes
 #                                    nothing; while Timekeeping owns the
 #                                    entries
+#   bin/timekeeping-demo tenant-isolation
+#                                    the tenant-isolation proof (§13 item 7):
+#                                    neither business can read, write,
+#                                    prepare or project the other's entries,
+#                                    an employee cannot touch the admin's
+#                                    entries, and no process of the existing
+#                                    app has logged a single-writer guard
+#                                    violation; under any owner with
+#                                    admission open
 #   bin/timekeeping-demo down        stop everything; the databases are kept
 #   bin/timekeeping-demo compose …   any other docker compose command
 #
@@ -764,6 +773,39 @@ cmd_redelivery() {
   echo "== redelivery: the projection applied only each entry's newest snapshot when they arrived out of order, and the relay's second delivery of all ${left} changed nothing"
 }
 
+# The log line of a single-writer guard violation (Timekeeping::Signals,
+# Timekeeping::SingleWriterWatch).
+SINGLE_WRITER_ALERT="Timekeeping signal single_writer: "
+
+# §13 item 7, under any owner with admission open, in one step: on both
+# seeded businesses, neither can read, write, prepare or project the other's
+# entries, and inside each the employee cannot touch the admin's entries
+# while the admin's web edit of the employee's goes through
+# (bin/rails timekeeping:tenant_isolation, Timekeeping::TenantIsolationCheck,
+# which also counts the single-writer violations its own process reports).
+# Then the single-writer guard must pass in the existing application's other
+# processes too: neither miru-web's nor miru-jobs' log may hold a violation,
+# since its container started. Nothing is stopped or started. The output is
+# kept under tmp/timekeeping-demo/tenant-isolation.
+cmd_tenant_isolation() {
+  local run output service violations
+  require_env_file
+  processes "${EXISTING_SERVICES[@]}" "${TIMEKEEPING_SERVICES[@]}" > /dev/null
+  run="$(date -u +%Y%m%dT%H%M%SZ)-$(secret 2)"
+  output="$(dirname "${ENV_FILE}")/tenant-isolation/${run}.log"
+  mkdir -p "$(dirname "${output}")"
+  echo "== tenant isolation: run ${run}"
+  compose exec -T --env "RUN=${run}" miru-web bin/rails timekeeping:tenant_isolation | tee "${output}"
+  for service in "${EXISTING_SERVICES[@]}"; do
+    violations="$(compose logs --no-color --no-log-prefix "${service}" | grep -F "${SINGLE_WRITER_ALERT}" || true)"
+    if [ -n "${violations}" ]; then
+      printf '%s\n' "${violations}" | tee -a "${output}" >&2
+      die "${service}'s log holds $(wc -l <<< "${violations}" | tr -d ' ') single-writer guard violations (§12.2, §11.3)"
+    fi
+  done
+  echo "== tenant isolation: neither business could reach the other's entries, the ownership guards held on both, and no process of the existing application logged a single-writer guard violation"
+}
+
 cmd_handoff() {
   case "${1:-}" in
     first_cutover|first_cutover:abort|rollback|rollback:abort|recutover|recutover:abort) ;;
@@ -800,6 +842,7 @@ case "${1:-}" in
   stale-generation) cmd_stale_generation ;;
   consumer-down) cmd_consumer_down ;;
   redelivery) cmd_redelivery ;;
+  tenant-isolation) cmd_tenant_isolation ;;
   down) compose down ;;
   compose) shift; compose "$@" ;;
   ""|help|-h|--help) usage ;;
