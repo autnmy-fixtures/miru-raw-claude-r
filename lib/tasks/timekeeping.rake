@@ -13,7 +13,9 @@
 # Both read TIMEKEEPING_URL and TIMEKEEPING_TOKEN_KEY, as the handoff client
 # does. JOURNAL names the journal file (tmp/timekeeping/first_cutover.json by
 # default), DISPOSITION the recorded disposition of the unlocked links
-# (§10.4; the seed disposition of the two seeded businesses by default).
+# (§10.4; the seed disposition of the two seeded businesses by default), and
+# DRAIN_TIMEOUT the seconds the transfer waits for the relay to drain (60 by
+# default; the rollback and the re-cutover read it too).
 #
 # The runner for the rollback to the prepared application (§10.2 step 6,
 # §10.5) works the same way, with its own journal
@@ -289,6 +291,49 @@
 # a check waits on a worker (60 by default). bin/timekeeping-demo redelivery
 # stops and starts the relay and runs the resend around them.
 #
+# The interrupted-and-resumed-handoff part of §13 item 6 (§10.5,
+# Timekeeping::InterruptedHandoffCheck), under any owner with admission open,
+# in seven steps around the handoff that owner hands over with, interrupted
+# twice in its transfer and then resumed to its end; RUN names the writes of
+# one run, the same for all seven:
+#
+#   bin/rails timekeeping:interrupted_handoff:plan          print the handoff
+#                                                           task and the relay
+#                                                           service its
+#                                                           transfer waits on
+#   bin/rails timekeeping:interrupted_handoff:held          relay running:
+#                                                           entry X written and
+#                                                           reserved by a draft
+#   bin/rails timekeeping:interrupted_handoff:paused        relay stopped:
+#                                                           entry Y written
+#   bin/rails timekeeping:interrupted_handoff:transferring  wait until the
+#                                                           handoff stands in
+#                                                           its transfer
+#   bin/rails timekeeping:interrupted_handoff:crashed       the handoff killed
+#                                                           there: still
+#                                                           fenced, nothing
+#                                                           changed, writes
+#                                                           refused
+#   bin/rails timekeeping:interrupted_handoff:timed_out     the handoff run
+#                                                           again stopped there
+#                                                           for a resume: the
+#                                                           same, its journal
+#                                                           reused
+#   bin/rails timekeeping:interrupted_handoff:resumed       once it was resumed
+#                                                           to its end: money,
+#                                                           entries and
+#                                                           reservations kept,
+#                                                           writes accepted
+#
+# Each exits 1 at the first check that fails. They sign in as the journey
+# does (MIRU_URL, MIRU_SEED_PASSWORD), reach Timekeeping's handoff API as the
+# handoff tasks do, and CHECK_WAIT sets the seconds a step waits on another
+# process (60 by default). bin/timekeeping-demo interrupted-handoff stops and
+# starts the relay, runs the handoff three times and kills the first run
+# around them. Each handoff task's DRAIN_TIMEOUT sets the seconds its transfer
+# waits for the relay to drain (60 by default): the proof raises it for the
+# run it kills, and lowers it for the run that must stop on its own.
+#
 # What the existing application measures of its Timekeeping machinery
 # (§11.3, Timekeeping::Signals), read once, for an operator or a script:
 #
@@ -300,6 +345,17 @@ module TimekeepingFirstCutoverTask
   def self.journal = Timekeeping::FirstCutoverJournal.new(path: ENV.fetch("JOURNAL", Timekeeping::FirstCutoverJournal::DEFAULT_PATH))
 
   def self.logger = Logger.new($stdout, formatter: ->(_severity, _time, _progname, message) { "#{message}\n" })
+
+  # How long a handoff's transfer waits for its relay to drain (§10.5 step
+  # 3): DRAIN_TIMEOUT seconds, 60 by default. The three handoff tasks share
+  # it.
+  def self.drain
+    given = ENV.fetch("DRAIN_TIMEOUT", "60")
+    timeout = Integer(given, 10, exception: false)
+    abort "DRAIN_TIMEOUT is the seconds a handoff's transfer waits for its relay to drain, and #{given.inspect} is not" unless timeout&.positive?
+
+    Timekeeping::FirstCutover::Drain.new(timeout:)
+  end
 
   def self.resume_hint(journal)
     "Both copies stay where the run left them, and #{journal.path} keeps what it took. " \
@@ -315,7 +371,7 @@ namespace :timekeeping do
       unlocked_link_invoice_ids: Timekeeping::RecordedDisposition.unlocked_link_invoice_ids(
         ENV.fetch("DISPOSITION", Timekeeping::RecordedDisposition::SEED)
       ),
-      journal:, logger: TimekeepingFirstCutoverTask.logger
+      journal:, drain: TimekeepingFirstCutoverTask.drain, logger: TimekeepingFirstCutoverTask.logger
     )
 
     result = cutover.call
@@ -366,7 +422,7 @@ namespace :timekeeping do
   desc "Run or resume the rollback from Timekeeping to the prepared application (JOURNAL=path)"
   task rollback: :environment do
     journal = TimekeepingRollbackTask.journal
-    result = Timekeeping::Rollback.new(journal:, logger: TimekeepingFirstCutoverTask.logger).call
+    result = Timekeeping::Rollback.new(journal:, drain: TimekeepingFirstCutoverTask.drain, logger: TimekeepingFirstCutoverTask.logger).call
     journal.clear
     puts "Timekeeping rollback: done at generation #{result.generation}, the prepared application owns entries " \
       "(#{TimekeepingRollbackTask.reconciled(result.reconciled)})"
@@ -407,7 +463,7 @@ namespace :timekeeping do
   desc "Run or resume the re-cutover from the prepared application to Timekeeping (JOURNAL=path)"
   task recutover: :environment do
     journal = TimekeepingRecutoverTask.journal
-    result = Timekeeping::Recutover.new(journal:, logger: TimekeepingFirstCutoverTask.logger).call
+    result = Timekeeping::Recutover.new(journal:, drain: TimekeepingFirstCutoverTask.drain, logger: TimekeepingFirstCutoverTask.logger).call
     journal.clear
     puts "Timekeeping re-cutover: done at generation #{result.generation}, Timekeeping owns entries " \
       "(#{TimekeepingRollbackTask.reconciled(result.reconciled)})"
@@ -870,5 +926,43 @@ namespace :timekeeping do
   desc "Neither business reads, writes, prepares or projects the other's entries; the ownership guards hold; no single-writer violation (docs/architecture/timekeeping-soa.md 13 item 7; RUN)"
   task tenant_isolation: :environment do
     TimekeepingTenantIsolationTask.run
+  end
+end
+
+module TimekeepingInterruptedHandoffTask
+  def self.check
+    Timekeeping::InterruptedHandoffCheck.new(
+      client: Timekeeping::PublicApi::Client.new(base_url: ENV.fetch("MIRU_URL", "http://127.0.0.1:3000")),
+      password: ENV.fetch("MIRU_SEED_PASSWORD") { abort "MIRU_SEED_PASSWORD is the seeded users' password; the check signs in with it" },
+      run: ENV.fetch("RUN") { abort "RUN names the writes of one run; give every step the same one" },
+      logger: TimekeepingFirstCutoverTask.logger,
+      options: Timekeeping::InterruptedHandoffCheck::Options.new(wait: Integer(ENV.fetch("CHECK_WAIT", Timekeeping::PublicApi::DEFAULT_WAIT)))
+    )
+  end
+
+  def self.run(step)
+    result = check.public_send(step)
+    puts result if step == :plan
+  rescue Timekeeping::InterruptedHandoffCheck::Failed, Timekeeping::InternalApi::Error => error
+    abort "Timekeeping interrupted-handoff proof failed (#{step}): #{error.message}"
+  end
+end
+
+namespace :timekeeping do
+  namespace :interrupted_handoff do
+    {
+      plan: "Print the handoff task the current owner hands over with, and the relay service its transfer waits on",
+      held: "With the relay running: entry X written and reserved by a draft, before the handoff",
+      paused: "With the relay stopped: entry Y written, before the handoff",
+      transferring: "Wait until the handoff stands in its transfer, waiting for the stopped relay",
+      crashed: "With the handoff killed in its transfer: both copies still frozen, nothing changed, writes refused",
+      timed_out: "With the handoff run again and stopped in its transfer: the same, and its journal reused",
+      resumed: "Once the handoff resumed to its end: money, entries and reservations kept, writes accepted"
+    }.each do |step, description|
+      desc "#{description} (docs/architecture/timekeeping-soa.md 13 item 6; RUN)"
+      task step => :environment do
+        TimekeepingInterruptedHandoffTask.run(step)
+      end
+    end
   end
 end
