@@ -122,8 +122,11 @@ difference raises `CheckpointReconcile::Differs`, Timekeeping's first-cutover re
 aborted. The handoff tool carries the same checkpoint there a second time over the handoff API
 (`reconcile_recutover_checkpoint`, `POST /internal/v1/handoff/recutover/checkpoint/reconcile`, the
 load's `recutover_checkpoint` request), which answers the load's `recutover_receipt`, or
-`409 checkpoint-differs` listing each row missing, unexpected or differing. No client call or fake
-serves it on this side yet.
+`409 checkpoint-differs` listing each row missing, unexpected or differing. On this side that call is
+`Timekeeping::HandoffClient#reconcile_recutover_checkpoint`, which sends the load's body again and
+answers a `RecutoverReceipt`; it writes nothing, so the tool may ask again after a lost response.
+`TimekeepingContracts::FakeHandoff` serves it for the tool's tests, comparing the five parts with
+what it holds under `RecutoverReconcile`'s list names.
 
 Timekeeping's provider is `ReservationProtocol` (`services/timekeeping/app/services/reservation_protocol.rb`),
 behind the reservation API's three endpoints. It keeps the same protocol on tables with the same shape,

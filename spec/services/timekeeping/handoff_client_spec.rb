@@ -350,7 +350,7 @@ RSpec.describe Timekeeping::HandoffClient do
     end
   end
 
-  describe "#load_recutover_checkpoint" do
+  shared_context "with the re-cutover's checkpoint" do
     # The prepared application owns the entries after a rollback at
     # generation 2; the re-cutover's close raises the generation to 3 and
     # freezes there. Timekeeping still holds what it held at the rollback.
@@ -400,6 +400,10 @@ RSpec.describe Timekeeping::HandoffClient do
       client.run_step(:close, generation: 2)
       client.run_step(:freeze, generation: 3)
     end
+  end
+
+  describe "#load_recutover_checkpoint" do
+    include_context "with the re-cutover's checkpoint"
 
     it "carries every part exactly as taken and answers how many rows of each Timekeeping loaded" do
       frozen_for_recutover!
@@ -544,6 +548,148 @@ RSpec.describe Timekeeping::HandoffClient do
       )
 
       expect { client.load_recutover_checkpoint(checkpoint) }.to raise_error(described_class::ContractViolation)
+    end
+  end
+
+  describe "#reconcile_recutover_checkpoint" do
+    include_context "with the re-cutover's checkpoint"
+
+    def loaded!
+      frozen_for_recutover!
+      client.load_recutover_checkpoint(checkpoint)
+    end
+
+    it "answers how many rows of each part Timekeeping holds exactly as carried, and writes nothing" do
+      loaded!
+
+      expect(client.reconcile_recutover_checkpoint(checkpoint)).to eq(described_class::RecutoverReceipt.new(
+        entries: 6, reservations: 4, entry_audits: 3, reservation_operations: 3, idempotency_receipts: 3
+      ))
+      expect(fake.held).to eq(carried(checkpoint))
+      expect(client.status).to eq(described_class::Status.new(
+        copy: described_class::Copy.new(generation: 3, owner: "monolith", state: "frozen"),
+        outbox: described_class::Outbox.new(latest_position: nil, undelivered: 0)
+      ))
+    end
+
+    it "carries the load's body again, the generation in X-Ownership-Generation and the body" do
+      loaded!
+
+      client.reconcile_recutover_checkpoint(checkpoint)
+
+      load_call, reconcile_call = fake.calls.last(2)
+      expect([load_call.operation, reconcile_call.operation]).to eq(%i[load_recutover_checkpoint reconcile_recutover_checkpoint])
+      expect(reconcile_call.input).to eq(load_call.input)
+      expect(reconcile_call.input.fetch("generation")).to eq(3)
+      expect(a_request(:post, "#{TimekeepingContracts::FakeHandoff::URL}/internal/v1/handoff/recutover/checkpoint/reconcile")
+        .with(headers: { "X-Ownership-Generation" => "3" })).to have_been_made.once
+    end
+
+    it "agrees whatever order the rows are carried in, and may be asked as often as the tool needs" do
+      loaded!
+      reordered = checkpoint.with(**described_class::RecutoverReceipt.members.index_with { |part| checkpoint.public_send(part).reverse })
+
+      first = client.reconcile_recutover_checkpoint(reordered)
+
+      expect(client.reconcile_recutover_checkpoint(checkpoint)).to eq(first)
+      expect(fake.held).to eq(carried(checkpoint))
+    end
+
+    it "raises checkpoint-differs, listing every part, when the load never ran" do
+      frozen_for_recutover!
+
+      expect { client.reconcile_recutover_checkpoint(checkpoint) }.to raise_error(described_class::Problem) { |problem|
+        expect([problem.status, problem.type, problem.retryable]).to eq([409, "checkpoint-differs", false])
+        expect(problem.lists).to eq(
+          "entry_missing" => [240], "entry_differs" => [101], "entry_audit_missing" => [15],
+          "reservation_operation_missing" => ["602/b5e2c1d0-4f3a-4b2c-8d1e-0f9a8b7c6d5e"], "idempotency_receipt_missing" => ["2/web-2"],
+          "reservations_differ" => [101, 240]
+        )
+      }
+      expect(fake.held).to eq(held.transform_keys(&:to_s))
+    end
+
+    it "raises checkpoint-differs for a row held otherwise than carried, or held and not carried, value for value" do
+      loaded!
+      stray = { "company_id" => 1, "key" => "web-9", "request_digest" => "d9", "status" => 201, "response" => {}, "created_at" => created_at }
+      fake.hold!(idempotency_receipts: fake.held.fetch("idempotency_receipts") + [stray])
+      changed = checkpoint.with(
+        entries: checkpoint.entries.map { |carried| carried["id"] == 102 ? carried.merge("duration" => 479.9999900000001) : carried },
+        entry_audits: checkpoint.entry_audits.map { |carried| carried["id"] == 9 ? carried.merge("created_at" => "2026-11-02T09:15:30.123Z") : carried },
+        reservations: checkpoint.reservations.map { |carried| carried.entry_id == 102 ? carried.with(edit_lock: true) : carried }
+      )
+
+      expect { client.reconcile_recutover_checkpoint(changed) }.to raise_error(described_class::Problem) { |problem|
+        expect([problem.status, problem.type]).to eq([409, "checkpoint-differs"])
+        expect(problem.lists).to eq(
+          "entry_differs" => [102], "entry_audit_differs" => [9], "idempotency_receipt_unexpected" => ["1/web-9"], "reservations_differ" => [102]
+        )
+      }
+      expect(fake.held.fetch("entries")).to eq(checkpoint.entries)
+    end
+
+    it "raises Timekeeping's out-of-step refusal anywhere but frozen under monolith at the checkpoint's generation" do
+      refusals = {
+        "open" => -> { },
+        "closed" => -> { client.run_step(:close, generation: 2) },
+        "frozen, carried another generation" => -> { client.run_step(:freeze, generation: 3) }
+      }
+
+      refusals.each do |where, reach|
+        reach.call
+        carrying = where.include?("another") ? checkpoint.with(generation: 4) : checkpoint
+
+        expect { client.reconcile_recutover_checkpoint(carrying) }.to raise_error(described_class::Problem) { |problem|
+          expect([problem.status, problem.type, problem.retryable]).to eq([409, "out-of-step", false]), where
+        }
+      end
+      expect(fake.held).to eq(held.transform_keys(&:to_s))
+    end
+
+    it "raises out-of-step after the flip, and for a rollback's copy, frozen under timekeeping" do
+      loaded!
+      client.run_step(:flip, generation: 3)
+
+      expect { client.reconcile_recutover_checkpoint(checkpoint) }.to raise_error(described_class::Problem, /409 out-of-step/)
+
+      rollback = TimekeepingContracts::FakeHandoff.new(generation: 2, owner: "timekeeping").install!
+      frozen_for_recutover!
+
+      expect { client.reconcile_recutover_checkpoint(checkpoint) }.to raise_error(described_class::Problem, /409 out-of-step.*expects owner monolith/)
+      expect(rollback.calls.last.operation).to eq(:reconcile_recutover_checkpoint)
+    end
+
+    it "refuses a checkpoint the contract cannot carry without sending it" do
+      broken = {
+        "a reservation in no state of the rule" =>
+          checkpoint.with(reservations: [reservation(entry_id: 240, invoice_id: 602, company_id: 2).with(state: :pending)]),
+        "an entry without its version" => checkpoint.with(entries: [checkpoint.entries.last.except("version")]),
+        "an audit row without its id" => checkpoint.with(entry_audits: [checkpoint.entry_audits.last.except("id")]),
+        "a receipt without its operation" => checkpoint.with(reservation_operations: [checkpoint.reservation_operations.last.except("operation_id")]),
+        "an idempotency receipt without its key" => checkpoint.with(idempotency_receipts: [checkpoint.idempotency_receipts.last.except("key")])
+      }
+
+      broken.each do |what, carrying|
+        expect { client.reconcile_recutover_checkpoint(carrying) }.to raise_error(described_class::Invalid, /reconcile_recutover_checkpoint/), what
+      end
+      expect(fake.calls).to be_empty
+    end
+
+    it "raises Unavailable on a lost response; the reconcile wrote nothing, so the tool asks again" do
+      loaded!
+      fake.lose_next_response(:reconcile_recutover_checkpoint)
+
+      expect { client.reconcile_recutover_checkpoint(checkpoint) }.to raise_error(described_class::Unavailable, /reconcile_recutover_checkpoint/)
+      expect(fake.held).to eq(carried(checkpoint))
+      expect(client.reconcile_recutover_checkpoint(checkpoint).entries).to eq(6)
+    end
+
+    it "raises ContractViolation on a receipt outside the contract" do
+      stub_request(:post, "#{TimekeepingContracts::FakeHandoff::URL}/internal/v1/handoff/recutover/checkpoint/reconcile").to_return(
+        status: 200, headers: { "Content-Type" => "application/json" }, body: JSON.generate({ "entries" => 6, "reservations" => 4 })
+      )
+
+      expect { client.reconcile_recutover_checkpoint(checkpoint) }.to raise_error(described_class::ContractViolation)
     end
   end
 

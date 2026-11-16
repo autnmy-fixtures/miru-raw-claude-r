@@ -318,7 +318,7 @@ RSpec.describe TimekeepingContracts::FakeHandoff do
     end
   end
 
-  describe "the re-cutover's checkpoint, loaded into Timekeeping" do
+  describe "the re-cutover's checkpoint, loaded into Timekeeping and reconciled" do
     # The prepared application owns the entries after a rollback at
     # generation 2; Timekeeping still holds the entries it held then.
     subject!(:fake) { described_class.new(generation: 2, owner: "monolith").install!.hold!(entries:, reservations:) }
@@ -349,6 +349,8 @@ RSpec.describe TimekeepingContracts::FakeHandoff do
     end
 
     def load(body = recutover) = request(:load_recutover_checkpoint, body:)
+
+    def reconcile(body = recutover) = request(:reconcile_recutover_checkpoint, body:)
 
     def frozen_for_recutover!
       step(:close, 2)
@@ -461,6 +463,94 @@ RSpec.describe TimekeepingContracts::FakeHandoff do
 
       expect(fake.violations.size).to eq(5)
       expect(fake.held.slice("entries", "reservations")).to eq("entries" => entries, "reservations" => reservations)
+    end
+
+    it "reconciles what it loaded, in any order, answering the load's receipt and writing nothing" do
+      frozen_for_recutover!
+      loaded = load
+
+      reconciled = reconcile(recutover.merge(described_class::HELD.index_with { |part| recutover[part].reverse }))
+
+      expect([reconciled.status, reconciled.body]).to eq([200, loaded.body])
+      TimekeepingContracts.validate!(:handoff_api, "#/$defs/recutover_receipt", reconciled.body)
+      expect(fake.held).to eq(recutover.except("generation"))
+      expect(fake.outbox).to be_empty
+      expect(fake.copy).to eq(described_class::Copy.new(generation: 3, owner: "monolith", state: "frozen"))
+    end
+
+    it "lists, before a load, every part that differs from what it still holds from before the rollback" do
+      frozen_for_recutover!
+
+      refused = reconcile
+
+      expect([refused.status, refused.body["type"], refused.body["retryable"]]).to eq([409, type("checkpoint-differs"), false])
+      expect(refused.body["lists"]).to eq(
+        "entry_missing" => [240], "entry_differs" => [101], "entry_audit_missing" => [15],
+        "reservation_operation_missing" => ["602/b5e2c1d0-4f3a-4b2c-8d1e-0f9a8b7c6d5e"], "idempotency_receipt_missing" => ["2/web-2"],
+        "reservations_differ" => [101, 240]
+      )
+      expect(fake.held.slice("entries", "reservations")).to eq("entries" => entries, "reservations" => reservations)
+    end
+
+    it "lists each row missing, unexpected or differing, by RecutoverReconcile's names, and changes nothing" do
+      frozen_for_recutover!
+      load
+      other_receipt = operation_receipt.merge("invoice_id" => 603, "operation_id" => "0d4c3b2a-1f0e-4d9c-8b7a-6f5e4d3c2b1a", "state" => "aborted")
+      fake.hold!(reservation_operations: [operation_receipt, other_receipt])
+
+      refused = reconcile(recutover.merge(
+        "entries" => [entries[0].merge("duration" => 479.9999900000001), *recutover["entries"].drop(1)],
+        "reservations" => [reservations[1].merge("edit_lock" => true), recutover["reservations"].last],
+        "entry_audits" => [audit, audit.merge("id" => 16)],
+        "idempotency_receipts" => [idempotency_receipt.merge("status" => 200)]
+      ))
+
+      expect([refused.status, refused.body["type"]]).to eq([409, type("checkpoint-differs")])
+      expect(refused.body["lists"]).to eq(
+        "entry_differs" => [102], "entry_audit_missing" => [16], "reservation_operation_unexpected" => ["603/0d4c3b2a-1f0e-4d9c-8b7a-6f5e4d3c2b1a"],
+        "idempotency_receipt_differs" => ["2/web-2"], "reservations_differ" => [102]
+      )
+      expect(fake.held.except("reservation_operations")).to eq(recutover.except("generation", "reservation_operations"))
+    end
+
+    it "refuses the reconcile anywhere but frozen under monolith at the checkpoint's generation" do
+      [[-> { nil }, 3], [-> { nil }, 2], [-> { step(:close, 2) }, 3], [-> { step(:freeze, 3) }, 2], [-> { nil }, 4]].each do |reach, carried|
+        reach.call
+        refused = reconcile(recutover.merge("generation" => carried))
+
+        expect([refused.status, refused.body["type"]]).to eq([409, type("out-of-step")]), "carried #{carried} at #{fake.copy.to_h}"
+      end
+      load
+      step(:flip, 3)
+
+      expect(reconcile.body["type"]).to eq(type("out-of-step"))
+    end
+
+    it "refuses the reconcile under legacy and under timekeeping, naming the owner it expects" do
+      { "legacy" => 0, "timekeeping" => 2 }.each do |owner, generation|
+        other = described_class.new(generation:, owner:).install!
+        step(:close, generation)
+        step(:freeze, generation + 1)
+
+        refused = reconcile(recutover.merge("generation" => generation + 1))
+
+        expect([refused.status, refused.body["type"]]).to eq([409, type("out-of-step")]), owner
+        expect(refused.body["detail"]).to include("expects owner monolith, found owner #{owner}")
+        expect(other.violations).to be_empty
+      end
+    end
+
+    it "records a reconcile body outside the request contract", :violates do
+      frozen_for_recutover!
+      load
+
+      [recutover.except("entry_audits"), recutover.merge("entries" => [entries.first.except("id")])].each do |body|
+        expect(reconcile(body).status).to eq(400)
+      end
+      expect(request(:reconcile_recutover_checkpoint, body: recutover, generation: 2).status).to eq(400)
+
+      expect(fake.violations.size).to eq(3)
+      expect(fake.held).to eq(recutover.except("generation"))
     end
   end
 

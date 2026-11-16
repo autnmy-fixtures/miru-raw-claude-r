@@ -16,6 +16,8 @@
 #   #load_recutover_checkpoint
 #                          the re-cutover's steps 4 and 5 in Timekeeping,
 #                          the incoming owner again (§10.2 step 6)
+#   #reconcile_recutover_checkpoint
+#                          the re-cutover's step 6 in Timekeeping
 #
 # Every call carries the handoff tool's service token (Timekeeping::
 # HandoffToken), never a user token, and every POST the generation it expects
@@ -54,7 +56,7 @@ class Timekeeping::HandoffClient < Timekeeping::InternalApi
   Receipt = Data.define(:entries, :reservations)
 
   # How many rows of each part the re-cutover's checkpoint carried and
-  # Timekeeping loaded (recutover_receipt).
+  # Timekeeping loaded, or reconciled (recutover_receipt).
   RecutoverReceipt = Data.define(:entries, :reservations, :entry_audits, :reservation_operations, :idempotency_receipts)
 
   # The parts a re-cutover's checkpoint carries besides the first cutover's
@@ -145,8 +147,20 @@ class Timekeeping::HandoffClient < Timekeeping::InternalApi
   # retry changes that, so the tool aborts. The load writes no outbox
   # snapshot, so no request id names the handoff in one.
   def load_recutover_checkpoint(checkpoint)
-    body = checkpoint_body(checkpoint).merge(RECUTOVER_PARTS.to_h { |part| [part.to_s, checkpoint.public_send(part)] })
-    RecutoverReceipt.new(**request(:load_recutover_checkpoint, body, generation: checkpoint.generation).symbolize_keys)
+    recutover_receipt_of(request(:load_recutover_checkpoint, recutover_body(checkpoint), generation: checkpoint.generation))
+  end
+
+  # Carries the same re-cutover checkpoint to Timekeeping a second time, in
+  # the load's request, for it to compare what it now holds with every part
+  # (RecutoverReconcile there), and answers how many rows of each part it
+  # found exactly as carried. Writes nothing in Timekeeping, so the tool may
+  # ask as often as it needs, after Unavailable too. Timekeeping refuses it
+  # out-of-step anywhere but frozen under monolith at the checkpoint's
+  # generation. A difference raises Problem checkpoint-differs, whose `lists`
+  # gives each row missing, unexpected or differing, by part; no retry
+  # changes that, so the tool aborts.
+  def reconcile_recutover_checkpoint(checkpoint)
+    recutover_receipt_of(request(:reconcile_recutover_checkpoint, recutover_body(checkpoint), generation: checkpoint.generation))
   end
 
   private
@@ -201,6 +215,12 @@ class Timekeeping::HandoffClient < Timekeeping::InternalApi
       }
     end
 
+    # The re-cutover's checkpoint, every part as taken (recutover_checkpoint):
+    # the load and the reconcile carry the same body.
+    def recutover_body(checkpoint)
+      checkpoint_body(checkpoint).merge(RECUTOVER_PARTS.to_h { |part| [part.to_s, checkpoint.public_send(part)] })
+    end
+
     def status_of(body)
       Status.new(
         copy: Copy.new(**body.fetch("ownership").symbolize_keys),
@@ -209,6 +229,8 @@ class Timekeeping::HandoffClient < Timekeeping::InternalApi
     end
 
     def receipt_of(body) = Receipt.new(**body.symbolize_keys)
+
+    def recutover_receipt_of(body) = RecutoverReceipt.new(**body.symbolize_keys)
 
     def taken_checkpoint_of(body)
       TakenCheckpoint.new(
