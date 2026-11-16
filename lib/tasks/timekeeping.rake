@@ -115,6 +115,29 @@
 # waits on a worker (60 by default). bin/timekeeping-demo user-delete-refused
 # stops and starts the relay around them.
 #
+# The aggregate-line proof (§12.4, F3, Timekeeping::AggregateLineCheck),
+# while Timekeeping owns the entries, in three steps around a stopped
+# timekeeping-web; RUN names the writes of one run, the same for all three:
+#
+#   bin/rails timekeeping:aggregate_line:held      a draft's grouped line
+#                                                  removed keeps the entry
+#                                                  its direct line references
+#                                                  and releases the other; a
+#                                                  refused save changes
+#                                                  nothing
+#   bin/rails timekeeping:aggregate_line:outage    with Timekeeping stopped:
+#                                                  a save and a destroy of the
+#                                                  draft fail, leaving its
+#                                                  lines
+#   bin/rails timekeeping:aggregate_line:restored  with it started again: the
+#                                                  reservations held, and the
+#                                                  destroy releases them all
+#
+# Each exits 1 at the first check that fails. They sign in as the journey
+# does (MIRU_URL, MIRU_SEED_PASSWORD), and CHECK_WAIT sets the seconds a check
+# waits on a worker (60 by default). bin/timekeeping-demo aggregate-line
+# stops and starts timekeeping-web around the outage step.
+#
 # What the existing application measures of its Timekeeping machinery
 # (§11.3, Timekeeping::Signals), read once, for an operator or a script:
 #
@@ -404,6 +427,43 @@ namespace :timekeeping do
     desc "With the owner's relay started again: the refused user's entry is projected (docs/architecture/timekeeping-soa.md 12.4; RUN)"
     task resumed: :environment do
       TimekeepingUserDeleteRefusedTask.run(:resumed)
+    end
+  end
+end
+
+module TimekeepingAggregateLineTask
+  def self.check
+    Timekeeping::AggregateLineCheck.new(
+      client: Timekeeping::PublicApi::Client.new(base_url: ENV.fetch("MIRU_URL", "http://127.0.0.1:3000")),
+      password: ENV.fetch("MIRU_SEED_PASSWORD") { abort "MIRU_SEED_PASSWORD is the seeded users' password; the check signs in with it" },
+      run: ENV.fetch("RUN") { abort "RUN names the writes of one run; give every step the same one" },
+      logger: TimekeepingFirstCutoverTask.logger,
+      options: Timekeeping::AggregateLineCheck::Options.new(wait: Integer(ENV.fetch("CHECK_WAIT", Timekeeping::PublicApi::DEFAULT_WAIT)))
+    )
+  end
+
+  def self.run(step)
+    check.public_send(step)
+  rescue Timekeeping::AggregateLineCheck::Failed => error
+    abort "Timekeeping aggregate-line proof failed (#{step}): #{error.message}"
+  end
+end
+
+namespace :timekeeping do
+  namespace :aggregate_line do
+    desc "A draft's grouped line removed keeps the entry another line references and releases the rest (docs/architecture/timekeeping-soa.md 12.4, F3; RUN)"
+    task held: :environment do
+      TimekeepingAggregateLineTask.run(:held)
+    end
+
+    desc "With Timekeeping stopped: a save and a destroy of the draft fail and keep its reservations (docs/architecture/timekeeping-soa.md 12.4, F3; RUN)"
+    task outage: :environment do
+      TimekeepingAggregateLineTask.run(:outage)
+    end
+
+    desc "With Timekeeping started again: the reservations held, and destroying the draft releases its whole set (docs/architecture/timekeeping-soa.md 12.4, F3; RUN)"
+    task restored: :environment do
+      TimekeepingAggregateLineTask.run(:restored)
     end
   end
 end

@@ -320,7 +320,9 @@ RSpec.describe "Timekeeping local demo runtime" do
     # FAKE_PAUSED_STATUS how timekeeping:relay_paused:paused exits.
     # FAKE_RELAY is the service timekeeping:user_delete_refused:relay names,
     # after a line of boot noise, and FAKE_REFUSED_STATUS how
-    # timekeeping:user_delete_refused:paused exits.
+    # timekeeping:user_delete_refused:paused exits. `up` starts a stopped
+    # service again; FAKE_HELD_STATUS and FAKE_OUTAGE_STATUS are how
+    # timekeeping:aggregate_line:held and :outage exit.
     context "with running applications" do
       let(:record_dir) { dir.join("deploys") }
       let(:fakes) { {} }
@@ -339,6 +341,7 @@ RSpec.describe "Timekeeping local demo runtime" do
               stop) [ "${!#}" = "${FAKE_STOP_IGNORED:-}" ] || touch "${state}/stopped-${!#}" ;;
               start) rm -f "${state}/stopped-${!#}" ;;
               up)
+                rm -f "${state}/stopped-${!#}"
                 if [[ " $* " == *" --force-recreate "* ]]; then
                   for service in "${!#}" ${FAKE_ALSO_RECREATE:-}; do echo $(( $(generation "${service}") + 1 )) > "${state}/${service}"; done
                 fi ;;
@@ -358,6 +361,14 @@ RSpec.describe "Timekeeping local demo runtime" do
                       echo "user delete: refused, ${service} stopped: $([ -e "${state}/stopped-${service}" ] && echo yes || echo no)"
                     done
                     exit "${FAKE_REFUSED_STATUS:-0}" ;;
+                  *timekeeping:aggregate_line:held*)
+                    echo "aggregate line: held, timekeeping-web stopped: $([ -e "${state}/stopped-timekeeping-web" ] && echo yes || echo no)"
+                    exit "${FAKE_HELD_STATUS:-0}" ;;
+                  *timekeeping:aggregate_line:outage*)
+                    echo "aggregate line: failed, timekeeping-web stopped: $([ -e "${state}/stopped-timekeeping-web" ] && echo yes || echo no)"
+                    exit "${FAKE_OUTAGE_STATUS:-0}" ;;
+                  *timekeeping:aggregate_line:restored*)
+                    echo "aggregate line: released, timekeeping-web stopped: $([ -e "${state}/stopped-timekeeping-web" ] && echo yes || echo no)" ;;
                   *timekeeping:user_delete_refused:resumed*)
                     for service in timekeeping-relay miru-jobs; do
                       echo "user delete: projected, ${service} stopped: $([ -e "${state}/stopped-${service}" ] && echo yes || echo no)"
@@ -609,6 +620,69 @@ RSpec.describe "Timekeeping local demo runtime" do
             expect(status).not_to be_success
             expect(err).to include("timekeeping-relay still runs after it was stopped")
             expect(steps.map(&:split).map(&:first)).to eq(%w[relay stop start])
+          end
+        end
+      end
+
+      describe "the aggregate-line proof (§12.4, F3)" do
+        def steps
+          docker_calls.filter_map do |call|
+            case call
+            when / stop timekeeping-web\z/ then "stop web"
+            when / up --detach --wait --no-deps --no-recreate timekeeping-web\z/ then "start web"
+            when /exec -T --env RUN=(\S+) miru-web bin\/rails timekeeping:aggregate_line:(\w+)\z/ then "#{Regexp.last_match(2)} #{Regexp.last_match(1)}"
+            end
+          end
+        end
+
+        it "runs the held step, stops timekeeping-web, runs the outage step, starts it again, then runs the restored step under one run" do
+          out, err, status = run("aggregate-line")
+          expect(status).to be_success, err
+
+          run_name = steps.first.split.last
+          expect(run_name).to match(/\A\d{8}T\d{6}Z-\h{4}\z/)
+          expect(steps).to eq(["held #{run_name}", "stop web", "outage #{run_name}", "start web", "restored #{run_name}"])
+          expect(out).to include(
+            "aggregate line: held, timekeeping-web stopped: no",
+            "aggregate line: failed, timekeeping-web stopped: yes",
+            "timekeeping-web container=timekeeping-web-container-1",
+            "aggregate line: released, timekeeping-web stopped: no",
+            "destroying the draft released its whole set"
+          )
+          expect(docker_calls.join("\n")).not_to match(/ (stop|start|up|build) .*(miru-|timekeeping-relay)/)
+        end
+
+        context "when the held step fails" do
+          let(:fakes) { { "FAKE_HELD_STATUS" => "1" } }
+
+          it "stops nothing and runs no other step" do
+            _out, _err, status = run("aggregate-line")
+
+            expect(status).not_to be_success
+            expect(steps.map(&:split).map(&:first)).to eq(%w[held])
+          end
+        end
+
+        context "when the outage step fails" do
+          let(:fakes) { { "FAKE_OUTAGE_STATUS" => "1" } }
+
+          it "starts timekeeping-web again and does not run the restored step" do
+            _out, _err, status = run("aggregate-line")
+
+            expect(status).not_to be_success
+            expect(steps.map(&:split).map(&:first)).to eq(%w[held stop outage start])
+          end
+        end
+
+        context "when timekeeping-web keeps running after it is stopped" do
+          let(:fakes) { { "FAKE_STOP_IGNORED" => "timekeeping-web" } }
+
+          it "fails before the outage step, since nothing would fail" do
+            _out, err, status = run("aggregate-line")
+
+            expect(status).not_to be_success
+            expect(err).to include("timekeeping-web still runs after it was stopped")
+            expect(steps.map(&:split).map(&:first)).to eq(%w[held stop start])
           end
         end
       end

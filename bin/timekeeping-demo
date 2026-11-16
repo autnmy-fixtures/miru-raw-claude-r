@@ -39,6 +39,15 @@
 #                                    unprojected entry refused, start the relay
 #                                    again, and see the entry projected; run it
 #                                    after a cutover and after a rollback
+#   bin/timekeeping-demo aggregate-line
+#                                    the aggregate-line proof (§12.4, F3): a
+#                                    draft's grouped line removed keeps the
+#                                    entry its direct line references and
+#                                    releases the other; then, with
+#                                    timekeeping-web stopped, a save and a
+#                                    destroy of the draft fail and keep every
+#                                    reservation; with it started again, the
+#                                    destroy releases the draft's whole set
 #   bin/timekeeping-demo down        stop everything; the databases are kept
 #   bin/timekeeping-demo compose …   any other docker compose command
 #
@@ -330,6 +339,42 @@ cmd_user_delete_refused() {
   echo "== user delete refused: the super-admin delete of a user with an unprojected first entry was refused, and the entry was projected once ${relay} resumed"
 }
 
+# Starts Timekeeping's web process again and waits until it is healthy, then
+# shows it runs. Its container is the one that was stopped: nothing is
+# rebuilt or recreated.
+resume_timekeeping_web() {
+  echo "== starting timekeeping-web again"
+  compose up --detach --wait --no-deps --no-recreate timekeeping-web
+  processes timekeeping-web
+}
+
+# The aggregate-line proof of §12.4 (F3), while Timekeeping owns the entries:
+# a draft holding a direct line for X and a grouped line for X and Y keeps X
+# when the grouped line goes, and releases Y, then X with the direct line
+# (bin/rails timekeeping:aggregate_line:held). With timekeeping-web stopped, a
+# save and a destroy of the draft fail and leave it as it was
+# (timekeeping:aggregate_line:outage); with it started again, every
+# reservation held, and destroying the draft releases its whole set
+# (timekeeping:aggregate_line:restored). All three run in miru-web under one
+# run name. timekeeping-web is started again however the outage step ends.
+cmd_aggregate_line() {
+  local run
+  require_env_file
+  processes "${EXISTING_SERVICES[@]}" "${TIMEKEEPING_SERVICES[@]}" > /dev/null
+  run="$(date -u +%Y%m%dT%H%M%SZ)-$(secret 2)"
+  echo "== aggregate line: run ${run}"
+  compose exec -T --env "RUN=${run}" miru-web bin/rails timekeeping:aggregate_line:held
+  echo "== stopping timekeeping-web"
+  trap resume_timekeeping_web EXIT
+  compose stop timekeeping-web
+  [ -z "$(process_state timekeeping-web)" ] || die "timekeeping-web still runs after it was stopped"
+  compose exec -T --env "RUN=${run}" miru-web bin/rails timekeeping:aggregate_line:outage
+  trap - EXIT
+  resume_timekeeping_web
+  compose exec -T --env "RUN=${run}" miru-web bin/rails timekeeping:aggregate_line:restored
+  echo "== aggregate line: removing a grouped line released only what no other line references, a failed save and destroy kept every reservation, and destroying the draft released its whole set"
+}
+
 cmd_handoff() {
   case "${1:-}" in
     first_cutover|first_cutover:abort|rollback|rollback:abort|recutover|recutover:abort) ;;
@@ -358,6 +403,7 @@ case "${1:-}" in
   independent-deploys) cmd_independent_deploys ;;
   relay-paused) cmd_relay_paused ;;
   user-delete-refused) cmd_user_delete_refused ;;
+  aggregate-line) cmd_aggregate_line ;;
   down) compose down ;;
   compose) shift; compose "$@" ;;
   ""|help|-h|--help) usage ;;
