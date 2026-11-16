@@ -137,6 +137,17 @@
 #                                    with the relay started it finishes with
 #                                    money, entries and reservations kept;
 #                                    under any owner with admission open
+#   bin/timekeeping-demo ownership   both copies of the ownership record, and
+#                                    the owner, generation and state they
+#                                    agree on
+#   bin/timekeeping-demo reset       delete both databases and the handoff
+#                                    journals, and start a freshly seeded demo
+#   bin/timekeeping-demo acceptance --reset
+#                                    §13 on one local run: three passes, each
+#                                    from a reset, running every proof of §13
+#                                    and §12.4 under the owner it needs, with
+#                                    a summary of each item; recorded under
+#                                    tmp/timekeeping-demo/acceptance
 #   bin/timekeeping-demo down        stop everything; the databases are kept
 #   bin/timekeeping-demo compose …   any other docker compose command
 #
@@ -934,6 +945,190 @@ cmd_alternating_writers() {
   compose exec miru-web bin/rails timekeeping:alternating_writers
 }
 
+# Both copies of the ownership record, and last the owner, generation and
+# state they agree on (bin/rails timekeeping:ownership).
+cmd_ownership() {
+  compose exec -T miru-web bin/rails timekeeping:ownership
+}
+
+# The fresh demo reset of §10.1: both databases and the handoff journals are
+# deleted, and the next start reseeds the two businesses in the initial
+# legacy state.
+cmd_reset() {
+  echo "== reset: deleting both databases and the handoff journals, then starting a freshly seeded demo"
+  compose down --volumes
+  cmd_up
+}
+
+# The acceptance run of §13: every item green on one local run. Each line is
+# "<owner generation state the step starts under>|<command>|<what it proves>".
+# A reset needs no owner. The journey and the alternating-writers proof each
+# start from a fresh demo and run all three handoffs themselves, so each has
+# a pass of its own. The first pass visits every owner through the handoffs
+# of the billing-handoff and interrupted-handoff proofs, and runs each
+# owner's proofs under it. It never hands over a fourth time: a second
+# rollback needs a reset first (Timekeeping::Rollback).
+ACCEPTANCE_STEPS=(
+  "|reset|"
+  "legacy 0 open|tenant-isolation|§13.7"
+  "legacy 0 open|billing-handoff|§12.4 §13.2 §10.4"
+  "timekeeping 1 open|tenant-isolation|§13.7"
+  "timekeeping 1 open|independent-deploys|§13.4"
+  "timekeeping 1 open|relay-paused|§13.5 §12.4"
+  "timekeeping 1 open|aggregate-line|§12.4 §13.6"
+  "timekeeping 1 open|save-failures|§12.4 §13.6"
+  "timekeeping 1 open|reservation-failures|§12.4 §13.6"
+  "timekeeping 1 open|stale-generation|§12.4 §13.6"
+  "timekeeping 1 open|consumer-down|§12.4 §13.6"
+  "timekeeping 1 open|redelivery|§13.6"
+  "timekeeping 1 open|hard-delete|§12.4 §13.6"
+  "timekeeping 1 open|user-delete-refused|§12.4"
+  "timekeeping 1 open|interrupted-handoff|§13.6 §13.2 §13.3 §10.4"
+  "monolith 2 open|tenant-isolation|§13.7"
+  "monolith 2 open|hard-delete|§12.4 §13.6"
+  "monolith 2 open|user-delete-refused|§12.4"
+  "monolith 2 open|interrupted-handoff|§13.6 §13.2 §13.3 §10.4"
+  "timekeeping 3 open|tenant-isolation|§13.7"
+  "timekeeping 3 open|contract-check|§13.4"
+  "|reset|"
+  "legacy 0 open|journey|§13.1 §13.2 §13.3 §10.4"
+  "timekeeping 3 open|contract-check|§13.4"
+  "|reset|"
+  "legacy 0 open|alternating-writers|§12.4 §13.2 §10.4"
+  "timekeeping 3 open|tenant-isolation|§13.7"
+)
+# Where the run's last step must leave the demo.
+ACCEPTANCE_END="timekeeping 3 open"
+
+# What each item the run reports on is, as §13, §12.4 and §10.4 name it.
+ACCEPTANCE_ITEMS=(
+  "§13.1|the journey, end to end, on both tenants"
+  "§13.2|financial parity by snapshot, around every handoff"
+  "§13.3|rollback and re-cutover keep every write, reservation owner and receipt"
+  "§13.4|independent deployment, the contract check green after each deploy"
+  "§13.5|relay paused"
+  "§13.6|failure cases"
+  "§13.7|tenant isolation, ownership guards, the single-writer guard"
+  "§12.4|integration: every proof the section lists"
+  "§10.4|reconciliation and money checks across cutover, rollback and re-cutover"
+)
+
+# The command each acceptance step runs: this script, each step in its own
+# process, so a proof's own exit and cleanup end only that proof.
+# TIMEKEEPING_DEMO_SELF names a stand-in for the specs.
+SELF="${TIMEKEEPING_DEMO_SELF:-${BASH_SOURCE[0]}}"
+
+# The owner, generation and state both copies agree on, as the last line of
+# `ownership`; nothing when they cannot be read or differ, which
+# `ownership` says on stderr.
+acceptance_owner() {
+  local lines
+  lines="$("${SELF}" ownership)" || return 0
+  printf '%s\n' "${lines}" | sed '$!d'
+}
+
+# Runs the steps in order, each recorded with its result and time, until the
+# first that fails: every later step depends on the state the earlier ones
+# leave. Fills RESULTS, one per step: pass, FAIL or "not run".
+acceptance_steps() {
+  local index expected command proves owner started status
+  for index in "${!ACCEPTANCE_STEPS[@]}"; do
+    RESULTS[index]="not run"
+  done
+  for index in "${!ACCEPTANCE_STEPS[@]}"; do
+    IFS='|' read -r expected command proves <<< "${ACCEPTANCE_STEPS[index]}"
+    echo
+    echo "== acceptance step $((index + 1))/${#ACCEPTANCE_STEPS[@]}: ${command}${proves:+ (${proves})} ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+    if [ -n "${expected}" ]; then
+      owner="$(acceptance_owner)"
+      echo "ownership: ${owner:-unreadable}"
+      if [ "${owner}" != "${expected}" ]; then
+        echo "acceptance: ${command} starts under ${expected}, but the demo stands under ${owner:-an ownership record that cannot be read}" >&2
+        RESULTS[index]=FAIL
+        return 1
+      fi
+    fi
+    started="${SECONDS}"
+    status=0
+    "${SELF}" "${command}" || status=$?
+    if [ "${status}" -ne 0 ]; then
+      echo "acceptance: ${command} exited ${status}" >&2
+      RESULTS[index]=FAIL
+      return 1
+    fi
+    RESULTS[index]="pass $((SECONDS - started)) s"
+  done
+  owner="$(acceptance_owner)"
+  echo "ownership at the end: ${owner:-unreadable}"
+  if [ "${owner}" != "${ACCEPTANCE_END}" ]; then
+    echo "acceptance: the run ends under ${owner:-an ownership record that cannot be read}, not ${ACCEPTANCE_END}" >&2
+    return 1
+  fi
+}
+
+# The run's summary: every step with its result, then each item green only
+# when every step that proves it passed.
+acceptance_summary() {
+  local index expected command proves item name steps green
+  echo
+  echo "== acceptance summary"
+  for index in "${!ACCEPTANCE_STEPS[@]}"; do
+    IFS='|' read -r expected command proves <<< "${ACCEPTANCE_STEPS[index]}"
+    printf '%2d  %-20s  %-22s  %s\n' "$((index + 1))" "${expected:--}" "${command}" "${RESULTS[index]}"
+  done
+  echo
+  for item in "${ACCEPTANCE_ITEMS[@]}"; do
+    IFS='|' read -r name item <<< "${item}"
+    steps=""
+    green=1
+    for index in "${!ACCEPTANCE_STEPS[@]}"; do
+      IFS='|' read -r expected command proves <<< "${ACCEPTANCE_STEPS[index]}"
+      case " ${proves} " in
+        *" ${name} "*)
+          steps="${steps:+${steps}, }$((index + 1)) ${command}"
+          [ "${RESULTS[index]%% *}" = pass ] || green=0
+          ;;
+      esac
+    done
+    printf '%-6s %-6s %s: steps %s\n' "${name}" "$([ "${green}" = 1 ] && echo green || echo NOT)" "${item}" "${steps}"
+  done
+}
+
+acceptance() {
+  local status=0
+  local -a RESULTS=()
+  echo "== acceptance run of docs/architecture/timekeeping-soa.md §13 on the local demo, revision $(revision) ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+  # Every failure in the steps is handled there and ends them with 1.
+  acceptance_steps || status=$?
+  acceptance_summary
+  if [ "${status}" -ne 0 ]; then
+    echo "== acceptance: FAILED; the steps after the one that failed did not run"
+    return 1
+  fi
+  echo "== acceptance: every item of §13 green on one local run, from three fresh demos"
+}
+
+# §13 on one local run (§11.2): three passes, each from a fresh demo reset,
+# that run every proof of §13 and §12.4 in the order of ACCEPTANCE_STEPS,
+# each under the owner it needs, checked on both copies before it starts.
+# It deletes the demo's databases, so it runs only when asked with --reset.
+# The whole run is written to tmp/timekeeping-demo/acceptance/<UTC time>.log
+# (TIMEKEEPING_DEMO_ACCEPTANCE_DIR to keep it elsewhere).
+cmd_acceptance() {
+  local dir record status
+  [ "${1:-}" = --reset ] || die "acceptance resets the demo three times, deleting both databases and the handoff journals; run it as: bin/timekeeping-demo acceptance --reset"
+  require_env_file
+  dir="${TIMEKEEPING_DEMO_ACCEPTANCE_DIR:-$(dirname "${ENV_FILE}")/acceptance}"
+  mkdir -p "${dir}"
+  record="${dir}/$(date -u +%Y%m%dT%H%M%SZ).log"
+  set +e
+  acceptance 2>&1 | tee "${record}"
+  status=$?
+  set -e
+  echo "Recorded in ${record}."
+  return "${status}"
+}
+
 case "${1:-}" in
   init) cmd_init ;;
   up) cmd_up ;;
@@ -956,6 +1151,9 @@ case "${1:-}" in
   redelivery) cmd_redelivery ;;
   tenant-isolation) cmd_tenant_isolation ;;
   interrupted-handoff) cmd_interrupted_handoff ;;
+  ownership) cmd_ownership ;;
+  reset) cmd_reset ;;
+  acceptance) shift; cmd_acceptance "$@" ;;
   down) compose down ;;
   compose) shift; compose "$@" ;;
   ""|help|-h|--help) usage ;;
