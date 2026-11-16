@@ -10,6 +10,7 @@
 # | `invoice_operations` pending older than 60 s       | any                    |
 # | Undelivered commit or abort                        | any older than 60 s    |
 # | Stale-generation refusals outside a handoff        | any                    |
+# | Single-writer guard violations (the local demo)    | any                    |
 #
 # Relay lag is the distance between the latest outbox position and the
 # position delivered through, in time: how long the oldest snapshot not yet
@@ -43,9 +44,14 @@
 # which is what the local demo, where Sentry is not enabled, shows. The
 # polled signals are reported again on every run while they hold.
 #
+# A single-writer guard violation, a write to timesheet_entries by anything
+# but the projection consumer once entries have left the legacy owner, is
+# reported as it happens too, by Timekeeping::SingleWriterWatch, as
+# :single_writer through .report. In CI the same guard runs as a spec
+# (spec/requests/timekeeping/single_writer_guard_spec.rb).
+#
 # Reconciliation differences already abort the handoff that finds them, and
-# the single-writer guard runs as a spec (spec/requests/timekeeping/
-# single_writer_guard_spec.rb); neither is a signal read here.
+# are not a signal read here.
 class Timekeeping::Signals
   RELAY_LAG_LIMIT = 60.seconds
   RELAY_LAG_WINDOW = 5.minutes
