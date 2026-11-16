@@ -29,6 +29,11 @@ module TimekeepingContracts
   #   writes no outbox snapshot (freeze drained the prepared application's
   #   outbox into the projection), and run again holds the same and answers
   #   the same;
+  # - the re-cutover's reconcile (reconcile_recutover_checkpoint) under the
+  #   same guard, against what the fake holds: each of the five parts compared
+  #   both ways, a row missing, unexpected or different, or another set of
+  #   reservations for an entry, is checkpoint-differs with RecutoverReconcile's
+  #   list names, and nothing changes;
   # - reconcile against the checkpoint it loaded: an entry missing,
   #   unexpected or different, or another set of reservations for an entry,
   #   is checkpoint-differs with its lists, and nothing changes;
@@ -66,7 +71,7 @@ module TimekeepingContracts
     HANDLERS = {
       read_handoff: :read_handoff, run_step: :run_step, take_checkpoint: :take_checkpoint,
       load_checkpoint: :load_checkpoint, reconcile_checkpoint: :reconcile_checkpoint,
-      load_recutover_checkpoint: :load_recutover_checkpoint
+      load_recutover_checkpoint: :load_recutover_checkpoint, reconcile_recutover_checkpoint: :reconcile_recutover_checkpoint
     }.freeze
 
     # The parts of a taken checkpoint (taken_checkpoint) other than its
@@ -90,6 +95,17 @@ module TimekeepingContracts
         "not_a_contract_idempotency_receipt", ->(row) { TimekeepingContracts.valid?(CONTRACT, "#/$defs/idempotency_receipt", row) },
         ->(row) { row.values_at("company_id", "key").join("/") }
       ]
+    }.freeze
+
+    # The re-cutover reconcile's parts compared row by row, by the name
+    # RecutoverReconcile lists each under (<name>_missing, <name>_unexpected,
+    # <name>_differs), with what identifies a row. Reservations are compared
+    # as each entry's set instead (reservations_differ).
+    RECUTOVER_RECONCILED = {
+      "entry" => ["entries", ->(row) { row.fetch("id") }],
+      "entry_audit" => ["entry_audits", ->(row) { row.fetch("id") }],
+      "reservation_operation" => ["reservation_operations", ->(row) { row.values_at("invoice_id", "operation_id").join("/") }],
+      "idempotency_receipt" => ["idempotency_receipts", ->(row) { row.values_at("company_id", "key").join("/") }]
     }.freeze
 
     # Timekeeping's copy of the ownership record (§10.1).
@@ -325,6 +341,31 @@ module TimekeepingContracts
         [200, HELD.index_with { |part| input.fetch(part).size }]
       end
 
+      # Compares what the fake holds with the re-cutover's checkpoint, the
+      # load's request carried again, under the load's guard, and writes
+      # nothing: any difference is checkpoint-differs, listed as
+      # RecutoverReconcile lists it.
+      def reconcile_recutover_checkpoint(_params, input)
+        ensure_frozen!(:reconcile, input.fetch("generation"), owner: "monolith")
+        lists = recutover_differences(input, @held)
+        halt(*problem(409, "checkpoint-differs", detail: "the checkpoint differs from what Timekeeping holds", lists:)) if lists.any?
+
+        [200, HELD.index_with { |part| input.fetch(part).size }]
+      end
+
+      def recutover_differences(carried, held)
+        lists = RECUTOVER_RECONCILED.each_with_object({}) do |(name, (part, identify)), found|
+          carried_rows, held_rows = [carried, held].map { |side| side.fetch(part).index_by(&identify) }
+          found["#{name}_missing"] = carried_rows.keys - held_rows.keys
+          found["#{name}_unexpected"] = held_rows.keys - carried_rows.keys
+          found["#{name}_differs"] = carried_rows.filter_map { |key, row| key if held_rows.key?(key) && held_rows[key] != row }
+        end
+        carried_holds, held_holds = [carried, held].map { |side| side.fetch("reservations").group_by { |row| row.fetch("entry_id") }.transform_values(&:to_set) }
+        lists["reservations_differ"] = (carried_holds.keys | held_holds.keys).reject { |id| carried_holds[id] == held_holds[id] }
+
+        lists.transform_values { |found| found.uniq.sort }.reject { |_, found| found.empty? }
+      end
+
       # Refuses a re-cutover checkpoint holding a row a take could not
       # answer, listing each, as RecutoverLoad lists them, and loads nothing.
       def ensure_holdable!(input)
@@ -339,7 +380,7 @@ module TimekeepingContracts
       # Where the provider's Ownership.lock_frozen! lets a checkpoint step run:
       # frozen at the handoff's generation, under the outgoing owner, legacy
       # for the first cutover's load and reconcile, timekeeping for the
-      # rollback's take, monolith for the re-cutover's load.
+      # rollback's take, monolith for the re-cutover's load and reconcile.
       def ensure_frozen!(name, generation, owner:)
         TimekeepingReservations::Handoff.ensure_in_step!(name, %w[frozen], @copy, generation)
         return if @copy.owner == owner
