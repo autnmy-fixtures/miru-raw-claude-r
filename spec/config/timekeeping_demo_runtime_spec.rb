@@ -1628,5 +1628,169 @@ RSpec.describe "Timekeeping local demo runtime" do
         expect(docker_calls.grep(/ build /)).to be_empty
       end
     end
+
+    it "reads both copies of the ownership record in the existing application" do
+      run("init")
+
+      _out, err, status = run("ownership")
+      expect(status).to be_success, err
+      expect(docker_calls.last).to eq("#{prefix} exec -T miru-web bin/rails timekeeping:ownership")
+    end
+
+    it "resets the demo: both databases and the journals deleted, then a freshly seeded start" do
+      run("init")
+
+      _out, err, status = run("reset")
+      expect(status).to be_success, err
+      expect(docker_calls.first(3)).to eq([
+        "#{prefix} down --volumes",
+        "#{prefix} build miru-web timekeeping-web",
+        "#{prefix} up --detach --wait miru-web miru-jobs timekeeping-web timekeeping-relay"
+      ])
+    end
+
+    # The acceptance run of §13, against a stand-in for this script
+    # (TIMEKEEPING_DEMO_SELF) that records each command it is asked to run.
+    # `reset` puts the demo in the initial legacy state, a handoff proof hands
+    # over to the next owner, and the journey and the alternating-writers
+    # proof run all three handoffs. `ownership` prints both copies, then the
+    # one they agree on. FAKE_FAIL names the command that exits 1, the
+    # FAKE_FAIL_AT-th time it runs (the first by default); FAKE_STUCK the
+    # handoff proof that leaves the owner as it was; FAKE_OWNERSHIP_STATUS how
+    # `ownership` exits.
+    describe "the acceptance run of §13" do
+      let(:acceptance_dir) { dir.join("acceptance") }
+      let(:calls_log) { dir.join("calls.log") }
+      let(:owner_file) { dir.join("owner") }
+      let(:fakes) { {} }
+
+      before do
+        dir.join("bin/self").write(<<~SH)
+          #!/usr/bin/env bash
+          echo "$*" >> "#{calls_log}"
+          owner="$(cat "#{owner_file}" 2>/dev/null || echo "legacy 0 open")"
+          next_owner() {
+            case "${owner}" in
+              "legacy 0 open") echo "timekeeping 1 open" ;;
+              "timekeeping 1 open") echo "monolith 2 open" ;;
+              "monolith 2 open") echo "timekeeping 3 open" ;;
+              *) echo "${owner}" ;;
+            esac
+          }
+          if [ "$1" = ownership ]; then
+            echo "existing application: ${owner}"
+            echo "Timekeeping: ${owner}"
+            [ "${FAKE_OWNERSHIP_STATUS:-0}" = 0 ] || { echo "the two copies of the ownership record differ" >&2; exit "${FAKE_OWNERSHIP_STATUS}"; }
+            echo "${owner}"
+            exit 0
+          fi
+          echo "ran $1"
+          if [ "$1" = "${FAKE_FAIL:-}" ] && [ "$(grep -cx "$1" "#{calls_log}")" = "${FAKE_FAIL_AT:-1}" ]; then
+            echo "$1 failed" >&2
+            exit 1
+          fi
+          case "$1" in
+            reset) echo "legacy 0 open" > "#{owner_file}" ;;
+            billing-handoff|interrupted-handoff) [ "$1" = "${FAKE_STUCK:-}" ] || next_owner > "#{owner_file}" ;;
+            journey|alternating-writers) echo "timekeeping 3 open" > "#{owner_file}" ;;
+          esac
+        SH
+        dir.join("bin/self").chmod(0o755)
+        run("init")
+      end
+
+      def run(*args)
+        Open3.capture3(
+          { "TIMEKEEPING_DEMO_ENV_FILE" => env_file.to_s, "TIMEKEEPING_DEMO_ACCEPTANCE_DIR" => acceptance_dir.to_s,
+            "TIMEKEEPING_DEMO_SELF" => dir.join("bin/self").to_s, "PATH" => "#{dir.join('bin')}:#{ENV.fetch('PATH')}" }.merge(fakes),
+          script, *args
+        )
+      end
+
+      def calls = calls_log.exist? ? calls_log.readlines(chomp: true) : []
+
+      def commands = calls.reject { |call| call == "ownership" }
+
+      def record = acceptance_dir.glob("*.log").sole.read
+
+      # The proofs of the first pass, from its reset to the next.
+      def first_pass = commands.drop(1).take_while { |command| command != "reset" }
+
+      it "refuses to run without --reset, deleting nothing" do
+        _out, err, status = run("acceptance")
+
+        expect(status).not_to be_success
+        expect(err).to include("run it as: bin/timekeeping-demo acceptance --reset")
+        expect(calls).to be_empty
+        expect(docker_calls).to be_empty
+      end
+
+      it "runs every proof in three passes, each from a reset, and reports every item green" do
+        out, err, status = run("acceptance", "--reset")
+
+        expect(status).to be_success, err
+        expect(commands.each_index.select { |index| commands[index] == "reset" }).to eq([0, 21, 24])
+        expect(commands.drop(21)).to eq(%w[reset journey contract-check reset alternating-writers tenant-isolation])
+        expect(first_pass).to eq(%w[
+          tenant-isolation billing-handoff
+          tenant-isolation independent-deploys relay-paused aggregate-line save-failures reservation-failures
+          stale-generation consumer-down redelivery hard-delete user-delete-refused interrupted-handoff
+          tenant-isolation hard-delete user-delete-refused interrupted-handoff
+          tenant-isolation contract-check
+        ])
+        expect(out).to include("every item of §13 green on one local run", "Recorded in #{acceptance_dir}")
+        %w[§13.1 §13.2 §13.3 §13.4 §13.5 §13.6 §13.7 §12.4 §10.4].each do |item|
+          expect(record).to match(/^#{item} +green /)
+        end
+        expect(record).to include("ran journey", "ownership at the end: timekeeping 3 open")
+      end
+
+      it "runs every command of §13 and §12.4 the script has, and every handoff under its own owner" do
+        run("acceptance", "--reset")
+
+        proofs = %w[
+          journey alternating-writers contract-check independent-deploys relay-paused user-delete-refused
+          aggregate-line billing-handoff save-failures reservation-failures hard-delete stale-generation
+          consumer-down redelivery tenant-isolation interrupted-handoff
+        ]
+        expect(commands.uniq - ["reset"]).to match_array(proofs)
+        expect(record.scan(/^ownership: (.+)$/).flatten.uniq).to eq(["legacy 0 open", "timekeeping 1 open", "monolith 2 open", "timekeeping 3 open"])
+        expect(first_pass.count("tenant-isolation")).to eq(4)
+      end
+
+      it "checks the owner before each step, so a handoff that did not happen stops the run" do
+        fakes["FAKE_STUCK"] = "billing-handoff"
+        out, _err, status = run("acceptance", "--reset")
+
+        expect(status).not_to be_success
+        expect(commands).to eq(%w[reset tenant-isolation billing-handoff])
+        expect(record).to include("tenant-isolation starts under timekeeping 1 open, but the demo stands under legacy 0 open")
+        expect(out).to include("acceptance: FAILED")
+      end
+
+      it "stops at the first proof that fails, and reports each item it would have proved as not green" do
+        fakes.merge!("FAKE_FAIL" => "hard-delete", "FAKE_FAIL_AT" => "2")
+        out, _err, status = run("acceptance", "--reset")
+
+        expect(status).not_to be_success
+        expect(commands.last(2)).to eq(%w[tenant-isolation hard-delete])
+        expect(commands).not_to include("journey")
+        expect(record).to match(/^17 +monolith 2 open +hard-delete +FAIL$/)
+        expect(record).to match(/^18 +monolith 2 open +user-delete-refused +not run$/)
+        expect(record).to match(/^§13\.6 +NOT /)
+        expect(record).to match(/^§13\.1 +NOT /)
+        expect(record).to match(/^§13\.5 +green /)
+        expect(out).to include("acceptance: FAILED", "Recorded in")
+      end
+
+      it "fails when the two copies of the ownership record cannot be read as one" do
+        fakes["FAKE_OWNERSHIP_STATUS"] = "1"
+        _out, _err, status = run("acceptance", "--reset")
+
+        expect(status).not_to be_success
+        expect(commands).to eq(["reset"])
+        expect(record).to include("ownership: unreadable", "the two copies of the ownership record differ")
+      end
+    end
   end
 end

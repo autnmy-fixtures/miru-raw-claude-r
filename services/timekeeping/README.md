@@ -151,6 +151,9 @@ bin/timekeeping-demo consumer-down           # §9.3's projection consumer down:
 bin/timekeeping-demo redelivery              # §13 item 6's duplicate and reordered delivery: snapshots resent out of order and twice, only the newest applied
 bin/timekeeping-demo tenant-isolation        # §13 item 7: neither business reaches the other's entries, the ownership guards hold, no single-writer violation; under any owner
 bin/timekeeping-demo interrupted-handoff     # §13 item 6's interrupted and resumed handoff: killed in its transfer, then stopped there, fenced each time, then resumed to its end; under any owner
+bin/timekeeping-demo ownership               # both copies of the ownership record, and the owner, generation and state they agree on
+bin/timekeeping-demo reset                   # deletes both databases and the journals, and starts a freshly seeded demo
+bin/timekeeping-demo acceptance --reset      # §13 on one local run: every proof above, from three resets, with each item's result; recorded
 bin/timekeeping-demo compose stop timekeeping-relay   # pauses the relay (§12.4); `compose start` resumes it
 bin/timekeeping-demo down        # stops everything; both databases and the handoff journals are kept
 ```
@@ -620,6 +623,22 @@ bin/timekeeping-demo down        # stops everything; both databases and the hand
   while the projection may still name it until the relay delivers the detach. So the
   `timesheet_entries → agents` foreign key is dropped before cutover (`20261116120000`), like the two billing
   keys (§10.2 step 3), and a projected row naming a deleted agent reads as no agent.
+- **Acceptance (§13).** `bin/timekeeping-demo acceptance --reset` runs every proof above on one local run, each in
+  its own process, and records the whole run in `tmp/timekeeping-demo/acceptance/<UTC time>.log`
+  (`TIMEKEEPING_DEMO_ACCEPTANCE_DIR` to keep it elsewhere). It resets the demo three times, deleting both databases and
+  the journals each time, so it refuses to start without `--reset`. The journey and the alternating-writers proof each
+  need a fresh demo and run all three handoffs themselves, so each has a pass of its own. The first pass visits every
+  owner through the handoffs of the billing-handoff proof (the first cutover) and the interrupted-handoff proof (the
+  rollback, then the re-cutover), and runs each owner's proofs under it. Tenant isolation runs under all four, and the
+  hard-delete and user-delete proofs under Timekeeping and under the prepared application. No pass hands over a fourth
+  time, because a second rollback needs a reset first (`Timekeeping::Rollback`). Before each step
+  `bin/timekeeping-demo ownership` (`bin/rails timekeeping:ownership`) reads both copies of the ownership record, and
+  the step runs only when both name the owner, generation and state it was planned under. So a handoff that did not
+  happen stops the run at the next step. The first step that fails ends the run, because every later step depends on
+  what the earlier ones leave. The summary lists every step with its result and time. Then it lists each of §13's
+  seven items, §12.4 and §10.4's reconciliation and money checks, with the steps that prove it, and calls an item
+  green only when all of them passed. The run exits 0 only when every step passed and both copies end under
+  `timekeeping 3 open`.
 - **Mail.** Development mail goes to `letter_opener`, under `tmp/letter_opener` in `miru-web`. `BROWSER=/bin/true`
   stops Launchy from looking for a browser the container does not have.
 - **Reset.** `bin/timekeeping-demo compose down --volumes` deletes both databases and the journals. The next

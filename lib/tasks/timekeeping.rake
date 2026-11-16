@@ -966,3 +966,26 @@ namespace :timekeeping do
     end
   end
 end
+
+# Both copies of the ownership record (docs/architecture/timekeeping-soa.md
+# §10.1), for the acceptance run (bin/timekeeping-demo acceptance), which
+# checks before each step that the demo stands under the owner that step
+# expects. A read: it writes nothing on either side.
+module TimekeepingOwnershipTask
+  def self.run(handoff_client: Timekeeping::HandoffClient.new)
+    local, remote = Timekeeping::Ownership.current, handoff_client.status.copy
+    puts "existing application: #{local.summary}", "Timekeeping: #{TimekeepingReservations::Handoff.summary(remote)}"
+    copies = [local, remote].map { |copy| "#{copy.owner} #{copy.generation} #{copy.state}" }.uniq
+    abort "the two copies of the ownership record differ" unless copies.one?
+    puts copies.sole
+  rescue Timekeeping::InternalApi::Error => error
+    abort "Timekeeping's copy of the ownership record could not be read: #{error.message}"
+  end
+end
+
+namespace :timekeeping do
+  desc "Print both copies of the ownership record and, last, the owner, generation and state they agree on; exit 1 when they differ (docs/architecture/timekeeping-soa.md 10.1)"
+  task ownership: :environment do
+    TimekeepingOwnershipTask.run
+  end
+end
