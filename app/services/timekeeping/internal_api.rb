@@ -71,13 +71,16 @@ class Timekeeping::InternalApi
     end
 
     # The body of an answer the contract allows for the operation. A problem
-    # Timekeeping answered raises Problem; anything else raises
-    # ContractViolation.
+    # Timekeeping answered raises Problem, and a stale-generation one outside
+    # a handoff is reported as the alert of §11.3 (Timekeeping::Signals);
+    # anything else raises ContractViolation.
     def answer(operation, response)
       body = parse(response)
       expected = operation.dig("responses", response.status.to_s)
       return body if expected && conforms?(expected, body)
-      raise Problem.new(body) if response.status >= 400 && conforms?(PROBLEM, body)
+      if response.status >= 400 && conforms?(PROBLEM, body)
+        raise Timekeeping::Signals.stale_generation_refused(Problem.new(body), source: self.class.name)
+      end
 
       raise ContractViolation, "HTTP #{response.status} is not an answer of the #{self.class::CONTRACT} contract: #{response.body.to_s.truncate(200)}"
     end

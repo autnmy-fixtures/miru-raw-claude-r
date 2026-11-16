@@ -38,6 +38,14 @@
 # (tmp/timekeeping/recutover.json by default). The re-cutover takes no
 # disposition either: its reservations come out of the prepared application
 # as it holds them.
+#
+# What the existing application measures of its Timekeeping machinery
+# (§11.3, Timekeeping::Signals), read once, for an operator or a script:
+#
+#   bin/rails timekeeping:signals              print each signal; exit 1 on an alert
+#
+# It reports nothing: the dedicated workers report the alerts
+# (Timekeeping::RelaySignalJob, Timekeeping::InvoiceOperationSignalsJob).
 module TimekeepingFirstCutoverTask
   def self.journal = Timekeeping::FirstCutoverJournal.new(path: ENV.fetch("JOURNAL", Timekeeping::FirstCutoverJournal::DEFAULT_PATH))
 
@@ -174,5 +182,28 @@ namespace :timekeeping do
     rescue Timekeeping::Recutover::Unresumable, Timekeeping::InternalApi::NotConfigured => error
       abort error.message
     end
+  end
+end
+
+module TimekeepingSignalsTask
+  def self.lines(reading)
+    [
+      "ownership: #{reading.ownership}",
+      "relay lag: #{reading.relay_lag.round(1)} s, #{reading.relay_backlog} position(s) undelivered" \
+        "#{' (above the limit for the whole window)' if reading.relay_lag_sustained}",
+      "invoice operations pending past the limit: #{reading.pending_operations.size}",
+      "commits or aborts undelivered past the limit: #{reading.undelivered_outcomes.size}"
+    ]
+  end
+end
+
+namespace :timekeeping do
+  desc "Print the existing application's Timekeeping signals (docs/architecture/timekeeping-soa.md 11.3); exit 1 on an alert"
+  task signals: :environment do
+    signals = Timekeeping::Signals.new
+    puts TimekeepingSignalsTask.lines(signals.read)
+    alerts = signals.alerts
+    abort alerts.map { |alert| "ALERT #{alert.message}" }.join("\n") if alerts.any?
+    puts "no alerts"
   end
 end

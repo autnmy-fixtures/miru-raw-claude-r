@@ -112,7 +112,10 @@ RSpec.describe "Timekeeping local demo runtime" do
       tasks = dispatchers.sole.attributes[:recurring_tasks]
       queues = processes.filter_map { |process| process.attributes[:queues] if process.kind == :worker }
 
-      expect(tasks.map(&:class_name)).to contain_exactly("Timekeeping::InvoiceOperationsJob", "Timekeeping::LocalRelayJob")
+      expect(tasks.map(&:class_name)).to contain_exactly(
+        "Timekeeping::InvoiceOperationsJob", "Timekeeping::LocalRelayJob",
+        "Timekeeping::RelaySignalJob", "Timekeeping::InvoiceOperationSignalsJob"
+      )
       expect(tasks.map { |task| task.class_name.constantize.new.queue_name }).to all(be_in(queues))
     end
 
@@ -120,7 +123,9 @@ RSpec.describe "Timekeeping local demo runtime" do
       demo = YAML.safe_load(Rails.root.join("config/solid_queue_timekeeping_demo.yml").read)
 
       expect(demo.dig("dispatchers", 0, "recurring_tasks"))
-        .to eq(local_config.dig("dispatchers", 0, "recurring_tasks").slice("invoice_operations", "timekeeping_local_relay"))
+        .to eq(local_config.dig("dispatchers", 0, "recurring_tasks").slice(
+          "invoice_operations", "timekeeping_local_relay", "timekeeping_relay_signal", "timekeeping_invoice_operation_signals"
+        ))
       expect(demo.fetch("workers"))
         .to eq(local_config.fetch("workers").select { |worker| %w[invoice_operations timekeeping_relay].include?(worker["queues"]) })
     end

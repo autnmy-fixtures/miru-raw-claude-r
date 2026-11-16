@@ -13,6 +13,10 @@
 #   projection from its own outbox while the `monolith` owner holds the data
 #   after a rollback (§10.5).
 #
+# Each worker also reads the other's alerts of §11.3 (Timekeeping::Signals):
+# the relay's lag on `invoice_operations`, the ledger's on `timekeeping_relay`,
+# so a worker that stops is noticed by the one still running.
+#
 # Their schedules and worker settings are the ones in config/solid_queue.yml,
 # and spec/config/timekeeping_demo_runtime_spec.rb keeps the two files in
 # step. The demo's jobs container (docker-compose.timekeeping-demo.yml) points
@@ -28,6 +32,12 @@ dispatchers:
       timekeeping_local_relay:
         class: Timekeeping::LocalRelayJob
         schedule: '* * * * * *'  # Every second: the prepared application's outbox into the Timekeeping projection
+      timekeeping_relay_signal:
+        class: Timekeeping::RelaySignalJob
+        schedule: '*/15 * * * * *'  # Every 15 seconds, on invoice_operations: the local relay's lag alert (§11.3)
+      timekeeping_invoice_operation_signals:
+        class: Timekeeping::InvoiceOperationSignalsJob
+        schedule: '*/15 * * * * *'  # Every 15 seconds, on timekeeping_relay: the ledger's pending and undelivered alerts (§11.3)
 workers:
   - queues: invoice_operations
     threads: 1
