@@ -36,6 +36,12 @@ default: &default
         timekeeping_local_relay:
           class: Timekeeping::LocalRelayJob
           schedule: '* * * * * *'  # Every second: the prepared application's outbox into the Timekeeping projection
+        timekeeping_relay_signal:
+          class: Timekeeping::RelaySignalJob
+          schedule: '*/15 * * * * *'  # Every 15 seconds, on invoice_operations: the local relay's lag alert (§11.3)
+        timekeeping_invoice_operation_signals:
+          class: Timekeeping::InvoiceOperationSignalsJob
+          schedule: '*/15 * * * * *'  # Every 15 seconds, on timekeeping_relay: the ledger's pending and undelivered alerts (§11.3)
   workers:
     - queues: default
       threads: 5

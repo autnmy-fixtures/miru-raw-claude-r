@@ -74,6 +74,18 @@ RSpec.describe "Solid Queue schedule" do
     expect(Timekeeping::LocalRelayJob.new.queue_name).to eq("timekeeping_relay")
   end
 
+  it "reads each Timekeeping worker's alerts on the other worker's queue every 15 seconds in the local runtime" do
+    tasks = config.dig("default", "dispatchers", 0, "recurring_tasks")
+    queues = config.dig("default", "workers").pluck("queues")
+
+    expect(tasks.fetch("timekeeping_relay_signal")).to eq("class" => "Timekeeping::RelaySignalJob", "schedule" => "*/15 * * * * *")
+    expect(tasks.fetch("timekeeping_invoice_operation_signals"))
+      .to eq("class" => "Timekeeping::InvoiceOperationSignalsJob", "schedule" => "*/15 * * * * *")
+    expect(Fugit.parse_cron("*/15 * * * * *").seconds).to eq([0, 15, 30, 45])
+    expect([Timekeeping::RelaySignalJob, Timekeeping::InvoiceOperationSignalsJob].map { |job| job.new.queue_name })
+      .to eq(%w[invoice_operations timekeeping_relay]).and(all(be_in(queues)))
+  end
+
   it "runs database backups every 30 minutes in production by default" do
     production_task = config.dig("production", "dispatchers", 0, "recurring_tasks", "database_backup")
 

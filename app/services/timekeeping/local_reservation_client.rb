@@ -137,8 +137,11 @@ class Timekeeping::LocalReservationClient
       raise refusal("stale-generation", 409, ownership, intent) if ownership.settling?(intent.generation)
     end
 
+    # A stale-generation refusal outside a handoff is also the alert of §11.3
+    # (Timekeeping::Signals), as Timekeeping's would be.
     def refusal(slug, status, ownership, intent, retryable: false)
-      self.class.problem(slug, status, retryable:, detail: "operation #{intent.operation_id} carries generation #{intent.generation}; ownership is #{ownership.summary}")
+      problem = self.class.problem(slug, status, retryable:, detail: "operation #{intent.operation_id} carries generation #{intent.generation}; ownership is #{ownership.summary}")
+      Timekeeping::Signals.stale_generation_refused(problem, source: self.class.name, ownership:)
     end
 
     def operation(intent, invoice_state)

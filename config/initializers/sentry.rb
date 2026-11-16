@@ -11,4 +11,11 @@ Sentry.init do |config|
 
   config.environment = Rails.env
   config.enabled_environments = %w[production staging]
+
+  # Every event carries the application it came from, as Timekeeping's carry
+  # theirs (docs/architecture/timekeeping-soa.md §11.3: "Both applications
+  # report to Sentry with a `service` tag").
+  tag_service = ->(event, _hint) { event.tap { event.tags = event.tags.merge(service: "miru") } }
+  config.before_send = tag_service
+  config.before_send_transaction = tag_service
 end

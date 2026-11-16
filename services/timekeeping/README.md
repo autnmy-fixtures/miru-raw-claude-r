@@ -96,7 +96,7 @@ There is no deploy lane and no Kamal configuration for it (§15.3). It is
 | Service | Image | Runs |
 |---|---|---|
 | `miru-web` | the existing application, `Dockerfile` target `development` | Falcon on `127.0.0.1:3000`. On a new database, `db:prepare` creates it and seeds the two businesses in the initial legacy state |
-| `miru-jobs` | the same image | Solid Queue with `config/solid_queue_timekeeping_demo.yml`: the invoice operation worker (`invoice_operations`) and the prepared application's relay (`timekeeping_relay`), and nothing else |
+| `miru-jobs` | the same image | Solid Queue with `config/solid_queue_timekeeping_demo.yml`: the invoice operation worker (`invoice_operations`) and the prepared application's relay (`timekeeping_relay`), each also reading the other's §11.3 alerts, and nothing else |
 | `miru-db` | `postgres:16-alpine` | the existing application's database, user `miru` |
 | `timekeeping-web` | this service's `Dockerfile` | Puma on `127.0.0.1:3100`, migrating its own database first |
 | `timekeeping-relay` | the same image | the relay's worker, on `timekeeping_relay` only |
@@ -135,6 +135,15 @@ bin/timekeeping-demo down        # stops everything; both databases and the hand
   differs from it: Timekeeping's as the `REVISION` build argument, the existing application's as a build
   label. `rebuild` rebuilds and recreates only the named application's two processes, web first. The
   independent rebuild-and-restart proof (§13 item 4) runs on this.
+- **Signals (§11.3).** Each of the existing application's two workers reads the other's alerts, so a
+  stopped worker is still noticed: `invoice_operations` reads the local relay's lag (above 60 s for
+  5 minutes), and `timekeeping_relay` reads the invoice operation ledger (an intent pending past 60 s, a
+  commit or abort undelivered past 60 s). A stale-generation refusal while this application's ownership
+  copy is open is reported as it happens. Every alert goes to `Rails.error`, which Sentry receives with
+  the `service` tag `miru`, and to the log at error level, which is where the demo shows it, because
+  Sentry is not enabled in development. `bin/timekeeping-demo compose exec miru-web bin/rails
+  timekeeping:signals` prints each signal and exits 1 on an alert. Timekeeping's own signals (its
+  relay's lag, its stale-generation refusals, its Sentry tag) are not wired up yet.
 - **Mail.** Development mail goes to `letter_opener`, under `tmp/letter_opener` in `miru-web`. `BROWSER=/bin/true`
   stops Launchy from looking for a browser the container does not have.
 - **Reset.** `bin/timekeeping-demo compose down --volumes` deletes both databases and the journals. The next
