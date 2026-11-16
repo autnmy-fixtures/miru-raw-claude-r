@@ -141,6 +141,7 @@ bin/timekeeping-demo independent-deploys     # the independent-deployment proof 
 bin/timekeeping-demo relay-paused            # the relay-paused proof (§13 item 5)
 bin/timekeeping-demo user-delete-refused     # the user-hard-delete proof (§12.4); after a cutover, then after a rollback
 bin/timekeeping-demo aggregate-line          # the aggregate-line proof (§12.4, F3), with timekeeping-web stopped for its failures
+bin/timekeeping-demo billing-handoff         # billing writes during a handoff (§12.4): the handoff waits for a paused one, then refuses them
 bin/timekeeping-demo compose stop timekeeping-relay   # pauses the relay (§12.4); `compose start` resumes it
 bin/timekeeping-demo down        # stops everything; both databases and the handoff journals are kept
 ```
@@ -240,6 +241,36 @@ bin/timekeeping-demo down        # stops everything; both databases and the hand
   process to stop. Under that owner, F3 is covered in process by `spec/requests/timekeeping/invoice_reservation_writes_spec.rb`
   ("under the monolith owner") and `spec/services/timekeeping/local_reservations_spec.rb`. `CHECK_WAIT` sets how long, in seconds, a check
   waits on a worker (default 60).
+- **Billing writes during a handoff (§12.4, §10.1).** `bin/timekeeping-demo billing-handoff` runs under any owner
+  with admission open, and runs the handoff that owner hands over with, which
+  `bin/rails timekeeping:billing_handoff:handoff` (`Timekeeping::BillingHandoffCheck`) names: the first cutover from
+  `legacy`, the rollback from `timekeeping`, the re-cutover from `monolith`. All four steps run in `miru-web` under one
+  run name (`RUN`). `timekeeping:billing_handoff:paused` is the billing write: in one transaction, on both seeded
+  businesses, a sent invoice of the run with a line item and an invoice tax, and a partial payment on it through the
+  payment service the payments API uses. Each passes the billing-write fence, so the transaction holds the ownership
+  row `FOR SHARE`, and it stays open. The script starts the handoff task meanwhile. The paused step waits until that
+  handoff's step 1, the close's `FOR UPDATE` of the ownership row, is blocked by its own transaction
+  (`pg_blocking_pids`), and checks that ownership still reads open at the old generation. Then the script stops
+  `timekeeping-web` and releases the write, which commits; only then does the handoff close admission, and it stops
+  at its next step, which closes Timekeeping's copy, for a resume. The script checks that it stopped and shows its
+  output, kept under `tmp/timekeeping-demo/billing-handoff/`. With the handoff standing there,
+  `timekeeping:billing_handoff:refused` checks that this copy is closed at the raised generation, and that the financial
+  snapshot the handoff's journal holds, taken once its close drained the paused write, has the run's invoices, lines
+  and taxes as they committed. On both businesses, over the public API as the admin, an invoice create with a line item
+  and a tax, an update of the run's invoice changing its line's rate and its tax, and a payment on it each answer 503
+  with the ownership-moving message, and no invoice, line-item, invoice-tax or payment row changes. Then the script
+  starts `timekeeping-web` again, resumes the handoff to its end, and `timekeeping:billing_handoff:resumed` checks that
+  the incoming owner holds the entries with admission open and that a payment on each run's invoice is accepted again.
+  The steps pass what they need through `tmp/timekeeping/billing-handoff/<run>/` in the `miru_handoff_journals` volume:
+  the run's state and the `admitted`, `waiting` and `release` markers. `timekeeping-web` is started again however the
+  steps between end. If the paused write fails before its release it rolls back, and the handoff it held then runs on;
+  a failed step otherwise leaves the handoff where it stands, for its task to resume or abort. A run that finishes
+  leaves, per business, one sent invoice of the run with two partial payments, and the handoff done, so the demo has
+  moved to the next owner. The handoff's step 1 waits at most 60 s (§10.1), which the script's steps fit in. `CHECK_WAIT`
+  sets how long, in seconds, a step waits on another process (default 60). In process, the paused step is covered across
+  connections by `spec/models/timekeeping/billing_handoff_paused_spec.rb`, the other steps by
+  `spec/requests/timekeeping/billing_handoff_check_spec.rb`, and the fence itself by
+  `spec/models/timekeeping/billing_write_admission_spec.rb` and `spec/requests/timekeeping/billing_write_fence_spec.rb`.
 - **Signals (§11.3).** Each of the existing application's two workers reads the other's alerts, so a
   stopped worker is still noticed: `invoice_operations` reads the local relay's lag (above 60 s for
   5 minutes), and `timekeeping_relay` reads the invoice operation ledger (an intent pending past 60 s, a

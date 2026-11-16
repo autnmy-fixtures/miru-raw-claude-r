@@ -48,6 +48,15 @@
 #                                    destroy of the draft fail and keep every
 #                                    reservation; with it started again, the
 #                                    destroy releases the draft's whole set
+#   bin/timekeeping-demo billing-handoff
+#                                    the billing-writes-during-a-handoff proof
+#                                    (§12.4): pause a billing write inside its
+#                                    transaction, start the owner's handoff
+#                                    and see its step 1 wait on it; stop
+#                                    timekeeping-web so the handoff stops
+#                                    after step 1, and see billing writes
+#                                    refused with 503 ownership-moving; then
+#                                    resume the handoff to its end
 #   bin/timekeeping-demo down        stop everything; the databases are kept
 #   bin/timekeeping-demo compose …   any other docker compose command
 #
@@ -375,6 +384,79 @@ cmd_aggregate_line() {
   echo "== aggregate line: removing a grouped line released only what no other line references, a failed save and destroy kept every reservation, and destroying the draft released its whole set"
 }
 
+# Where the billing-handoff proof's steps leave their markers, in miru-web
+# (the miru_handoff_journals volume; Timekeeping::BillingHandoffCheck).
+BILLING_HANDOFF_DIR=tmp/timekeeping/billing-handoff
+
+# Waits until the billing-handoff run's marker is written, while the process
+# that writes it still runs. Fails when that process has ended without it, or
+# after five minutes.
+wait_for_marker() {
+  local run="$1" name="$2" pid="$3" deadline=$((SECONDS + 300))
+  # In sh -c: docker compose would take a bare -f after the service as its own.
+  until compose exec -T miru-web sh -c "test -f '${BILLING_HANDOFF_DIR}/${run}/${name}'"; do
+    kill -0 "${pid}" 2>/dev/null || return 1
+    [ "${SECONDS}" -lt "${deadline}" ] || return 1
+    sleep 0.5
+  done
+}
+
+# The billing-writes-during-a-handoff proof of §12.4 (§10.1), under any owner
+# with admission open: the existing application names the handoff that owner
+# hands over with (bin/rails timekeeping:billing_handoff:handoff). A billing
+# write is paused inside its transaction (timekeeping:billing_handoff:paused)
+# and that handoff is started; the paused step sees the handoff's step 1 wait
+# on it. timekeeping-web is stopped before the release, so once the write
+# commits, the handoff closes admission and then stops, unable to reach
+# Timekeeping, for a resume. While it stands there, billing writes are
+# refused with 503 ownership-moving (timekeeping:billing_handoff:refused).
+# Then timekeeping-web is started again, the handoff resumed to its end, and
+# a payment is accepted again (timekeeping:billing_handoff:resumed). All four
+# run in miru-web under one run name; the handoff's own output is shown, and
+# kept under tmp/timekeeping-demo/billing-handoff. timekeeping-web is started
+# again however the steps between end.
+cmd_billing_handoff() {
+  local run handoff log writer runner
+  require_env_file
+  processes "${EXISTING_SERVICES[@]}" "${TIMEKEEPING_SERVICES[@]}" > /dev/null
+  run="$(date -u +%Y%m%dT%H%M%SZ)-$(secret 2)"
+  handoff="$(compose exec -T --env "RUN=${run}" miru-web bin/rails timekeeping:billing_handoff:handoff | tail -n 1)"
+  case "${handoff}" in
+    timekeeping:first_cutover|timekeeping:rollback|timekeeping:recutover) ;;
+    *) die "the existing application named no handoff to run: ${handoff:-nothing}" ;;
+  esac
+  log="$(dirname "${ENV_FILE}")/billing-handoff/${run}.log"
+  mkdir -p "$(dirname "${log}")"
+  echo "== billing handoff: run ${run}, handing over with ${handoff}"
+  compose exec -T --env "RUN=${run}" miru-web bin/rails timekeeping:billing_handoff:paused &
+  writer=$!
+  wait_for_marker "${run}" admitted "${writer}" || die "the paused billing write was never admitted"
+  echo "== starting ${handoff} while the billing write is paused"
+  compose exec -T miru-web bin/rails "${handoff}" > "${log}" 2>&1 &
+  runner=$!
+  wait_for_marker "${run}" waiting "${writer}" || die "the handoff's step 1 was never seen waiting on the paused billing write"
+  echo "== stopping timekeeping-web, so the handoff stops after its step 1"
+  trap resume_timekeeping_web EXIT
+  compose stop timekeeping-web
+  [ -z "$(process_state timekeeping-web)" ] || die "timekeeping-web still runs after it was stopped"
+  echo "== releasing the paused billing write"
+  compose exec -T miru-web touch "${BILLING_HANDOFF_DIR}/${run}/release"
+  wait "${writer}" || die "the paused billing write failed"
+  if wait "${runner}"; then
+    cat "${log}"
+    die "${handoff} finished while timekeeping-web was stopped"
+  fi
+  cat "${log}"
+  grep -q " stopped: " "${log}" || die "${handoff} did not stop for a resume"
+  compose exec -T --env "RUN=${run}" miru-web bin/rails timekeeping:billing_handoff:refused
+  trap - EXIT
+  resume_timekeeping_web
+  echo "== resuming ${handoff}"
+  compose exec -T miru-web bin/rails "${handoff}"
+  compose exec -T --env "RUN=${run}" miru-web bin/rails timekeeping:billing_handoff:resumed
+  echo "== billing handoff: the handoff's step 1 waited for the paused billing write, billing writes were refused with 503 ownership-moving while it ran, and accepted again once it finished"
+}
+
 cmd_handoff() {
   case "${1:-}" in
     first_cutover|first_cutover:abort|rollback|rollback:abort|recutover|recutover:abort) ;;
@@ -404,6 +486,7 @@ case "${1:-}" in
   relay-paused) cmd_relay_paused ;;
   user-delete-refused) cmd_user_delete_refused ;;
   aggregate-line) cmd_aggregate_line ;;
+  billing-handoff) cmd_billing_handoff ;;
   down) compose down ;;
   compose) shift; compose "$@" ;;
   ""|help|-h|--help) usage ;;
