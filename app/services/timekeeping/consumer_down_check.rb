@@ -143,30 +143,31 @@ class Timekeeping::ConsumerDownCheck
     end
 
     def check_down(tenant)
-      x = find_entry(tenant, created_x)
-      before = projected_as_owned(tenant, x.id) ||
-        refuse!(tenant, "the projection does not hold entry #{x.id} as Timekeeping does; run the projected step first, with the consumer up")
-      x, y = write_while_down(tenant, x, before)
-      draft_id = invoice_at_once(tenant, [x, y])
-      version = owned_facts(tenant, x.id).fetch("version")
-      refuse!(tenant, "Timekeeping holds entry #{x.id} at version #{version}, not after #{before['version']}") if version <= before["version"]
+      created = find_entry(tenant, created_x)
+      id = created.id
+      before = projected_as_owned(tenant, id) ||
+        refuse!(tenant, "the projection does not hold entry #{id} as Timekeeping does; run the projected step first, with the consumer up")
+      edited, added = write_while_down(tenant, created, before)
+      draft_id = invoice_at_once(tenant, [edited, added])
+      version = owned_facts(tenant, id).fetch("version")
+      refuse!(tenant, "Timekeeping holds entry #{id} at version #{version}, not after #{before['version']}") if version <= before["version"]
 
       sleep @options.settle
-      ensure_still_stale!(tenant, x, y, before)
-      say "#{tenant[:name]}: entry X #{x.id}, edited, and new entry Y #{y.id} were listed at once and reserved by draft #{draft_id}; " \
+      ensure_still_stale!(tenant, edited, added, before)
+      say "#{tenant[:name]}: entry X #{id}, edited, and new entry Y #{added.id} were listed at once and reserved by draft #{draft_id}; " \
           "Timekeeping holds X at version #{version}, the projection still at #{before['version']}, and no Y"
     end
 
     # The edit of X and the create of Y, each listed at once and not
-    # projected.
-    def write_while_down(tenant, x, before)
-      x = update_entry(tenant, x, edited_x)
-      ensure_listed!(tenant, x, "as edited at once")
-      ensure_stale!(tenant, x.id, before)
-      y = create_entry(tenant, new_y)
-      ensure_listed!(tenant, y, "at once")
-      ensure_unprojected!(tenant, y.id)
-      [x, y]
+    # projected. Answers both as written.
+    def write_while_down(tenant, created, before)
+      edited = update_entry(tenant, created, edited_x)
+      ensure_listed!(tenant, edited, "as edited at once")
+      ensure_stale!(tenant, edited.id, before)
+      added = create_entry(tenant, new_y)
+      ensure_listed!(tenant, added, "at once")
+      ensure_unprojected!(tenant, added.id)
+      [edited, added]
     end
 
     # The candidates offer the entries at once, and a draft with a direct line
@@ -186,8 +187,8 @@ class Timekeeping::ConsumerDownCheck
       draft_id
     end
 
-    def ensure_still_stale!(tenant, x, y, before)
-      x_id, y_id = x.id, y.id
+    def ensure_still_stale!(tenant, edited, added, before)
+      x_id, y_id = edited.id, added.id
       ensure_stale!(tenant, x_id, before)
       ensure_unprojected!(tenant, y_id)
       report = time_entries_report(tenant)
