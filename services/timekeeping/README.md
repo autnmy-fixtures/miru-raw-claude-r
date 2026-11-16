@@ -143,6 +143,7 @@ bin/timekeeping-demo user-delete-refused     # the user-hard-delete proof (§12.
 bin/timekeeping-demo aggregate-line          # the aggregate-line proof (§12.4, F3), with timekeeping-web stopped for its failures
 bin/timekeeping-demo billing-handoff         # billing writes during a handoff (§12.4): the handoff waits for a paused one, then refuses them
 bin/timekeeping-demo save-failures           # the save-failure rows of §9.3 (§12.4 failure injection): lost prepare answers, a crash, a rollback, replays
+bin/timekeeping-demo reservation-failures    # the reservation-protocol rows of §9.3: wrong company, earlier operation unresolved, lost commit answer
 bin/timekeeping-demo compose stop timekeeping-relay   # pauses the relay (§12.4); `compose start` resumes it
 bin/timekeeping-demo down        # stops everything; both databases and the handoff journals are kept
 ```
@@ -299,10 +300,42 @@ bin/timekeeping-demo down        # stops everything; both databases and the hand
   finishes leaves, per business, four discarded entries and one discarded draft. `CHECK_WAIT` sets how long, in
   seconds, a check waits on a worker (default 60; the crash's recovery takes about 35 s of it). The other rows of §9.3
   are proved elsewhere or not yet on the demo: Timekeeping down at prepare and F1 by the aggregate-line proof, relay
-  paused by the relay-paused proof. In process, the rows this proof covers are pinned by
+  paused by the relay-paused proof, the reservation-protocol rows by the reservation-failures proof below. In process,
+  the rows this proof covers are pinned by
   `spec/services/timekeeping/invoice_boundary_spec.rb` and `spec/services/timekeeping/invoice_operation_worker_spec.rb`
   (under the monolith owner too, where a row applies to it), and the check itself by
   `spec/services/timekeeping/save_failures_check_spec.rb`.
+- **Reservation failures (§12.4 failure injection, §9.3).** `bin/timekeeping-demo reservation-failures` covers the rows
+  of §9.3 where Timekeeping refuses a prepare, or the answer to a commit is lost. It runs while Timekeeping owns the
+  entries with admission open, in two steps in `miru-web` (`Timekeeping::ReservationFailuresCheck`). It stops
+  `miru-jobs`, which runs the invoice operation worker, and runs `bin/rails timekeeping:reservation_failures:paused`.
+  Then it starts `miru-jobs` again, however that step ends, and runs `timekeeping:reservation_failures:resumed`. On
+  both seeded businesses the employee creates entries X, Y and W over the public API. Then:
+  - **Prepare refused, wrong company (L8).** The admin saves an invoice naming the other business's W: 422 with
+    "Time entry … belongs to another workspace, so the invoice was not saved.", the intent `failed`, no invoice, and W
+    unchanged on Timekeeping and still offered to its own business.
+  - **Prepare refused, earlier operation unresolved.** The admin saves a draft holding X. With the worker stopped its
+    commit is not delivered, so Timekeeping still holds the draft's operation prepared. An update adding Y, run in
+    process with Timekeeping unreachable, fails before its prepare is sent. Two more updates adding Y, one in process
+    and one over the public API, each carry in `resolves` the outcome of the update before it, which Timekeeping
+    never held. Timekeeping refuses both as `operation-unresolved`: the first fails as a retryable
+    `operation_unresolved`, and the second answers 409 with the busy message. The draft still holds X alone.
+  - **Lost response on commit.** One sweep of the invoice operation worker runs in process, through an owner that
+    sends each commit and abort to Timekeeping and then loses the answer as a read timeout. Timekeeping answers the
+    draft's commit `committed` and every abort `aborted`, and every one of them stays undelivered. The paused step
+    keeps Timekeeping's record of X (version, `locked`, `updated_at`) in
+    `tmp/timekeeping/reservation-failures/<run>/state.json`, in the `miru_handoff_journals` volume.
+  - **Recovery, and the client's retry.** Once `miru-jobs` runs again, it delivers every operation of the run: commit
+    again for the draft, and abort for each failed save. X is unchanged on Timekeeping, so the second commit changed
+    nothing. The client retries the update adding Y over the public API, and it goes through. The draft is then
+    deleted and the entries discarded.
+
+  If the draft's commit is delivered during the paused step, the worker was running and the run fails. Keep the paused
+  step under a minute: with `miru-jobs` stopped, nothing reads the ledger's alerts, and an outcome undelivered past
+  60 s raises the §11.3 alert once `miru-jobs` is back, until it is delivered. `CHECK_WAIT` sets how long, in seconds,
+  a check waits on a worker (default 60). The check itself is covered by
+  `spec/services/timekeeping/reservation_failures_check_spec.rb`. Still not on the demo from §9.3: stale generation,
+  projection consumer down, and a failed hard delete of a non-draft.
 - **Signals (§11.3).** Each of the existing application's two workers reads the other's alerts, so a
   stopped worker is still noticed: `invoice_operations` reads the local relay's lag (above 60 s for
   5 minutes), and `timekeeping_relay` reads the invoice operation ledger (an intent pending past 60 s, a

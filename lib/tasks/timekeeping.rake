@@ -182,6 +182,34 @@
 # save's 30 s time limit too). The crash forks a child process of this one,
 # which kills itself. bin/timekeeping-demo save-failures runs it.
 #
+# The reservation-protocol part of the failure injection (§12.4, §9.3,
+# Timekeeping::ReservationFailuresCheck), while Timekeeping owns the entries,
+# in two steps around a stopped invoice operation worker (miru-jobs); RUN
+# names their writes:
+#
+#   bin/rails timekeeping:reservation_failures:paused   with miru-jobs
+#                                                       stopped: a
+#                                                       wrong-company save
+#                                                       refused, two saves
+#                                                       refused behind an
+#                                                       unresolved operation,
+#                                                       and every commit and
+#                                                       abort answer lost
+#   bin/rails timekeeping:reservation_failures:resumed  with it started
+#                                                       again: every outcome
+#                                                       delivered, the commit
+#                                                       sent again changes
+#                                                       nothing, and the
+#                                                       client's retry goes
+#                                                       through
+#
+# Each exits 1 at the first check that fails. They sign in and reach
+# Timekeeping as the save-failures step does, and CHECK_WAIT sets the seconds
+# a check waits on a worker (60 by default). The paused step leaves the run's
+# state under tmp/timekeeping/reservation-failures for the resumed one.
+# bin/timekeeping-demo reservation-failures stops and starts miru-jobs around
+# them.
+#
 # What the existing application measures of its Timekeeping machinery
 # (§11.3, Timekeeping::Signals), read once, for an operator or a script:
 #
@@ -577,5 +605,37 @@ namespace :timekeeping do
   desc "A lost prepare answer, a crash after prepare, a rolled-back save and terminal-receipt replays each leave what 9.3 says (docs/architecture/timekeeping-soa.md 12.4; RUN)"
   task save_failures: :environment do
     TimekeepingSaveFailuresTask.run
+  end
+end
+
+module TimekeepingReservationFailuresTask
+  def self.check
+    Timekeeping::ReservationFailuresCheck.new(
+      client: Timekeeping::PublicApi::Client.new(base_url: ENV.fetch("MIRU_URL", "http://127.0.0.1:3000")),
+      password: ENV.fetch("MIRU_SEED_PASSWORD") { abort "MIRU_SEED_PASSWORD is the seeded users' password; the check signs in with it" },
+      run: ENV.fetch("RUN") { abort "RUN names the writes of one run; give both steps the same one" },
+      logger: TimekeepingFirstCutoverTask.logger,
+      options: Timekeeping::ReservationFailuresCheck::Options.new(wait: Integer(ENV.fetch("CHECK_WAIT", Timekeeping::PublicApi::DEFAULT_WAIT)))
+    )
+  end
+
+  def self.run(step)
+    check.public_send(step)
+  rescue Timekeeping::ReservationFailuresCheck::Failed => error
+    abort "Timekeeping reservation-failures proof failed (#{step}): #{error.message}"
+  end
+end
+
+namespace :timekeeping do
+  namespace :reservation_failures do
+    desc "With the invoice operation worker stopped: a wrong-company save and two saves behind an unresolved operation refused, commit answers lost (docs/architecture/timekeeping-soa.md 12.4; RUN)"
+    task paused: :environment do
+      TimekeepingReservationFailuresTask.run(:paused)
+    end
+
+    desc "With the invoice operation worker started again: every outcome delivered, the resent commit changes nothing, the retry goes through (docs/architecture/timekeeping-soa.md 12.4; RUN)"
+    task resumed: :environment do
+      TimekeepingReservationFailuresTask.run(:resumed)
+    end
   end
 end
