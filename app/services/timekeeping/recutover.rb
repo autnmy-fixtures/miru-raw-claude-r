@@ -75,7 +75,8 @@
 # admission is closed, and no billing write is admitted then (§10.1), so
 # either is the state the handoff must leave unchanged. The journal has the
 # first cutover's interface (Timekeeping::FirstCutover::MemoryJournal by
-# default): it is told an empty Resume as a handoff starts, so nothing an
+# default, Timekeeping::RecutoverJournal for a file that outlives the
+# process): it is told an empty Resume as a handoff starts, so nothing an
 # earlier handoff took is resumed into this one, then the snapshot as soon as
 # it is taken.
 #

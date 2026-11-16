@@ -4,8 +4,8 @@
 # run in another process can resume it (docs/architecture/timekeeping-soa.md
 # §10.5: "can resume from the step that failed"). Each handoff has its own
 # kind, which names what it holds and how it reads back
-# (Timekeeping::FirstCutoverJournal, Timekeeping::RollbackJournal); this is
-# the file they share.
+# (Timekeeping::FirstCutoverJournal, Timekeeping::RollbackJournal,
+# Timekeeping::RecutoverJournal); this is the file they share.
 #
 # It is one JSON file. Each record replaces it whole, through a temporary
 # file that is synced and then renamed over it, so a process that dies
