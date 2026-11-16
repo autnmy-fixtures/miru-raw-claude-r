@@ -46,6 +46,7 @@ in its outbox to the existing application's projection consumer (§5.4), on its 
 | `app/services/entry_write.rb` | One mutating call (§3.4, §9.4): in one transaction, admission under `X-Ownership-Generation`, then the stored answer for the call's `Idempotency-Key` or the change and its receipt. A refusal rolls everything back and stores no receipt. Calls carrying one key in one tenant are serialized by an advisory lock until the first commits, so a retry that overtakes its first attempt replays it. |
 | `app/services/entry_change.rb` | What every entry change writes beside the entry, in its transaction: an `entry_audits` row (the columns `audited` records on TimesheetEntry today, the actor, agent, writer and request id) and an `outbox_snapshots` row, the contract's entry snapshot, whose id is the outbox position (§5.4, §10.5 step 3). `OutboxRelay` delivers them. |
 | `app/services/outbox_relay.rb` | The relay (§5.4): the outbox's undelivered snapshots, in outbox order and batches of 500, posted to `EXISTING_APP_URL` + `/internal/v1/projection/entry_snapshots` as `entry_snapshot.json`'s `deliver_snapshots`, with the relay's service token (audience `projection`, 60 s TTL) and an `X-Request-Id` of its own, logged with the request ids of the changes it carries (§11.3). One batch is one transaction: its rows taken `FOR UPDATE SKIP LOCKED`, so an overlapping run delivers other rows or none, and marked `delivered_at` only once the consumer answers the contract's 200 receipt. Any other answer, or none within 10 s, rolls the batch back unmarked; it is logged and reported, and the next run sends it again. Nothing is skipped, and the consumer's upsert by version makes a resend harmless. Delivery is marked per row, not as one position, because changes commit in any order: a row below a delivered position can still appear, and is still sent (`db/migrate/*_add_delivered_at_to_outbox_snapshots.rb`). |
+| `app/services/outbox_redelivery.rb`, `lib/tasks/redelivery.rake` | The duplicate and reordered delivery of §13 item 6, sent on purpose: `bin/rails timekeeping:redeliver ENTRIES="<ids>"` resends the named entries' outbox snapshots through the relay's own call (`OutboxRelay#redeliver`, which posts a batch as `#run` does and takes, locks and marks nothing): each entry's newest first, in one batch, then each older one on its own, newest first, then all of them again in outbox order. Each receipt must be the one a consumer that upserts by version answers: the newest all applied, every other ignored. The first receipt that differs exits 1. It runs only while this copy says Timekeeping owns the entries with admission open, and refuses an entry with fewer than two snapshots. `bin/timekeeping-demo redelivery` runs it while the relay is stopped. |
 | `app/jobs/outbox_relay_job.rb`, `config/solid_queue.yml` | The relay's runtime (§11.1, D3): `OutboxRelayJob` on the `timekeeping_relay` queue, enqueued every second by the dispatcher and run by one dedicated worker that reads no other queue, on this service's own Solid Queue tables (`db/migrate/*.solid_queue.rb`). Start it with `bin/rails solid_queue:start`; stopping it pauses the relay (§12.4), and the outbox keeps every change until it resumes. |
 | `app/services/signals.rb`, `app/jobs/signals_job.rb`, `lib/tasks/signals.rake` | Timekeeping's side of the observability table (§11.3). **Relay lag**: how long the oldest undelivered outbox snapshot has waited, and the positions from it to the latest; it alerts when the lag is above 60 s now and was at every moment of the last 5 minutes, read from the outbox's `created_at` and `delivered_at` alone, so a restarted reader gives the same answer. `SignalsJob` reads it every 15 s on `timekeeping_relay`, the only queue Timekeeping runs (§11.1), so it catches a relay that runs but cannot deliver; a stopped worker is read with `bin/rails timekeeping:signals` from any process, which prints each signal and exits 1 on an alert, reporting nothing itself. **Stale-generation refusals outside a handoff**: reported as they happen, from the internal API's answer, when the record the refusal read under its lock was open. Both copies are closed or frozen from a handoff's first step to its flip or abort, so an open copy means no handoff is in progress. The settle step's refusals, made while closed, are not reported, and every refusal is answered exactly as before. **Reconciliation differences**: reported as the handoff API answers `checkpoint-differs`. Every alert goes to `Rails.error` (severity `error`, with the signal and its details) and to the log at error level. |
 | `config/initializers/sentry.rb` | Sentry, as in the existing application: `SENTRY_DSN` from the environment, enabled in production and staging only, and every error and transaction event tagged `service: "timekeeping"` (§11.3). |
@@ -147,6 +148,7 @@ bin/timekeeping-demo reservation-failures    # the reservation-protocol rows of 
 bin/timekeeping-demo hard-delete             # §9.3's hard delete of a non-draft: a failed one changes nothing, a successful one keeps the edit lock until a successor
 bin/timekeeping-demo stale-generation        # §9.3's stale generation: calls carrying another generation refused and changing nothing, retries to the current owner
 bin/timekeeping-demo consumer-down           # §9.3's projection consumer down: entries listed and invoiced at once, the relay's deliveries refused, then its resend caught up
+bin/timekeeping-demo redelivery              # §13 item 6's duplicate and reordered delivery: snapshots resent out of order and twice, only the newest applied
 bin/timekeeping-demo compose stop timekeeping-relay   # pauses the relay (§12.4); `compose start` resumes it
 bin/timekeeping-demo down        # stops everything; both databases and the handoff journals are kept
 ```
@@ -436,9 +438,45 @@ bin/timekeeping-demo down        # stops everything; both databases and the hand
   entries and one discarded draft, with nothing reserved. `CHECK_WAIT` sets how long, in seconds, a check waits on
   a worker (default 60). The check is covered by `spec/requests/timekeeping/consumer_down_check_spec.rb`, where the
   relay's deliveries land nowhere while the consumer is down. The consumer's tolerance of duplicated and reordered
-  batches is pinned by its own spec, `spec/requests/timekeeping/entry_snapshots_spec.rb`. Under the prepared application the relay and the consumer run in one
+  batches is pinned by its own spec, `spec/requests/timekeeping/entry_snapshots_spec.rb`, and shown on the demo by
+  the redelivery proof below. Under the prepared application the relay and the consumer run in one
   `miru-jobs` process (`Timekeeping::LocalRelay`), so there is no consumer to take down on its own, and this proof
   runs only while Timekeeping owns the entries.
+- **Duplicate and reordered delivery (§13 item 6, §5.4, §9.3).** `bin/timekeeping-demo redelivery` runs while
+  Timekeeping owns the entries with admission open. The consumer upserts each snapshot by `(entry_id, version)` and
+  ignores anything not newer, so a snapshot that arrives twice, or after a newer one, must change nothing. One relay
+  delivers in outbox order, so on its own it never sends an older snapshot after a newer one. Here Timekeeping sends
+  them out of order on purpose, through the relay's own call. The four steps run `bin/rails
+  timekeeping:redelivery:projected`, `:held`, `:reordered` and `:duplicated` (`Timekeeping::RedeliveryCheck`) inside
+  `miru-web`, under one run name. On both seeded businesses:
+  - **Projected** (relay running). The employee creates entry X, and the projection holds it as Timekeeping does.
+  - **Held.** The command stops `timekeeping-relay`. The employee edits X twice, and creates entry Y and edits it.
+    The admin saves a draft with a direct line for each. Once the candidates leave both out and the draft's commit is
+    delivered, Timekeeping holds both reserved at later versions and changes them no further. The projection still
+    holds X as it was created, and no Y. A projection that moves fails the run. The step's last line names the
+    entries (`redelivery: entries: <ids>`), and Timekeeping's signals must count positions undelivered.
+  - **The resend**, in `timekeeping-web`: `bin/rails timekeeping:redeliver ENTRIES="<ids>"` (`OutboxRedelivery`).
+    First each entry's newest snapshot, in one batch, which the consumer must apply, every one: the projection was
+    behind on all of them. Then each older snapshot on its own, newest first, and then every snapshot of those
+    entries again, in one batch. The consumer must ignore every one of those. It checks each receipt
+    (`applied`, `ignored`) and exits 1 at the first that differs. It marks nothing in the outbox.
+  - **Reordered** (relay still stopped). The projection holds X, an overwrite, and Y, an insert, exactly as
+    Timekeeping does: version, note, duration, project, work date, `locked`, `bill_status` and `updated_at`. The
+    time-entries report shows both as last written. Timekeeping's signals must count at least as many positions
+    undelivered as before the resend, so the outbox still holds them for the relay.
+  - **Duplicated.** The command starts the relay and waits until Timekeeping's signals count nothing undelivered.
+    The relay has then sent every one of those snapshots a second time. The projection is still exactly as
+    Timekeeping holds it, the report shows both as last written, and the candidates still leave both out. The admin
+    deletes the draft, which releases both (F2), the employee discards X and Y, and the projection holds both
+    discarded.
+
+  The relay is started again however the steps in between end. The output is kept under
+  `tmp/timekeeping-demo/redelivery/`. A run that finishes leaves, per business, two discarded entries and one
+  discarded draft, with nothing reserved. `CHECK_WAIT` sets how long, in seconds, a check, and the command's wait for
+  the relay, waits on a worker (default 60). Keep the relay's stop under five minutes, or Timekeeping's relay-lag
+  alert (§11.3) fires and the command's read of the signals fails. The check is covered by
+  `spec/requests/timekeeping/redelivery_check_spec.rb`, and the resend by Timekeeping's
+  `spec/services/outbox_redelivery_spec.rb`, against a stand-in consumer that upserts by version.
 - **Signals (§11.3).** Each of the existing application's two workers reads the other's alerts, so a
   stopped worker is still noticed: `invoice_operations` reads the local relay's lag (above 60 s for
   5 minutes), and `timekeeping_relay` reads the invoice operation ledger (an intent pending past 60 s, a

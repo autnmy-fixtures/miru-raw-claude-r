@@ -81,6 +81,13 @@ class OutboxRelay
     Result.new(delivered:, undelivered: error.batch)
   end
 
+  # Posts rows to the consumer as one batch, exactly as #run posts one, but
+  # takes, locks and marks nothing in the outbox: an operator's resend of
+  # snapshots the relay may already have delivered, or has still to deliver
+  # (OutboxRedelivery). Answers the consumer's receipt, the contract's
+  # delivery_receipt ("applied", "ignored"), or raises Undelivered.
+  def redeliver(rows) = post(rows)
+
   private
 
     def config = Rails.configuration.x.timekeeping
@@ -105,7 +112,8 @@ class OutboxRelay
         "relay #{request_id}: outbox #{rows.first.id}..#{rows.last.id}, #{rows.size} snapshots, requests #{rows.map(&:request_id).uniq.join(', ')}"
       )
       response = http.request(request(rows, request_id))
-      return if receipt?(response)
+      confirmed = receipt(response)
+      return confirmed if confirmed
 
       raise Undelivered.new("relay #{request_id}: the projection answered #{response.code}: #{response.body.to_s.truncate(200)}", batch: rows.size)
     rescue *TRANSPORT_ERRORS => error
@@ -121,15 +129,16 @@ class OutboxRelay
       end
     end
 
-    # The contract's success: 200 with a delivery receipt.
-    def receipt?(response)
+    # The contract's success, 200 with a delivery receipt: the receipt, or
+    # nil for any other answer.
+    def receipt(response)
       expected = operation.dig("responses", response.code)
-      return false unless expected
+      return unless expected
 
       body = JSON.parse(response.body.to_s)
-      body.is_a?(Hash) && Contracts.errors(CONTRACT, expected, body).empty?
+      body if body.is_a?(Hash) && Contracts.errors(CONTRACT, expected, body).empty?
     rescue JSON::ParserError
-      false
+      nil
     end
 
     def service_token
