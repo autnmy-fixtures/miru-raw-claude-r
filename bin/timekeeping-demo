@@ -14,6 +14,10 @@
 #                                    run a handoff runner in the existing app
 #   bin/timekeeping-demo journey     the end-to-end journey (§13 item 1), from a
 #                                    freshly seeded demo, in the existing app
+#   bin/timekeeping-demo alternating-writers
+#                                    every writer across cutover, rollback and
+#                                    re-cutover (§12.4), from a freshly seeded
+#                                    demo, in the existing app
 #   bin/timekeeping-demo contract-check
 #                                    every contract between the two running
 #                                    apps, while Timekeeping owns the entries
@@ -292,6 +296,10 @@ cmd_journey() {
   compose exec miru-web bin/rails timekeeping:journey
 }
 
+cmd_alternating_writers() {
+  compose exec miru-web bin/rails timekeeping:alternating_writers
+}
+
 case "${1:-}" in
   init) cmd_init ;;
   up) cmd_up ;;
@@ -299,6 +307,7 @@ case "${1:-}" in
   versions) cmd_versions ;;
   handoff) shift; cmd_handoff "$@" ;;
   journey) cmd_journey ;;
+  alternating-writers) cmd_alternating_writers ;;
   contract-check) cmd_contract_check ;;
   independent-deploys) cmd_independent_deploys ;;
   relay-paused) cmd_relay_paused ;;

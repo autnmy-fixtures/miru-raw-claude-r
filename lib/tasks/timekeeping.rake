@@ -53,6 +53,17 @@
 # browser for the PDF renderer; JOURNEY_WAIT the seconds a check waits on a
 # worker (60 by default).
 #
+# The alternating-writers proof of §12.4 (Timekeeping::AlternatingWriters),
+# on both seeded businesses, from a freshly seeded demo: every writer of §1.3
+# writes under each owner in turn, each one an entry another writer wrote
+# under the owner before, with each handoff above run by its own task between
+# stages:
+#
+#   bin/rails timekeeping:alternating_writers  exit 1 at the first check that fails
+#
+# It signs in as the journey does (MIRU_URL, MIRU_SEED_PASSWORD), and
+# CHECK_WAIT sets the seconds a check waits on a worker (60 by default).
+#
 # The live contract check of the independent-deployment proof (§13 item 4,
 # Timekeeping::ContractCheck), while Timekeeping owns the entries: on both
 # seeded businesses it drives the handoff API, the entry API, the reservation
@@ -268,6 +279,25 @@ namespace :timekeeping do
     ).call
   rescue Timekeeping::Journey::Failed => error
     abort "Timekeeping journey failed: #{error.message}"
+  end
+end
+
+namespace :timekeeping do
+  desc "Run every writer across cutover, rollback and re-cutover on the seeded demo (docs/architecture/timekeeping-soa.md 12.4; MIRU_URL, MIRU_SEED_PASSWORD)"
+  task alternating_writers: :environment do
+    handoff = lambda do |name|
+      task = Rake::Task["timekeeping:#{name}"]
+      task.reenable
+      task.invoke
+    end
+    Timekeeping::AlternatingWriters.new(
+      client: Timekeeping::PublicApi::Client.new(base_url: ENV.fetch("MIRU_URL", "http://127.0.0.1:3000")),
+      password: ENV.fetch("MIRU_SEED_PASSWORD") { abort "MIRU_SEED_PASSWORD is the seeded users' password; the run signs in with it" },
+      handoff:, logger: TimekeepingFirstCutoverTask.logger,
+      options: Timekeeping::AlternatingWriters::Options.new(wait: Integer(ENV.fetch("CHECK_WAIT", Timekeeping::PublicApi::DEFAULT_WAIT)))
+    ).call
+  rescue Timekeeping::AlternatingWriters::Failed => error
+    abort "Timekeeping alternating writers failed: #{error.message}"
   end
 end
 

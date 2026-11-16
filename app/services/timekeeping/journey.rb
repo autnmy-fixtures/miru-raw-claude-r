@@ -49,20 +49,18 @@
 # the journey stops there.
 #
 # TENANTS, DEFAULT_WAIT, Client and the public-API plumbing are
-# Timekeeping::PublicApi's, which Timekeeping::ContractCheck shares.
+# Timekeeping::PublicApi's, which Timekeeping::ContractCheck shares; the
+# stages, the fresh-demo check and the handoff with its money check are
+# Timekeeping::DemoHandoffs', which Timekeeping::AlternatingWriters shares.
 class Timekeeping::Journey
   include Timekeeping::PublicApi
+  include Timekeeping::DemoHandoffs
 
   class Failed < StandardError; end
 
   # The stages, each under the owner the handoff before it left, and the
   # handoff that ends each one.
-  STAGES = [
-    { owner: "legacy", handoff: "first_cutover" },
-    { owner: "timekeeping", handoff: "rollback" },
-    { owner: "monolith", handoff: "recutover" },
-    { owner: "timekeeping", handoff: nil }
-  ].freeze
+  STAGES = Timekeeping::DemoHandoffs::STAGES
 
   # The journey's own record of what it wrote, per tenant, to check after
   # every handoff.
@@ -111,20 +109,6 @@ class Timekeeping::Journey
     def log_prefix = "journey"
 
     def wait = @options.wait
-
-    def ensure_fresh!
-      ownership = Timekeeping::Ownership.current
-      return unless ownership.handoff_begun?
-
-      fail! "the journey starts from a freshly seeded demo, before any handoff; ownership is #{ownership.summary}"
-    end
-
-    def ensure_owner!(owner)
-      ownership = Timekeeping::Ownership.current
-      return if ownership.owner == owner && ownership.state_open?
-
-      fail! "expected the #{owner} owner with admission open, found #{ownership.summary}"
-    end
 
     def run_stage(tenant, index)
       label = "#{tenant[:name]}, stage #{index + 1}"
@@ -227,21 +211,6 @@ class Timekeeping::Journey
         end
       end
       say "#{label}: #{drafts.size} draft PDFs downloaded"
-    end
-
-    def hand_off(name)
-      say "handoff: #{name}"
-      before = Timekeeping::FinancialSnapshot.process
-      begin
-        @handoff.call(name)
-      rescue SystemExit, StandardError => error
-        fail! "the #{name} handoff stopped: #{error.message}"
-      end
-      differences = Timekeeping::FinancialSnapshot.diff(before, Timekeeping::FinancialSnapshot.process)
-      fail! "the #{name} handoff changed money: #{differences.first(10).map(&:to_h)}" if differences.any?
-
-      say "handoff: #{name} done, financial snapshot identical (#{before.sum { |_table, rows| rows.size }} rows), " \
-          "ownership #{Timekeeping::Ownership.current.summary}"
     end
 
     def check_kept(tenant)

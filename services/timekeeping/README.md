@@ -135,6 +135,7 @@ bin/timekeeping-demo versions    # each process's image id and the revision it w
 bin/timekeeping-demo handoff first_cutover   # or rollback, recutover; each with :abort
 bin/timekeeping-demo rebuild timekeeping     # rebuilds and restarts Timekeeping; the existing application stays as it is
 bin/timekeeping-demo rebuild existing        # the other way round
+bin/timekeeping-demo alternating-writers     # every writer across cutover, rollback and re-cutover (§12.4)
 bin/timekeeping-demo contract-check          # every contract between the two running applications
 bin/timekeeping-demo independent-deploys     # the independent-deployment proof (§13 item 4), recorded
 bin/timekeeping-demo relay-paused            # the relay-paused proof (§13 item 5)
@@ -225,6 +226,33 @@ bin/timekeeping-demo down        # stops everything; both databases and the hand
   the next journey needs a reset. `JOURNEY_PDF=skip` leaves out the PDF downloads for a runtime with
   no Chromium; the demo's image has one. `JOURNEY_WAIT` sets how long, in seconds, a check waits on a
   worker (default 60).
+- **Alternating writers (§12.4).** `bin/timekeeping-demo alternating-writers` runs
+  `bin/rails timekeeping:alternating_writers` (`Timekeeping::AlternatingWriters`) inside `miru-web`, on a
+  freshly seeded demo, like the journey; it refuses once a handoff has begun, and shares the journey's
+  stages and handoffs (`Timekeeping::DemoHandoffs`). On both seeded businesses it writes a stage under each
+  owner (legacy, timekeeping, monolith, timekeeping), with each handoff run by its own task in between, and
+  the financial snapshot identical around each one. In every stage each writer of §1.3 writes, and from the
+  second stage on each one writes an entry another writer wrote under the owner before the handoff. W6
+  destroys the previous stage's agent, which detaches its entry while the previous stage's draft still
+  holds it. W7 deletes that draft, which releases the entry. W1 web edits the previous stage's MCP entry,
+  and W1 mobile the web one. W3 CLI edits the imported one, and W3a MCP (`miru.time.update` over `/mcp`)
+  the CLI one. W2 bulk-moves the CLI and imported entries to another project of the same client, and
+  bulk-discards the mobile one. Each writer also creates an entry of its own: W4 through a new agent's key,
+  and W5 by importing an unbilled and a billed Harvest row. Last, W7 saves a draft holding the new agent
+  entry. W1, W2, W3, W3a and W7 go over the public API, the CLI and MCP with a CLI session's token. The
+  agents and their keys are made in process, because the existing application has no API for them. W5
+  runs the importer as `imports:harvest_time_entries` does, and W6 destroys the agent through its model,
+  since neither has an HTTP entry point. Every write still goes through the gateway. After each stage, and
+  again after each handoff, every entry written so far must read back through the owner as last written
+  (note, duration, project, agent, bill status, source), and a discarded one must not be found. The
+  projection must catch up to the same, and the candidates must leave out the entry the current draft
+  holds and offer every other kept, unbilled one. If the Copper Kettle Bakery's employee is on only one
+  project, the run first adds a second project to the same client, before any handoff, for W2's moves.
+  `CHECK_WAIT` sets how long, in seconds, a check waits on a worker (default 60). Like the journey, it does
+  not resume, and the next run needs a reset.
+  It does not pass yet: under the timekeeping and monolith owners W6 fails. The owner detaches the entries,
+  but the agent's delete is then refused by the `timesheet_entries → agents` foreign key, because the
+  projection still holds the agent's id until the relay delivers the detach. That is an open question on #8.
 - **Mail.** Development mail goes to `letter_opener`, under `tmp/letter_opener` in `miru-web`. `BROWSER=/bin/true`
   stops Launchy from looking for a browser the container does not have.
 - **Reset.** `bin/timekeeping-demo compose down --volumes` deletes both databases and the journals. The next
