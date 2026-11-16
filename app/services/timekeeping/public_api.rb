@@ -5,8 +5,9 @@ require "net/http"
 # What the local demo's drivers share: the end-to-end journey
 # (Timekeeping::Journey, docs/architecture/timekeeping-soa.md §13 item 1),
 # the live contract check of the independent-deployment proof
-# (Timekeeping::ContractCheck, §13 item 4) and the relay-paused proof
-# (Timekeeping::RelayPausedCheck, §13 item 5). Both drive the existing
+# (Timekeeping::ContractCheck, §13 item 4), the relay-paused proof
+# (Timekeeping::RelayPausedCheck, §13 item 5) and the user-hard-delete proof
+# (Timekeeping::UserDeleteRefusedCheck, §12.4). They drive the existing
 # application the way its users do, over its public HTTP API as each seeded
 # business's own users (an employee writes entries, an admin or owner writes
 # invoices and reads reports), so every write goes through the controllers,
@@ -104,11 +105,12 @@ module Timekeeping::PublicApi
       response.json.fetch("reports").flat_map { |group| group.fetch("entries") }.index_by { |row| row["id"] }
     end
 
-    # The employee's entry list, which reads through the owner (§3.3). With no
-    # entry in the range it answers no `entries` key at all.
-    def entry_list(tenant)
-      query = { from: Date.current.iso8601, to: Date.current.iso8601, user_id: tenant[:employee_id] }
-      response = as(tenant, :employee).call(:get, "/api/v1/timesheet_entry?#{query.to_query}")
+    # The employee's entry list (or another user's, as role), which reads
+    # through the owner (§3.3). With no entry in the range it answers no
+    # `entries` key at all.
+    def entry_list(tenant, role: :employee, user_id: tenant[:employee_id])
+      query = { from: Date.current.iso8601, to: Date.current.iso8601, user_id: }
+      response = as(tenant, role).call(:get, "/api/v1/timesheet_entry?#{query.to_query}")
       expect_ok!(response, "read the entry list")
       response.json.fetch("entries", {}).values.flatten.index_by { |row| row["id"] }
     end

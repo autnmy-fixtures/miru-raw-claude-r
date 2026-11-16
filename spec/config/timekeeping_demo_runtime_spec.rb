@@ -318,6 +318,9 @@ RSpec.describe "Timekeeping local demo runtime" do
     # exits. A stopped service is not listed by `ps` until it is started
     # again; FAKE_STOP_IGNORED names one that `stop` leaves running, and
     # FAKE_PAUSED_STATUS how timekeeping:relay_paused:paused exits.
+    # FAKE_RELAY is the service timekeeping:user_delete_refused:relay names,
+    # after a line of boot noise, and FAKE_REFUSED_STATUS how
+    # timekeeping:user_delete_refused:paused exits.
     context "with running applications" do
       let(:record_dir) { dir.join("deploys") }
       let(:fakes) { {} }
@@ -349,6 +352,16 @@ RSpec.describe "Timekeeping local demo runtime" do
                     exit "${FAKE_PAUSED_STATUS:-0}" ;;
                   *timekeeping:relay_paused:resumed*)
                     echo "relay paused: caught up, relay stopped: $([ -e "${state}/stopped-timekeeping-relay" ] && echo yes || echo no)" ;;
+                  *timekeeping:user_delete_refused:relay*) echo "booting"; echo "${FAKE_RELAY-timekeeping-relay}" ;;
+                  *timekeeping:user_delete_refused:paused*)
+                    for service in timekeeping-relay miru-jobs; do
+                      echo "user delete: refused, ${service} stopped: $([ -e "${state}/stopped-${service}" ] && echo yes || echo no)"
+                    done
+                    exit "${FAKE_REFUSED_STATUS:-0}" ;;
+                  *timekeeping:user_delete_refused:resumed*)
+                    for service in timekeeping-relay miru-jobs; do
+                      echo "user delete: projected, ${service} stopped: $([ -e "${state}/stopped-${service}" ] && echo yes || echo no)"
+                    done ;;
                 esac ;;
             esac
             exit 0
@@ -518,6 +531,85 @@ RSpec.describe "Timekeeping local demo runtime" do
           expect(status).not_to be_success
           expect(err).to include("miru-web is not running")
           expect(steps).to be_empty
+        end
+      end
+
+      describe "the user-hard-delete proof (§12.4)" do
+        def steps
+          docker_calls.filter_map do |call|
+            case call
+            when / (stop|start) (timekeeping-relay|miru-jobs)\z/ then "#{Regexp.last_match(1)} #{Regexp.last_match(2)}"
+            when /exec -T --env RUN=(\S+) miru-web bin\/rails timekeeping:user_delete_refused:(\w+)\z/ then "#{Regexp.last_match(2)} #{Regexp.last_match(1)}"
+            end
+          end
+        end
+
+        it "asks which relay to pause, stops it, runs the paused half, starts it, then runs the resumed half under the same run" do
+          out, err, status = run("user-delete-refused")
+          expect(status).to be_success, err
+
+          run_name = steps.first.split.last
+          expect(run_name).to match(/\A\d{8}T\d{6}Z-\h{4}\z/)
+          expect(steps).to eq([
+            "relay #{run_name}", "stop timekeeping-relay", "paused #{run_name}", "start timekeeping-relay", "resumed #{run_name}"
+          ])
+          expect(out).to include(
+            "pausing the owner's relay (timekeeping-relay)",
+            "user delete: refused, timekeeping-relay stopped: yes",
+            "user delete: projected, timekeeping-relay stopped: no",
+            "the entry was projected once timekeeping-relay resumed"
+          )
+          expect(docker_calls.join("\n")).not_to match(/ (stop|start|up|build) .*miru-/)
+        end
+
+        context "when the prepared application owns the entries" do
+          let(:fakes) { { "FAKE_RELAY" => "miru-jobs" } }
+
+          it "pauses miru-jobs, which runs its local relay, and leaves Timekeeping's relay running" do
+            out, err, status = run("user-delete-refused")
+            expect(status).to be_success, err
+
+            expect(steps.grep(/\A(stop|start) /)).to eq(["stop miru-jobs", "start miru-jobs"])
+            expect(out).to include(
+              "user delete: refused, miru-jobs stopped: yes", "user delete: refused, timekeeping-relay stopped: no",
+              "user delete: projected, miru-jobs stopped: no"
+            )
+          end
+        end
+
+        context "when the paused half fails" do
+          let(:fakes) { { "FAKE_REFUSED_STATUS" => "1" } }
+
+          it "starts the relay again and does not run the resumed half" do
+            _out, _err, status = run("user-delete-refused")
+
+            expect(status).not_to be_success
+            expect(steps.map(&:split).map(&:first)).to eq(%w[relay stop paused start])
+          end
+        end
+
+        context "when the existing application names no relay" do
+          let(:fakes) { { "FAKE_RELAY" => "" } }
+
+          it "fails before stopping anything" do
+            _out, err, status = run("user-delete-refused")
+
+            expect(status).not_to be_success
+            expect(err).to include("named no relay to pause")
+            expect(steps.map(&:split).map(&:first)).to eq(%w[relay])
+          end
+        end
+
+        context "when the relay keeps running after it is stopped" do
+          let(:fakes) { { "FAKE_STOP_IGNORED" => "timekeeping-relay" } }
+
+          it "fails before either half, since nothing would be paused" do
+            _out, err, status = run("user-delete-refused")
+
+            expect(status).not_to be_success
+            expect(err).to include("timekeeping-relay still runs after it was stopped")
+            expect(steps.map(&:split).map(&:first)).to eq(%w[relay stop start])
+          end
         end
       end
 

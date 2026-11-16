@@ -92,6 +92,29 @@
 # waits on a worker (60 by default). bin/timekeeping-demo relay-paused stops
 # and starts the relay around them.
 #
+# The user-hard-delete proof (§12.4, Timekeeping::UserDeleteRefusedCheck),
+# while Timekeeping or the prepared application owns the entries, in two
+# halves around the owner's stopped relay; RUN names the writes of one run,
+# the same for all three:
+#
+#   bin/rails timekeeping:user_delete_refused:relay    print the service that
+#                                                      runs the owner's relay
+#                                                      (timekeeping-relay or
+#                                                      miru-jobs)
+#   bin/rails timekeeping:user_delete_refused:paused   with that relay stopped:
+#                                                      the super-admin delete
+#                                                      of a user whose first
+#                                                      entry is not projected
+#                                                      is refused, with
+#                                                      nothing changed
+#   bin/rails timekeeping:user_delete_refused:resumed  with it started again:
+#                                                      the entry is projected
+#
+# Each exits 1 at the first check that fails. They sign in as the journey
+# does (MIRU_URL, MIRU_SEED_PASSWORD), and CHECK_WAIT sets the seconds a check
+# waits on a worker (60 by default). bin/timekeeping-demo user-delete-refused
+# stops and starts the relay around them.
+#
 # What the existing application measures of its Timekeeping machinery
 # (§11.3, Timekeeping::Signals), read once, for an operator or a script:
 #
@@ -343,6 +366,44 @@ namespace :timekeeping do
     desc "With Timekeeping's relay started again: the projection catches up (docs/architecture/timekeeping-soa.md 13 item 5; RUN)"
     task resumed: :environment do
       TimekeepingRelayPausedTask.run(:resumed)
+    end
+  end
+end
+
+module TimekeepingUserDeleteRefusedTask
+  def self.check
+    Timekeeping::UserDeleteRefusedCheck.new(
+      client: Timekeeping::PublicApi::Client.new(base_url: ENV.fetch("MIRU_URL", "http://127.0.0.1:3000")),
+      password: ENV.fetch("MIRU_SEED_PASSWORD") { abort "MIRU_SEED_PASSWORD is the seeded users' password; the check signs in with it" },
+      run: ENV.fetch("RUN") { abort "RUN names the writes of one run; give every step the same one" },
+      logger: TimekeepingFirstCutoverTask.logger,
+      options: Timekeeping::UserDeleteRefusedCheck::Options.new(wait: Integer(ENV.fetch("CHECK_WAIT", Timekeeping::PublicApi::DEFAULT_WAIT)))
+    )
+  end
+
+  def self.run(step)
+    result = check.public_send(step)
+    puts result if step == :relay
+  rescue Timekeeping::UserDeleteRefusedCheck::Failed => error
+    abort "Timekeeping user-delete proof failed (#{step}): #{error.message}"
+  end
+end
+
+namespace :timekeeping do
+  namespace :user_delete_refused do
+    desc "Print the service that runs the current owner's relay, for the user-delete proof (docs/architecture/timekeeping-soa.md 12.4; RUN)"
+    task relay: :environment do
+      TimekeepingUserDeleteRefusedTask.run(:relay)
+    end
+
+    desc "With the owner's relay stopped: a user's hard delete is refused, with nothing changed (docs/architecture/timekeeping-soa.md 12.4; RUN)"
+    task paused: :environment do
+      TimekeepingUserDeleteRefusedTask.run(:paused)
+    end
+
+    desc "With the owner's relay started again: the refused user's entry is projected (docs/architecture/timekeeping-soa.md 12.4; RUN)"
+    task resumed: :environment do
+      TimekeepingUserDeleteRefusedTask.run(:resumed)
     end
   end
 end
