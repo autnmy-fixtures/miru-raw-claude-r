@@ -1,0 +1,11 @@
+#!/bin/bash -e
+
+# The entrypoint of Timekeeping's image (Dockerfile). The web process creates
+# or migrates Timekeeping's own database, its Solid Queue tables included,
+# before it serves (§11.1). The relay's worker (bin/rails solid_queue:start)
+# does not: start it once the web process answers GET /up.
+if [ "${1}" == "bundle" ] && [ "${2}" == "exec" ] && [ "${3}" == "puma" ]; then
+  bin/rails db:prepare
+fi
+
+exec "${@}"
