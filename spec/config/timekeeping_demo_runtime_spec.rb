@@ -333,6 +333,10 @@ RSpec.describe "Timekeeping local demo runtime" do
     # FAKE_SAVE_FAILURES_STATUS is how timekeeping:save_failures exits,
     # FAKE_RESERVATION_PAUSED_STATUS how timekeeping:reservation_failures:paused
     # exits, and FAKE_HARD_DELETE_STATUS how timekeeping:hard_delete exits.
+    # FAKE_STALE_GENERATION_STATUS is how timekeeping:stale_generation exits,
+    # and FAKE_STALE_REFUSED the request ids its last line names;
+    # FAKE_TIMEKEEPING_ALERTS the request ids timekeeping-web's log has a
+    # stale-generation alert for.
     context "with running applications" do
       let(:record_dir) { dir.join("deploys") }
       let(:fakes) { {} }
@@ -350,6 +354,11 @@ RSpec.describe "Timekeeping local demo runtime" do
               ps) [ -e "${state}/stopped-${!#}" ] || echo "demo-${!#}-1" ;;
               stop) [ "${!#}" = "${FAKE_STOP_IGNORED:-}" ] || touch "${state}/stopped-${!#}" ;;
               start) rm -f "${state}/stopped-${!#}" ;;
+              logs)
+                echo "=> Booting Puma"
+                for id in ${FAKE_TIMEKEEPING_ALERTS-run-1 run-2}; do
+                  echo "[${id}] Timekeeping signal stale_generation: POST /internal/v1/entries was refused with no handoff in progress"
+                done ;;
               up)
                 rm -f "${state}/stopped-${!#}"
                 if [[ " $* " == *" --force-recreate "* ]]; then
@@ -392,6 +401,10 @@ RSpec.describe "Timekeeping local demo runtime" do
                   *timekeeping:save_failures*)
                     echo "save failures: every case held"
                     exit "${FAKE_SAVE_FAILURES_STATUS:-0}" ;;
+                  *timekeeping:stale_generation*)
+                    echo "stale generation: every case held"
+                    echo "stale generation: refused request ids: ${FAKE_STALE_REFUSED-run-1 run-2}"
+                    exit "${FAKE_STALE_GENERATION_STATUS:-0}" ;;
                   *timekeeping:hard_delete*)
                     echo "hard delete: every case held"
                     exit "${FAKE_HARD_DELETE_STATUS:-0}" ;;
@@ -790,6 +803,69 @@ RSpec.describe "Timekeeping local demo runtime" do
             expect(status).not_to be_success
             expect(err).to include("miru-jobs is not running")
             expect(docker_calls.grep(/timekeeping:hard_delete/)).to be_empty
+          end
+        end
+      end
+
+      describe "the stale-generation part of the failure injection (§12.4, §9.3)" do
+        it "runs the one step in the existing application, then finds Timekeeping's alert for each refused request, and stops and starts nothing" do
+          out, err, status = run("stale-generation")
+          expect(status).to be_success, err
+
+          step = docker_calls.grep(/timekeeping:stale_generation/).sole
+          expect(step).to match(/exec -T --env RUN=\d{8}T\d{6}Z-\h{4} miru-web bin\/rails timekeeping:stale_generation\z/)
+          expect(docker_calls.last).to end_with("logs --no-color --no-log-prefix timekeeping-web")
+          expect(out).to include("stale generation: every case held", "Timekeeping reported each of the 2 refusals as an alert")
+          expect(docker_calls.join("\n")).not_to match(/ (stop|start|up|build|kill) /)
+
+          run_name = step[/RUN=(\S+)/, 1]
+          expect(dir.join("stale-generation/#{run_name}.log").read).to include("stale generation: refused request ids: run-1 run-2")
+        end
+
+        context "when timekeeping-web's log has no alert for a refused request" do
+          let(:fakes) { { "FAKE_TIMEKEEPING_ALERTS" => "run-1" } }
+
+          it "fails, naming the request" do
+            out, err, status = run("stale-generation")
+
+            expect(status).not_to be_success
+            expect(err).to include("timekeeping-web's log has no stale-generation alert for request run-2 (§11.3)")
+            expect(out).not_to include("refusals as an alert")
+          end
+        end
+
+        context "when the step names no refused request" do
+          let(:fakes) { { "FAKE_STALE_REFUSED" => "" } }
+
+          it "fails without reading the log" do
+            _out, err, status = run("stale-generation")
+
+            expect(status).not_to be_success
+            expect(err).to include("the stale-generation step named no refused request")
+            expect(docker_calls.grep(/ logs /)).to be_empty
+          end
+        end
+
+        context "when the step fails" do
+          let(:fakes) { { "FAKE_STALE_GENERATION_STATUS" => "1" } }
+
+          it "fails without reading the log" do
+            out, _err, status = run("stale-generation")
+
+            expect(status).not_to be_success
+            expect(docker_calls.grep(/ logs /)).to be_empty
+            expect(out).not_to include("refusals as an alert")
+          end
+        end
+
+        context "when a process is not running" do
+          it "runs nothing" do
+            run("compose", "stop", "timekeeping-relay")
+            _out, err, status = run("stale-generation")
+
+            expect(status).not_to be_success
+            expect(err).to include("timekeeping-relay is not running")
+            expect(docker_calls.grep(/timekeeping:stale_generation/)).to be_empty
           end
         end
       end

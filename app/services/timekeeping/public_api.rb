@@ -10,8 +10,9 @@ require "net/http"
 # (Timekeeping::UserDeleteRefusedCheck, §12.4), the billing-handoff proof
 # (Timekeeping::BillingHandoffCheck, §12.4), the save-failures proof
 # (Timekeeping::SaveFailuresCheck, §12.4), the reservation-failures proof
-# (Timekeeping::ReservationFailuresCheck, §12.4) and the hard-delete proof
-# (Timekeeping::HardDeleteCheck, §12.4). They drive the existing
+# (Timekeeping::ReservationFailuresCheck, §12.4), the hard-delete proof
+# (Timekeeping::HardDeleteCheck, §12.4) and the stale-generation proof
+# (Timekeeping::StaleGenerationCheck, §12.4). They drive the existing
 # application the way its users do, over its public HTTP API as each seeded
 # business's own users (an employee writes entries, an admin or owner writes
 # invoices and reads reports), so every write goes through the controllers,
