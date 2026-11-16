@@ -1,7 +1,5 @@
 # frozen_string_literal: true
 
-require "net/http"
-
 # The end-to-end journey of docs/architecture/timekeeping-soa.md §13 item 1,
 # on both tenants, in the local demo (§11.2):
 #
@@ -49,14 +47,13 @@ require "net/http"
 # for its own runner to resume or abort; the journey then fails, and the next
 # journey needs a fresh demo. Any check that does not hold raises Failed, and
 # the journey stops there.
+#
+# TENANTS, DEFAULT_WAIT, Client and the public-API plumbing are
+# Timekeeping::PublicApi's, which Timekeeping::ContractCheck shares.
 class Timekeeping::Journey
-  class Failed < StandardError; end
+  include Timekeeping::PublicApi
 
-  # The two seeded businesses (db/seeds.rb), and which of their users act.
-  TENANTS = [
-    { name: "Fork & Leaf Salads", employee: "mateo@forkandleaf.example", admin: "luis@forkandleaf.example" },
-    { name: "Copper Kettle Bakery", employee: "lena@copperkettle.example", admin: "hugo@copperkettle.example" }
-  ].freeze
+  class Failed < StandardError; end
 
   # The stages, each under the owner the handoff before it left, and the
   # handoff that ends each one.
@@ -67,42 +64,10 @@ class Timekeeping::Journey
     { owner: "timekeeping", handoff: nil }
   ].freeze
 
-  # How long a check that waits on a worker (the relay into the projection,
-  # the invoice operation worker's commit) keeps trying.
-  DEFAULT_WAIT = 60
-
   # The journey's own record of what it wrote, per tenant, to check after
   # every handoff.
   Entry = Struct.new(:id, :duration, :note, :reserved, keyword_init: true)
   Draft = Struct.new(:id, :number, :entry_ids, keyword_init: true)
-
-  # A JSON client for the existing application's public API. The transport
-  # takes a Net::HTTP request and answers [status, content type, body]; the
-  # default sends it to base_url, and a spec can hand it to the Rack app.
-  class Client
-    Response = Data.define(:status, :content_type, :body) do
-      def json = JSON.parse(body)
-    end
-
-    def initialize(base_url:, transport: nil)
-      @base = URI(base_url)
-      @transport = transport || method(:over_http)
-    end
-
-    def call(verb, path, body: nil, headers: {})
-      request = Net::HTTP.const_get(verb.to_s.capitalize).new(URI.join(@base, path))
-      { "Accept" => "application/json", "Content-Type" => "application/json", **headers }.each { |key, value| request[key] = value }
-      request.body = body.to_json if body
-      Response.new(*@transport.call(request))
-    end
-
-    private
-
-      def over_http(request)
-        response = Net::HTTP.start(@base.host, @base.port, open_timeout: 10, read_timeout: 120) { |http| http.request(request) }
-        [response.code.to_i, response["Content-Type"].to_s, response.body.to_s]
-      end
-  end
 
   # What a run may change. pdf: false skips the PDF downloads (they need a
   # browser for the existing application's PDF renderer), and says so; wait
@@ -143,9 +108,9 @@ class Timekeeping::Journey
 
   private
 
-    def say(message) = @logger.info("journey: #{message}")
+    def log_prefix = "journey"
 
-    def fail!(message) = raise(Failed, message)
+    def wait = @options.wait
 
     def ensure_fresh!
       ownership = Timekeeping::Ownership.current
@@ -159,17 +124,6 @@ class Timekeeping::Journey
       return if ownership.owner == owner && ownership.state_open?
 
       fail! "expected the #{owner} owner with admission open, found #{ownership.summary}"
-    end
-
-    def prepare_tenant(tenant)
-      company = Company.find_by(name: tenant[:name]) || fail!("no seeded business named #{tenant[:name]}")
-      employee = User.find_by!(email: tenant[:employee])
-      project = employee.project_members.kept.includes(project: :client).map(&:project).find do |candidate|
-        candidate.kept? && candidate.billable && candidate.client.kept? && candidate.client.company_id == company.id
-      end
-      project || fail!("#{tenant[:employee]} is on no billable project of #{tenant[:name]}")
-
-      tenant.merge(company:, employee_id: employee.id, project:, entries: [], drafts: [])
     end
 
     def run_stage(tenant, index)
@@ -205,13 +159,6 @@ class Timekeeping::Journey
       expect_ok!(response, "edit entry #{entry.id}")
       entry.duration = duration
       entry.note = note
-    end
-
-    def entry_body(tenant, duration:, note:)
-      {
-        project_id: tenant[:project].id,
-        timesheet_entry: { duration:, note:, work_date: Date.current.iso8601, bill_status: "unbilled" }
-      }
     end
 
     def save_drafts(tenant, index, label)
@@ -262,27 +209,12 @@ class Timekeeping::Journey
       say "#{label}: reservations hold #{reserved.size} entries, #{unreserved.size} stay offered"
     end
 
-    def candidates(tenant)
-      response = as(tenant, :admin).call(:get, "/api/v1/invoices/line_items?client_id=#{tenant[:project].client_id}")
-      expect_ok!(response, "read the invoice candidates")
-      response.json.fetch("new_line_item_entries").filter_map do |row|
-        [row["timesheet_entry_id"], row] if row["timesheet_entry_id"]
-      end.to_h
-    end
-
     def check_reports(tenant, entries, label)
       eventually("the time-entries report shows entries #{entries.map(&:id)} as last written") do
         reported = time_entries_report(tenant)
         entries.all? { |entry| same?(entry, reported[entry.id]) }
       end
       say "#{label}: the time-entries report shows #{entries.size} entries as last written"
-    end
-
-    def time_entries_report(tenant)
-      query = { date_range: "custom", from: Date.current.iso8601, to: Date.current.iso8601, client: [tenant[:project].client_id] }
-      response = as(tenant, :admin).call(:get, "/api/v1/reports/time_entries?#{query.to_query}")
-      expect_ok!(response, "read the time-entries report")
-      response.json.fetch("reports").flat_map { |group| group.fetch("entries") }.index_by { |row| row["id"] }
     end
 
     def check_pdfs(drafts, tenant, label)
@@ -327,55 +259,6 @@ class Timekeeping::Journey
       say "#{label}: #{tenant[:drafts].size} drafts read"
       check_reports(tenant, tenant[:entries], label)
       check_pdfs(tenant[:drafts], tenant, label)
-    end
-
-    # The employee's entry list, which reads through the owner (§3.3).
-    def entry_list(tenant)
-      query = { from: Date.current.iso8601, to: Date.current.iso8601, user_id: tenant[:employee_id] }
-      response = as(tenant, :employee).call(:get, "/api/v1/timesheet_entry?#{query.to_query}")
-      expect_ok!(response, "read the entry list")
-      response.json.fetch("entries").values.flatten.index_by { |row| row["id"] }
-    end
-
-    def same?(entry, row)
-      row.present? && row["note"] == entry.note && row["duration"].to_d.round(5) == entry.duration.to_d.round(5)
-    end
-
-    # --- plumbing -------------------------------------------------------
-
-    def as(tenant, role)
-      email = tenant.fetch(role)
-      headers = @sessions[email] ||= sign_in(email)
-      SignedIn.new(@client, headers)
-    end
-
-    SignedIn = Data.define(:client, :headers) do
-      def call(verb, path, body: nil) = client.call(verb, path, body:, headers:)
-    end
-
-    def sign_in(email)
-      response = @client.call(:post, "/api/v1/users/login", body: { app: "miru-desktop", user: { email:, password: @password } })
-      expect_ok!(response, "sign in as #{email}")
-      token = response.json.dig("user", "token") || fail!("signing in as #{email} answered no token")
-      { "X-Auth-Email" => email, "X-Auth-Token" => token }
-    end
-
-    def expect_ok!(response, what)
-      return if response.status == 200
-
-      fail! "could not #{what}: #{response.status} #{response.body.to_s.truncate(500)}"
-    end
-
-    def eventually(what)
-      wait = @options.wait
-      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + wait
-      loop do
-        result = yield
-        return result if result
-        fail! "timed out after #{wait} s waiting until #{what}" if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
-
-        sleep 0.5
-      end
     end
 
     def summary(tenants)

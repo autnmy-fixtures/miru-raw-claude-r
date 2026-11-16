@@ -135,6 +135,8 @@ bin/timekeeping-demo versions    # each process's image id and the revision it w
 bin/timekeeping-demo handoff first_cutover   # or rollback, recutover; each with :abort
 bin/timekeeping-demo rebuild timekeeping     # rebuilds and restarts Timekeeping; the existing application stays as it is
 bin/timekeeping-demo rebuild existing        # the other way round
+bin/timekeeping-demo contract-check          # every contract between the two running applications
+bin/timekeeping-demo independent-deploys     # the independent-deployment proof (§13 item 4), recorded
 bin/timekeeping-demo compose stop timekeeping-relay   # pauses the relay (§12.4); `compose start` resumes it
 bin/timekeeping-demo down        # stops everything; both databases and the handoff journals are kept
 ```
@@ -157,6 +159,26 @@ bin/timekeeping-demo down        # stops everything; both databases and the hand
   differs from it: Timekeeping's as the `REVISION` build argument, the existing application's as a build
   label. `rebuild` rebuilds and recreates only the named application's two processes, web first. The
   independent rebuild-and-restart proof (§13 item 4) runs on this.
+- **Independent deploys (§13 item 4).** `bin/timekeeping-demo independent-deploys` runs while Timekeeping
+  owns the entries (after `handoff first_cutover`, or after the journey). It records every process's
+  container, image and revision, and runs the contract check. Then it rebuilds and restarts Timekeeping
+  alone and checks that the existing application's processes still run the same containers and images,
+  that both of Timekeeping's were restarted, and that the contract check still holds. Then it does the
+  same the other way round. There is no paired release. The first step that fails ends it, and the whole
+  run, versions included, is written to `tmp/timekeeping-demo/deploys/<UTC time>.log`
+  (`TIMEKEEPING_DEMO_RECORD_DIR` to keep it elsewhere). The contract tests of §12.3 prove each application
+  against the shared schemas in its own CI; the contract check, `bin/timekeeping-demo contract-check`,
+  proves the two running artifacts still keep them with each other. First, both read the same contract
+  documents byte for byte (`packages/timekeeping_reservations/contracts/v1` in each image). Then
+  `bin/rails timekeeping:contract_check` (`Timekeeping::ContractCheck`) runs in `miru-web`, signing in as
+  the journey does. Over the handoff API, Timekeeping's copy of the ownership record must agree with this
+  one. On both seeded businesses, an employee creates, edits and lists an entry (entry API), and an admin
+  saves a draft with a line for it and deletes it (reservation API: prepare from `miru-web`, commit from
+  `miru-jobs`); the candidates must leave the entry out and then offer it again. The time-entries report
+  must show the edit and then drop the entry once the employee discards it (entry snapshot, delivered
+  by `timekeeping-relay`). Each client checks every answer against its contract. Each run leaves one
+  discarded entry and one discarded draft per business, with nothing reserved. `CHECK_WAIT` sets how
+  long, in seconds, a check waits on a worker (default 60).
 - **Signals (§11.3).** Each of the existing application's two workers reads the other's alerts, so a
   stopped worker is still noticed: `invoice_operations` reads the local relay's lag (above 60 s for
   5 minutes), and `timekeeping_relay` reads the invoice operation ledger (an intent pending past 60 s, a

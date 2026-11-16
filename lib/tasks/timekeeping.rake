@@ -53,6 +53,19 @@
 # browser for the PDF renderer; JOURNEY_WAIT the seconds a check waits on a
 # worker (60 by default).
 #
+# The live contract check of the independent-deployment proof (§13 item 4,
+# Timekeeping::ContractCheck), while Timekeeping owns the entries: on both
+# seeded businesses it drives the handoff API, the entry API, the reservation
+# API and the entry snapshot between the two running applications:
+#
+#   bin/rails timekeeping:contract_check       exit 1 at the first check that fails
+#
+# It signs in as the journey does (MIRU_URL, MIRU_SEED_PASSWORD), reaches
+# Timekeeping's handoff API as the handoff tasks do (TIMEKEEPING_URL,
+# TIMEKEEPING_TOKEN_KEY), and CHECK_WAIT sets the seconds a check waits on a
+# worker (60 by default). bin/timekeeping-demo independent-deploys runs it
+# before the two deploys and after each one.
+#
 # What the existing application measures of its Timekeeping machinery
 # (§11.3, Timekeeping::Signals), read once, for an operator or a script:
 #
@@ -240,5 +253,19 @@ namespace :timekeeping do
     ).call
   rescue Timekeeping::Journey::Failed => error
     abort "Timekeeping journey failed: #{error.message}"
+  end
+end
+
+namespace :timekeeping do
+  desc "Check every Timekeeping contract between the two running applications (docs/architecture/timekeeping-soa.md 13 item 4)"
+  task contract_check: :environment do
+    Timekeeping::ContractCheck.new(
+      client: Timekeeping::PublicApi::Client.new(base_url: ENV.fetch("MIRU_URL", "http://127.0.0.1:3000")),
+      password: ENV.fetch("MIRU_SEED_PASSWORD") { abort "MIRU_SEED_PASSWORD is the seeded users' password; the check signs in with it" },
+      logger: TimekeepingFirstCutoverTask.logger,
+      options: Timekeeping::ContractCheck::Options.new(wait: Integer(ENV.fetch("CHECK_WAIT", Timekeeping::PublicApi::DEFAULT_WAIT)))
+    ).call
+  rescue Timekeeping::ContractCheck::Failed, Timekeeping::InternalApi::Error => error
+    abort "Timekeeping contract check failed: #{error.class}: #{error.message}"
   end
 end

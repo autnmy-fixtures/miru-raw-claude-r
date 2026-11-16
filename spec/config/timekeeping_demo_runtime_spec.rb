@@ -207,6 +207,8 @@ RSpec.describe "Timekeeping local demo runtime" do
       docker_log.exist? ? docker_log.readlines(chomp: true) : []
     end
 
+    def prefix = "compose --file #{Rails.root.join('docker-compose.timekeeping-demo.yml')} --env-file #{env_file}"
+
     it "writes the credentials once, readable by its owner only, each value its own" do
       _out, err, status = run("init")
       expect(status).to be_success, err
@@ -297,6 +299,160 @@ RSpec.describe "Timekeeping local demo runtime" do
       _out, err, status = run("journey")
       expect(status).to be_success, err
       expect(docker_calls.last).to end_with("exec miru-web bin/rails timekeeping:journey")
+    end
+
+    # The independent-deployment proof (§13 item 4) and its contract check,
+    # against a stand-in for docker that keeps one container per service, and
+    # gives a service a new container, and so a new image, each time it is
+    # recreated. FAKE_ALSO_RECREATE names a service it recreates along with
+    # any other; FAKE_TIMEKEEPING_CONTRACTS what Timekeeping's contract
+    # documents digest to; FAKE_CHECK_STATUS how timekeeping:contract_check
+    # exits.
+    context "with running applications" do
+      let(:record_dir) { dir.join("deploys") }
+      let(:fakes) { {} }
+
+      before do
+        dir.join("state").mkpath
+        dir.join("bin/docker").write(<<~SH)
+          #!/usr/bin/env bash
+          echo "$*" >> "#{docker_log}"
+          state="#{dir.join('state')}"
+          generation() { cat "${state}/$1" 2>/dev/null || echo 1; }
+          if [ "$1" = compose ]; then
+            shift 5
+            case "$1" in
+              ps) echo "demo-${!#}-1" ;;
+              up)
+                if [[ " $* " == *" --force-recreate "* ]]; then
+                  for service in "${!#}" ${FAKE_ALSO_RECREATE:-}; do echo $(( $(generation "${service}") + 1 )) > "${state}/${service}"; done
+                fi ;;
+              exec)
+                case "$*" in
+                  *"timekeeping-web sh -c"*) echo "${FAKE_TIMEKEEPING_CONTRACTS:-0a1b  entry_api.json}" ;;
+                  *"miru-web sh -c"*) echo "0a1b  entry_api.json" ;;
+                  *timekeeping:contract_check*) echo "contract check: every contract held"; exit "${FAKE_CHECK_STATUS:-0}" ;;
+                esac ;;
+            esac
+            exit 0
+          fi
+          service="${!##demo-}"
+          service="${service%-1}"
+          case "$1 $2" in
+            "inspect --format={{.Id}}") echo "${service}-container-$(generation "${service}")" ;;
+            "inspect --format={{.Image}}") echo "image-of-${service}-container-$(generation "${service}")" ;;
+            "image inspect") echo "revision-of-${!#}" ;;
+          esac
+        SH
+        run("init")
+      end
+
+      def run(*args)
+        Open3.capture3(
+          { "TIMEKEEPING_DEMO_ENV_FILE" => env_file.to_s, "TIMEKEEPING_DEMO_RECORD_DIR" => record_dir.to_s,
+            "PATH" => "#{dir.join('bin')}:#{ENV.fetch('PATH')}" }.merge(fakes),
+          script, *args
+        )
+      end
+
+      def records = record_dir.glob("*.log")
+
+      it "checks that both applications read the same contract documents, then runs the contract check in the existing application" do
+        out, err, status = run("contract-check")
+
+        expect(status).to be_success, err
+        expect(docker_calls.grep(/ exec /)).to eq([
+          "#{prefix} exec -T miru-web sh -c cd '/rails/packages/timekeeping_reservations/contracts/v1' && sha256sum *.json",
+          "#{prefix} exec -T timekeeping-web sh -c cd '/app/packages/timekeeping_reservations/contracts/v1' && sha256sum *.json",
+          "#{prefix} exec -T miru-web bin/rails timekeeping:contract_check"
+        ])
+        expect(out).to include("both applications read the same 1 files", "every contract held")
+      end
+
+      context "when the two applications read different contract documents" do
+        let(:fakes) { { "FAKE_TIMEKEEPING_CONTRACTS" => "9f9f  entry_api.json" } }
+
+        it "fails without running the contract check" do
+          _out, err, status = run("contract-check")
+
+          expect(status).not_to be_success
+          expect(err).to include("the two applications do not read the same contract documents", "9f9f  entry_api.json")
+          expect(docker_calls.grep(/timekeeping:contract_check/)).to be_empty
+        end
+      end
+
+      it "rebuilds and restarts Timekeeping alone, then the existing application alone, with the contract check before and after each" do
+        out, err, status = run("independent-deploys")
+        expect(status).to be_success, err
+
+        steps = docker_calls.filter_map do |call|
+          case call
+          when / build (\S+)\z/ then "build #{Regexp.last_match(1)}"
+          when / up .*--force-recreate (\S+)\z/ then "restart #{Regexp.last_match(1)}"
+          when /timekeeping:contract_check/ then "contract check"
+          end
+        end
+        expect(steps).to eq([
+          "contract check",
+          "build timekeeping-web", "restart timekeeping-web", "restart timekeeping-relay", "contract check",
+          "build miru-web", "restart miru-web", "restart miru-jobs", "contract check"
+        ])
+        expect(out).to include(
+          "the existing application stayed at its prior artifact:\n" \
+          "miru-web container=miru-web-container-1 image=image-of-miru-web-container-1 revision=revision-of-image-of-miru-web-container-1",
+          "Timekeeping stayed at its prior artifact:\n" \
+          "timekeeping-web container=timekeeping-web-container-2 image=image-of-timekeeping-web-container-2"
+        )
+
+        expect(records.size).to eq(1)
+        record = records.first.read
+        expect(record).to include(
+          "== before the deploys", "timekeeping-relay container=timekeeping-relay-container-1",
+          "== deploy: timekeeping, alone", "timekeeping now runs:\ntimekeeping-web container=timekeeping-web-container-2",
+          "== deploy: existing, alone", "existing now runs:\nmiru-web container=miru-web-container-2",
+          "miru-jobs container=miru-jobs-container-2",
+          "the contract check green after each"
+        )
+        expect(out).to include("Recorded in #{records.first}.")
+      end
+
+      context "when a deploy also restarts the other application" do
+        let(:fakes) { { "FAKE_ALSO_RECREATE" => "miru-jobs" } }
+
+        it "fails the proof at the first deploy, and records why" do
+          _out, _err, status = run("independent-deploys")
+
+          expect(status).not_to be_success
+          expect(records.first.read).to include(
+            "rebuilding timekeeping changed the existing application",
+            # Recreated along with each of Timekeeping's two processes.
+            "miru-jobs container=miru-jobs-container-1", "miru-jobs container=miru-jobs-container-3"
+          )
+          expect(docker_calls.grep(/ build miru-web/)).to be_empty
+        end
+      end
+
+      context "when the contract check fails" do
+        let(:fakes) { { "FAKE_CHECK_STATUS" => "1" } }
+
+        it "fails the proof before any deploy" do
+          _out, _err, status = run("independent-deploys")
+
+          expect(status).not_to be_success
+          expect(docker_calls.grep(/ build /)).to be_empty
+          expect(records.first.read).not_to include("independent deploys done")
+        end
+      end
+
+      it "fails when a process is not running" do
+        dir.join("bin/docker").write("#!/bin/sh\necho \"$*\" >> \"#{docker_log}\"\n")
+
+        _out, _err, status = run("independent-deploys")
+
+        expect(status).not_to be_success
+        expect(records.first.read).to include("miru-web is not running; start the demo with bin/timekeeping-demo up")
+        expect(docker_calls.grep(/ build /)).to be_empty
+      end
     end
   end
 end
