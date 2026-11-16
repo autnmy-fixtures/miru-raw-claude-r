@@ -57,6 +57,14 @@
 #                                    after step 1, and see billing writes
 #                                    refused with 503 ownership-moving; then
 #                                    resume the handoff to its end
+#   bin/timekeeping-demo save-failures
+#                                    the save-failure part of the failure
+#                                    injection (§12.4, §9.3): a lost prepare
+#                                    answer, a crash after prepare, a
+#                                    rolled-back save, and the replays of a
+#                                    committed, an aborted and a forced-pending
+#                                    operation, while Timekeeping owns the
+#                                    entries
 #   bin/timekeeping-demo down        stop everything; the databases are kept
 #   bin/timekeeping-demo compose …   any other docker compose command
 #
@@ -384,6 +392,22 @@ cmd_aggregate_line() {
   echo "== aggregate line: removing a grouped line released only what no other line references, a failed save and destroy kept every reservation, and destroying the draft released its whole set"
 }
 
+# The save-failure part of §12.4's failure injection (§9.3), while
+# Timekeeping owns the entries: one step in miru-web
+# (bin/rails timekeeping:save_failures, Timekeeping::SaveFailuresCheck). It
+# puts each failure between the existing application and the running
+# Timekeeping itself, and its crash is a child process of that step killing
+# itself, so nothing is stopped or started here.
+cmd_save_failures() {
+  local run
+  require_env_file
+  processes "${EXISTING_SERVICES[@]}" "${TIMEKEEPING_SERVICES[@]}" > /dev/null
+  run="$(date -u +%Y%m%dT%H%M%SZ)-$(secret 2)"
+  echo "== save failures: run ${run}"
+  compose exec -T --env "RUN=${run}" miru-web bin/rails timekeeping:save_failures
+  echo "== save failures: a lost prepare answer, a crash after prepare and a rolled-back save each ended failed and aborted, and no replay of a resolved operation changed anything"
+}
+
 # Where the billing-handoff proof's steps leave their markers, in miru-web
 # (the miru_handoff_journals volume; Timekeeping::BillingHandoffCheck).
 BILLING_HANDOFF_DIR=tmp/timekeeping/billing-handoff
@@ -487,6 +511,7 @@ case "${1:-}" in
   user-delete-refused) cmd_user_delete_refused ;;
   aggregate-line) cmd_aggregate_line ;;
   billing-handoff) cmd_billing_handoff ;;
+  save-failures) cmd_save_failures ;;
   down) compose down ;;
   compose) shift; compose "$@" ;;
   ""|help|-h|--help) usage ;;

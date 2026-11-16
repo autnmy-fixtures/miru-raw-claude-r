@@ -142,6 +142,7 @@ bin/timekeeping-demo relay-paused            # the relay-paused proof (§13 item
 bin/timekeeping-demo user-delete-refused     # the user-hard-delete proof (§12.4); after a cutover, then after a rollback
 bin/timekeeping-demo aggregate-line          # the aggregate-line proof (§12.4, F3), with timekeeping-web stopped for its failures
 bin/timekeeping-demo billing-handoff         # billing writes during a handoff (§12.4): the handoff waits for a paused one, then refuses them
+bin/timekeeping-demo save-failures           # the save-failure rows of §9.3 (§12.4 failure injection): lost prepare answers, a crash, a rollback, replays
 bin/timekeeping-demo compose stop timekeeping-relay   # pauses the relay (§12.4); `compose start` resumes it
 bin/timekeeping-demo down        # stops everything; both databases and the handoff journals are kept
 ```
@@ -271,6 +272,37 @@ bin/timekeeping-demo down        # stops everything; both databases and the hand
   connections by `spec/models/timekeeping/billing_handoff_paused_spec.rb`, the other steps by
   `spec/requests/timekeeping/billing_handoff_check_spec.rb`, and the fence itself by
   `spec/models/timekeeping/billing_write_admission_spec.rb` and `spec/requests/timekeeping/billing_write_fence_spec.rb`.
+- **Save failures (§12.4 failure injection, §9.3).** `bin/timekeeping-demo save-failures` runs
+  `bin/rails timekeeping:save_failures` (`Timekeeping::SaveFailuresCheck`) inside `miru-web`, in one step, while
+  Timekeeping owns the entries with admission open. It covers the rows of §9.3 where an invoice save fails, or is
+  replayed, after its prepare reached Timekeeping. On both seeded businesses the employee creates entries A, B, C and D
+  over the public API. The admin saves a draft holding A, and its commit is delivered. Then:
+  - **Prepare arrives after its operation is terminal, and the terminal-receipt row (§9.2 step 3).** The save's steps
+    2-4 run again for its committed operation (`Timekeeping::InvoiceBoundary#perform`, as a resend of the same
+    operation does): Timekeeping answers its `committed` receipt, the save returns the existing outcome, and the invoice
+    change, which fails the check if it runs, does not run. Then the same replay with the intent forced `pending` fails
+    with a retryable reconciliation error. The forced `pending` lasts only inside a transaction the check rolls back,
+    so the invoice operation worker never sees it.
+  - **Invoice transaction rolls back.** A save of B over the public API reuses the draft's number, so the invoice fails
+    validation inside the invoice transaction, after its prepare reserved B: 422, the intent `failed`, no invoice, and
+    the abort delivered from the ledger releases B. A replay of that `aborted` operation then fails.
+  - **Lost response on prepare.** A save of C, run in process through `Timekeeping::InvoiceWrites`, whose provider sends
+    each prepare to Timekeeping and then loses the answer as a read timeout: Timekeeping prepares it three times (the
+    boundary's attempts, one operation), the save fails as retryable, its intent is `failed`, and the abort releases C.
+  - **Crash after prepare, before the invoice commits.** A save of D runs in a child process that kills itself with
+    SIGKILL inside the invoice transaction, after the invoice was written: the intent is still `pending`, there is no
+    invoice, and D stays held. Once the save's 30 s time limit passes, recovery on `miru-jobs` records `failed` and the
+    abort releases D.
+
+  "Changed nothing" is read on both sides: the invoice and its lines, the invoice's ledger rows, and Timekeeping's own
+  record of the entry (version, `locked`, `updated_at`). Reservations are read from the invoice candidates. A run that
+  finishes leaves, per business, four discarded entries and one discarded draft. `CHECK_WAIT` sets how long, in
+  seconds, a check waits on a worker (default 60; the crash's recovery takes about 35 s of it). The other rows of §9.3
+  are proved elsewhere or not yet on the demo: Timekeeping down at prepare and F1 by the aggregate-line proof, relay
+  paused by the relay-paused proof. In process, the rows this proof covers are pinned by
+  `spec/services/timekeeping/invoice_boundary_spec.rb` and `spec/services/timekeeping/invoice_operation_worker_spec.rb`
+  (under the monolith owner too, where a row applies to it), and the check itself by
+  `spec/services/timekeeping/save_failures_check_spec.rb`.
 - **Signals (§11.3).** Each of the existing application's two workers reads the other's alerts, so a
   stopped worker is still noticed: `invoice_operations` reads the local relay's lag (above 60 s for
   5 minutes), and `timekeeping_relay` reads the invoice operation ledger (an intent pending past 60 s, a
