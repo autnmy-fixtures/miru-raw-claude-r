@@ -33,8 +33,12 @@ module Timekeeping::StoredEntries
     company_ids = TimesheetEntry.joins(project: :client).pluck(:id, "clients.company_id").to_h
 
     TimesheetEntry.order(:id).map do |row|
-      { "id" => row.id, "company_id" => company_ids.fetch(row.id), "version" => row.version }
-        .merge(FIELDS.index_with { |field| FORMATS.fetch(field, :itself.to_proc).call(row.public_send(field)) })
+      { "id" => row.id, "company_id" => company_ids.fetch(row.id), "version" => row.version }.merge(fields(row))
     end
+  end
+
+  # One row's entry fields (common.json#/$defs/entry_fields), as stored.
+  def self.fields(row)
+    FIELDS.index_with { |field| FORMATS.fetch(field, :itself.to_proc).call(row.public_send(field)) }
   end
 end

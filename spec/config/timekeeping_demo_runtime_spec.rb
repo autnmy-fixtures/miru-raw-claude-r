@@ -381,7 +381,10 @@ RSpec.describe "Timekeeping local demo runtime" do
                 echo "=> Booting Puma"
                 for id in ${FAKE_TIMEKEEPING_ALERTS-run-1 run-2}; do
                   echo "[${id}] Timekeeping signal stale_generation: POST /internal/v1/entries was refused with no handoff in progress"
-                done ;;
+                done
+                if [ "${!#}" = "${FAKE_SINGLE_WRITER_IN:-}" ]; then
+                  echo "Timekeeping signal single_writer: timesheet_entries was written by a path outside the gateway, not by the projection consumer"
+                fi ;;
               up)
                 rm -f "${state}/stopped-${!#}"
                 if [[ " $* " == *" --force-recreate "* ]]; then
@@ -465,6 +468,9 @@ RSpec.describe "Timekeeping local demo runtime" do
                     echo "stale generation: every case held"
                     echo "stale generation: refused request ids: ${FAKE_STALE_REFUSED-run-1 run-2}"
                     exit "${FAKE_STALE_GENERATION_STATUS:-0}" ;;
+                  *timekeeping:tenant_isolation*)
+                    echo "tenant isolation: every case held"
+                    exit "${FAKE_TENANT_ISOLATION_STATUS:-0}" ;;
                   *timekeeping:hard_delete*)
                     echo "hard delete: every case held"
                     exit "${FAKE_HARD_DELETE_STATUS:-0}" ;;
@@ -926,6 +932,57 @@ RSpec.describe "Timekeeping local demo runtime" do
             expect(status).not_to be_success
             expect(err).to include("timekeeping-relay is not running")
             expect(docker_calls.grep(/timekeeping:stale_generation/)).to be_empty
+          end
+        end
+      end
+
+      describe "the tenant-isolation proof (§13 item 7)" do
+        it "runs the one step in the existing application, then reads both of its processes' logs, and stops and starts nothing" do
+          out, err, status = run("tenant-isolation")
+          expect(status).to be_success, err
+
+          step = docker_calls.grep(/timekeeping:tenant_isolation/).sole
+          expect(step).to match(/exec -T --env RUN=\d{8}T\d{6}Z-\h{4} miru-web bin\/rails timekeeping:tenant_isolation\z/)
+          expect(docker_calls.grep(/ logs /).map { |call| call.split.last }).to eq(%w[miru-web miru-jobs])
+          expect(out).to include("tenant isolation: every case held", "no process of the existing application logged a single-writer guard violation")
+          expect(docker_calls.join("\n")).not_to match(/ (stop|start|up|build|kill) /)
+
+          run_name = step[/RUN=(\S+)/, 1]
+          expect(dir.join("tenant-isolation/#{run_name}.log").read).to include("tenant isolation: every case held")
+        end
+
+        context "when a process of the existing application logged a single-writer violation" do
+          let(:fakes) { { "FAKE_SINGLE_WRITER_IN" => "miru-jobs" } }
+
+          it "fails, naming the process and showing the violation" do
+            out, err, status = run("tenant-isolation")
+
+            expect(status).not_to be_success
+            expect(err).to include("Timekeeping signal single_writer: ", "miru-jobs's log holds 1 single-writer guard violations (§12.2, §11.3)")
+            expect(out).not_to include("no process of the existing application logged")
+          end
+        end
+
+        context "when the step fails" do
+          let(:fakes) { { "FAKE_TENANT_ISOLATION_STATUS" => "1" } }
+
+          it "fails without reading the logs" do
+            out, _err, status = run("tenant-isolation")
+
+            expect(status).not_to be_success
+            expect(docker_calls.grep(/ logs /)).to be_empty
+            expect(out).not_to include("no process of the existing application logged")
+          end
+        end
+
+        context "when a process is not running" do
+          it "runs nothing" do
+            run("compose", "stop", "miru-jobs")
+            _out, err, status = run("tenant-isolation")
+
+            expect(status).not_to be_success
+            expect(err).to include("miru-jobs is not running")
+            expect(docker_calls.grep(/timekeeping:tenant_isolation/)).to be_empty
           end
         end
       end

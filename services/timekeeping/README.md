@@ -149,6 +149,7 @@ bin/timekeeping-demo hard-delete             # §9.3's hard delete of a non-draf
 bin/timekeeping-demo stale-generation        # §9.3's stale generation: calls carrying another generation refused and changing nothing, retries to the current owner
 bin/timekeeping-demo consumer-down           # §9.3's projection consumer down: entries listed and invoiced at once, the relay's deliveries refused, then its resend caught up
 bin/timekeeping-demo redelivery              # §13 item 6's duplicate and reordered delivery: snapshots resent out of order and twice, only the newest applied
+bin/timekeeping-demo tenant-isolation        # §13 item 7: neither business reaches the other's entries, the ownership guards hold, no single-writer violation; under any owner
 bin/timekeeping-demo compose stop timekeeping-relay   # pauses the relay (§12.4); `compose start` resumes it
 bin/timekeeping-demo down        # stops everything; both databases and the handoff journals are kept
 ```
@@ -477,6 +478,39 @@ bin/timekeeping-demo down        # stops everything; both databases and the hand
   alert (§11.3) fires and the command's read of the signals fails. The check is covered by
   `spec/requests/timekeeping/redelivery_check_spec.rb`, and the resend by Timekeeping's
   `spec/services/outbox_redelivery_spec.rb`, against a stand-in consumer that upserts by version.
+- **Tenant isolation and ownership guards (§13 item 7, §6.3, §2.1, §12.2).** `bin/timekeeping-demo tenant-isolation`
+  runs `bin/rails timekeeping:tenant_isolation` (`Timekeeping::TenantIsolationCheck`) inside `miru-web`, in one step,
+  under any owner with admission open: run it before the first cutover, after it, after the rollback and after the
+  re-cutover to see each owner hold. Nothing is stopped or started. On each seeded business the employee creates entry
+  E and the admin creates entry M for themselves. Then each business, as its own users, goes after the other's E:
+  - **Read.** The other's employee's entry list and the other's client's invoice candidates answer 404. The
+    time-entries report filtered on the other's client holds none of its entries. The owner's own read
+    (`Timekeeping::EntryReads`), made in this business, does not find the entry.
+  - **Write.** An edit, a discard and a CLI edit of the entry answer 404. A bulk move and a bulk discard of it answer
+    422, as they find nothing. An entry created on the other's project answers 404 and is not written. Under the
+    timekeeping owner, the same show, edit and discard also go straight to Timekeeping under this business's claims,
+    past the gateway's own lookup. Each answers 404 `not-found`, because Timekeeping scopes every query by the
+    token's company.
+  - **Prepare (L8).** A draft of this business with a line naming the entry answers 422: Timekeeping's or the prepared
+    application's `wrong_company` refusal, or under the legacy owner today's "must belong to the same company". No
+    invoice is written.
+  - **Project.** A batch posted to the projection consumer, signed with the relay's service token as the relay signs
+    one, carries one snapshot that keeps the contract: the other business's newest projected row, at its next version,
+    under this business's company and project. It answers 403 `forbidden`, and the row is unchanged.
+
+  Afterwards the other's E is unchanged on its owner and in the projection, and still offered to its own business.
+  Inside each business, for the ownership guards: the employee's list of the admin's entries answers the employee's
+  own (A6). The employee's edit and discard of M answer 403 (A5). A bulk move and a bulk discard of M answer 422
+  (A6). The employee's create for the admin answers 403 and writes nothing (A2). The admin's CLI edit of E answers
+  404, because the CLI edits only the caller's own entries, whatever the role (A7). Both entries are unchanged. Then
+  the admin's web edit of E goes through (A5), which shows that the refusals came from the guards. Last, E and M are
+  discarded. The single-writer guard must pass: the check counts the `single_writer` alerts its own process reports
+  while it runs, and must count none. Then the command reads `miru-web`'s and `miru-jobs`' logs and fails if either
+  holds a `Timekeeping signal single_writer:` line from any time since its container started. Under the legacy owner
+  the guard allows today's writers, so only the later owners can trip it. The output is kept under
+  `tmp/timekeeping-demo/tenant-isolation/`. A run that finishes leaves, per business, two discarded entries and no
+  invoice. `CHECK_WAIT` sets how long, in seconds, a check waits on a worker (default 60). The check is covered by
+  `spec/requests/timekeeping/tenant_isolation_check_spec.rb`, under each of the three owners.
 - **Signals (§11.3).** Each of the existing application's two workers reads the other's alerts, so a
   stopped worker is still noticed: `invoice_operations` reads the local relay's lag (above 60 s for
   5 minutes), and `timekeeping_relay` reads the invoice operation ledger (an intent pending past 60 s, a
