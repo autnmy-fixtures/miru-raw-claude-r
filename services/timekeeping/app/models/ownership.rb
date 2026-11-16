@@ -81,7 +81,7 @@ class Ownership < ApplicationRecord
 
   # The record held FOR SHARE for a checkpoint step (§10.5 steps 4 to 6): the
   # rollback's take (CheckpointTake, owner `timekeeping`) and the re-cutover's
-  # load (RecutoverLoad, owner `monolith`). OutOfStep unless it is frozen
+  # load and reconcile (RecutoverLoad, RecutoverReconcile, owner `monolith`). OutOfStep unless it is frozen
   # under `owner`, the handoff's outgoing owner, at `generation`. Held for the rest of the caller's transaction, so
   # the fence cannot flip or abort the handoff under it. Must run inside that
   # transaction.

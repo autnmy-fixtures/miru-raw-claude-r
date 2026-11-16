@@ -94,7 +94,8 @@ module CheckpointTake
   # Every part Timekeeping holds, each in the form a checkpoint carries it and
   # in the order the take answers it. Reads only, with no guard of its own:
   # the caller holds the record as its step needs (the take here, and the
-  # re-cutover's load, RecutoverLoad, which compares what it would replace).
+  # re-cutover's load, RecutoverLoad, which compares what it would replace,
+  # and its reconcile, RecutoverReconcile, which compares what the load left).
   def self.held
     {
       entries: Entry.includes(:reservations).order(:id).map(&:to_contract),
