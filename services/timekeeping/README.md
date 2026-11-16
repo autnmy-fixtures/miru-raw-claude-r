@@ -154,6 +154,20 @@ bin/timekeeping-demo down        # stops everything; both databases and the hand
   finds. They go to its log at error level, and to Sentry with the tag `timekeeping` once `SENTRY_DSN` is
   set, which the demo does not set. `bin/timekeeping-demo compose exec timekeeping-web bin/rails
   timekeeping:signals` reads them, and still works when the relay's worker is stopped.
+- **The journey (§13 item 1).** `bin/timekeeping-demo journey` runs `bin/rails timekeeping:journey`
+  (`Timekeeping::Journey`) inside `miru-web`, on a freshly seeded demo; it refuses once a handoff has
+  begun. On both seeded businesses it signs in over the public API as the seeded users, with
+  `MIRU_SEED_PASSWORD`. In each stage an employee creates and edits entries, editing the previous
+  stage's entry too, and an admin or owner saves a direct and a grouped draft. Then it checks the
+  reservations through the invoice candidates, the time-entries report (which waits for the relay) and
+  each draft's PDF. It runs each handoff with its own task (first cutover, rollback, re-cutover), with a
+  stage of new writes under every owner. Around each handoff it takes the financial snapshot before and
+  after, and they must be identical. After each one it reads back every entry accepted so far, under
+  any owner, as last written, along with every reservation, draft, report and PDF. The first check that
+  fails exits 1. It does not resume: a handoff that stops leaves its journal for its own runner, and
+  the next journey needs a reset. `JOURNEY_PDF=skip` leaves out the PDF downloads for a runtime with
+  no Chromium; the demo's image has one. `JOURNEY_WAIT` sets how long, in seconds, a check waits on a
+  worker (default 60).
 - **Mail.** Development mail goes to `letter_opener`, under `tmp/letter_opener` in `miru-web`. `BROWSER=/bin/true`
   stops Launchy from looking for a browser the container does not have.
 - **Reset.** `bin/timekeeping-demo compose down --volumes` deletes both databases and the journals. The next

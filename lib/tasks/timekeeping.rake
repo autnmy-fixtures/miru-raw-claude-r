@@ -39,6 +39,20 @@
 # disposition either: its reservations come out of the prepared application
 # as it holds them.
 #
+# The end-to-end journey of §13 item 1 (Timekeeping::Journey), on both
+# seeded businesses, from a freshly seeded demo: entries, a direct and a
+# grouped draft, reservations, reports and PDF, then each handoff above in
+# turn, run by its own task, with new writes under every owner:
+#
+#   bin/rails timekeeping:journey              exit 1 at the first check that fails
+#
+# It signs in over the existing application's public API at MIRU_URL
+# (http://127.0.0.1:3000 by default) as the seeded users, with
+# MIRU_SEED_PASSWORD, and the handoffs read what their tasks read.
+# JOURNEY_PDF=skip leaves out the PDF downloads, for a runtime with no
+# browser for the PDF renderer; JOURNEY_WAIT the seconds a check waits on a
+# worker (60 by default).
+#
 # What the existing application measures of its Timekeeping machinery
 # (§11.3, Timekeeping::Signals), read once, for an operator or a script:
 #
@@ -205,5 +219,26 @@ namespace :timekeeping do
     alerts = signals.alerts
     abort alerts.map { |alert| "ALERT #{alert.message}" }.join("\n") if alerts.any?
     puts "no alerts"
+  end
+end
+
+namespace :timekeeping do
+  desc "Run the end-to-end journey of docs/architecture/timekeeping-soa.md 13 item 1 on the seeded demo (MIRU_URL, MIRU_SEED_PASSWORD)"
+  task journey: :environment do
+    handoff = lambda do |name|
+      task = Rake::Task["timekeeping:#{name}"]
+      task.reenable
+      task.invoke
+    end
+    Timekeeping::Journey.new(
+      client: Timekeeping::Journey::Client.new(base_url: ENV.fetch("MIRU_URL", "http://127.0.0.1:3000")),
+      password: ENV.fetch("MIRU_SEED_PASSWORD") { abort "MIRU_SEED_PASSWORD is the seeded users' password; the journey signs in with it" },
+      handoff:, logger: TimekeepingFirstCutoverTask.logger,
+      options: Timekeeping::Journey::Options.new(
+        pdf: ENV["JOURNEY_PDF"] != "skip", wait: Integer(ENV.fetch("JOURNEY_WAIT", Timekeeping::Journey::DEFAULT_WAIT))
+      )
+    ).call
+  rescue Timekeeping::Journey::Failed => error
+    abort "Timekeeping journey failed: #{error.message}"
   end
 end

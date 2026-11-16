@@ -290,5 +290,13 @@ RSpec.describe "Timekeeping local demo runtime" do
       expect(err).to include("handoff takes first_cutover, rollback or recutover")
       expect(docker_calls.grep(/db:drop/)).to be_empty
     end
+
+    it "runs the end-to-end journey in the existing application" do
+      run("init")
+
+      _out, err, status = run("journey")
+      expect(status).to be_success, err
+      expect(docker_calls.last).to end_with("exec miru-web bin/rails timekeeping:journey")
+    end
   end
 end

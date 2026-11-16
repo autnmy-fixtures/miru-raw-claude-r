@@ -12,6 +12,8 @@
 #   bin/timekeeping-demo versions    the revision and image each process runs
 #   bin/timekeeping-demo handoff first_cutover|rollback|recutover[:abort]
 #                                    run a handoff runner in the existing app
+#   bin/timekeeping-demo journey     the end-to-end journey (§13 item 1), from a
+#                                    freshly seeded demo, in the existing app
 #   bin/timekeeping-demo down        stop everything; the databases are kept
 #   bin/timekeeping-demo compose …   any other docker compose command
 #
@@ -134,12 +136,17 @@ cmd_handoff() {
   compose exec miru-web bin/rails "timekeeping:$1"
 }
 
+cmd_journey() {
+  compose exec miru-web bin/rails timekeeping:journey
+}
+
 case "${1:-}" in
   init) cmd_init ;;
   up) cmd_up ;;
   rebuild) shift; cmd_rebuild "$@" ;;
   versions) cmd_versions ;;
   handoff) shift; cmd_handoff "$@" ;;
+  journey) cmd_journey ;;
   down) compose down ;;
   compose) shift; compose "$@" ;;
   ""|help|-h|--help) usage ;;
