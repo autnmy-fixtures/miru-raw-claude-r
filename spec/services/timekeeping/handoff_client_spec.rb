@@ -44,6 +44,53 @@ RSpec.describe Timekeeping::HandoffClient do
     )
   end
 
+  let(:created_at) { "2026-11-02T09:15:30.123456Z" }
+
+  # What Timekeeping holds on two tenants after the cutover and some writes,
+  # in the contract's form: an entry on a kept draft at version 3, an
+  # unlocked link, a destroyed non-draft's retained entry (§7.3), a discarded
+  # entry, and an agent's entry whose metadata holds a null inside an array;
+  # their audit rows, a committed receipt and the no-op abort (§9.3), and an
+  # idempotency receipt per tenant under one key.
+  let(:held) do
+    {
+      entries: [
+        entry(id: 101, company_id: 1, version: 3, locked: true, duration: 0.1, note: "Kitchen prep"),
+        entry(id: 102, company_id: 1, duration: 479.99999, note: nil),
+        entry(id: 103, company_id: 1, version: 2, locked: true, bill_status: "billed"),
+        entry(id: 104, company_id: 1, discarded_at: "2026-11-04T08:00:00.000001Z"),
+        entry(id: 230, company_id: 2, version: 5, locked: true, agent_id: 4, source: "mcp", proof_metadata: { "tags" => [nil, "a"] })
+      ],
+      reservations: [
+        wire(reservation(entry_id: 101, invoice_id: 501, company_id: 1)),
+        wire(reservation(entry_id: 102, invoice_id: 502, company_id: 1, edit_lock: false)),
+        wire(reservation(entry_id: 103, invoice_id: 503, company_id: 1, disposition: :retained)),
+        wire(reservation(entry_id: 230, invoice_id: 601, company_id: 2))
+      ],
+      entry_audits: [
+        { "id" => 9, "entry_id" => 101, "company_id" => 1, "version" => 1, "action" => "create", "actor" => "user:7", "agent_id" => nil,
+          "writer" => "web", "request_id" => "req-1", "audited_changes" => { "duration" => 0.1, "note" => nil }, "created_at" => created_at },
+        { "id" => 14, "entry_id" => 230, "company_id" => 2, "version" => 5, "action" => "update", "actor" => "agent:4", "agent_id" => 4,
+          "writer" => "agent", "request_id" => "req-2", "audited_changes" => { "note" => [nil, "Proofing"] }, "created_at" => created_at }
+      ],
+      reservation_operations: [
+        { "invoice_id" => 501, "operation_id" => "3c9d1f6e-8a2b-4c5d-9e0f-1a2b3c4d5e6f", "company_id" => 1, "kind" => "save",
+          "invoice_state" => "draft", "entry_ids" => [101], "state" => "committed", "created_at" => created_at, "updated_at" => created_at },
+        { "invoice_id" => 701, "operation_id" => "8f14e45f-ceea-467f-a0e3-b4a1c3d2e5f6", "company_id" => nil, "kind" => nil,
+          "invoice_state" => nil, "entry_ids" => [], "state" => "aborted", "created_at" => created_at, "updated_at" => created_at }
+      ],
+      idempotency_receipts: [
+        { "company_id" => 1, "key" => "web-1", "request_digest" => "d1", "status" => 201,
+          "response" => { "entry" => { "id" => 101, "duration" => 0.1 } }, "created_at" => created_at },
+        { "company_id" => 2, "key" => "web-1", "request_digest" => "d2", "status" => 200, "response" => { "discarded_ids" => [] }, "created_at" => created_at }
+      ]
+    }
+  end
+
+  def wire(reservation)
+    reservation.to_h.transform_keys(&:to_s).merge("state" => reservation.state.to_s, "disposition" => reservation.disposition.to_s)
+  end
+
   def frozen!
     client.run_step(:close, generation: 0)
     client.run_step(:freeze, generation: 1)
@@ -166,53 +213,6 @@ RSpec.describe Timekeeping::HandoffClient do
     # Timekeeping owns the entries after a cutover at generation 1; the
     # rollback's close raises the generation to 2 and freezes there.
     let!(:fake) { TimekeepingContracts::FakeHandoff.new(generation: 1, owner: "timekeeping").install! }
-
-    let(:created_at) { "2026-11-02T09:15:30.123456Z" }
-
-    # What Timekeeping holds on two tenants after the cutover and some writes:
-    # an entry on a kept draft at version 3, an unlocked link, a destroyed
-    # non-draft's retained entry (§7.3), a discarded entry, and an agent's
-    # entry whose metadata holds a null inside an array; their audit rows, a
-    # committed receipt and the no-op abort (§9.3), and an idempotency receipt
-    # per tenant under one key.
-    let(:held) do
-      {
-        entries: [
-          entry(id: 101, company_id: 1, version: 3, locked: true, duration: 0.1, note: "Kitchen prep"),
-          entry(id: 102, company_id: 1, duration: 479.99999, note: nil),
-          entry(id: 103, company_id: 1, version: 2, locked: true, bill_status: "billed"),
-          entry(id: 104, company_id: 1, discarded_at: "2026-11-04T08:00:00.000001Z"),
-          entry(id: 230, company_id: 2, version: 5, locked: true, agent_id: 4, source: "mcp", proof_metadata: { "tags" => [nil, "a"] })
-        ],
-        reservations: [
-          wire(reservation(entry_id: 101, invoice_id: 501, company_id: 1)),
-          wire(reservation(entry_id: 102, invoice_id: 502, company_id: 1, edit_lock: false)),
-          wire(reservation(entry_id: 103, invoice_id: 503, company_id: 1, disposition: :retained)),
-          wire(reservation(entry_id: 230, invoice_id: 601, company_id: 2))
-        ],
-        entry_audits: [
-          { "id" => 9, "entry_id" => 101, "company_id" => 1, "version" => 1, "action" => "create", "actor" => "user:7", "agent_id" => nil,
-            "writer" => "web", "request_id" => "req-1", "audited_changes" => { "duration" => 0.1, "note" => nil }, "created_at" => created_at },
-          { "id" => 14, "entry_id" => 230, "company_id" => 2, "version" => 5, "action" => "update", "actor" => "agent:4", "agent_id" => 4,
-            "writer" => "agent", "request_id" => "req-2", "audited_changes" => { "note" => [nil, "Proofing"] }, "created_at" => created_at }
-        ],
-        reservation_operations: [
-          { "invoice_id" => 501, "operation_id" => "3c9d1f6e-8a2b-4c5d-9e0f-1a2b3c4d5e6f", "company_id" => 1, "kind" => "save",
-            "invoice_state" => "draft", "entry_ids" => [101], "state" => "committed", "created_at" => created_at, "updated_at" => created_at },
-          { "invoice_id" => 701, "operation_id" => "8f14e45f-ceea-467f-a0e3-b4a1c3d2e5f6", "company_id" => nil, "kind" => nil,
-            "invoice_state" => nil, "entry_ids" => [], "state" => "aborted", "created_at" => created_at, "updated_at" => created_at }
-        ],
-        idempotency_receipts: [
-          { "company_id" => 1, "key" => "web-1", "request_digest" => "d1", "status" => 201,
-            "response" => { "entry" => { "id" => 101, "duration" => 0.1 } }, "created_at" => created_at },
-          { "company_id" => 2, "key" => "web-1", "request_digest" => "d2", "status" => 200, "response" => { "discarded_ids" => [] }, "created_at" => created_at }
-        ]
-      }
-    end
-
-    def wire(reservation)
-      reservation.to_h.transform_keys(&:to_s).merge("state" => reservation.state.to_s, "disposition" => reservation.disposition.to_s)
-    end
 
     def frozen_for_rollback!
       fake.hold!(**held)
@@ -347,6 +347,203 @@ RSpec.describe Timekeeping::HandoffClient do
       )
 
       expect { client.take_checkpoint(generation: 2) }.to raise_error(described_class::ContractViolation)
+    end
+  end
+
+  describe "#load_recutover_checkpoint" do
+    # The prepared application owns the entries after a rollback at
+    # generation 2; the re-cutover's close raises the generation to 3 and
+    # freezes there. Timekeeping still holds what it held at the rollback.
+    let!(:fake) { TimekeepingContracts::FakeHandoff.new(generation: 2, owner: "monolith").install!.hold!(**held) }
+
+    # What Timekeeping::LocalCheckpoint takes out of the prepared
+    # application: what Timekeeping held, plus what the monolith owner
+    # accepted after the rollback. 101 was released by a discarded draft (F2)
+    # at version 4, and Copper Kettle logged 240 onto a new draft, with its
+    # audit row, receipt and idempotency receipt.
+    let(:checkpoint) do
+      Timekeeping::LocalCheckpoint::Checkpoint.new(
+        generation: 3,
+        entries: held[:entries].map { |held_entry| held_entry["id"] == 101 ? held_entry.merge("version" => 4, "locked" => false) : held_entry } +
+          [entry(id: 240, company_id: 2, locked: true, duration: 45.5, source_metadata: { "skipped" => [nil] })],
+        reservations: [
+          reservation(entry_id: 102, invoice_id: 502, company_id: 1, edit_lock: false),
+          reservation(entry_id: 103, invoice_id: 503, company_id: 1, disposition: :retained),
+          reservation(entry_id: 230, invoice_id: 601, company_id: 2),
+          reservation(entry_id: 240, invoice_id: 602, company_id: 2)
+        ],
+        entry_audits: held[:entry_audits] + [
+          { "id" => 15, "entry_id" => 240, "company_id" => 2, "version" => 1, "action" => "create", "actor" => "user:8", "agent_id" => nil,
+            "writer" => "web", "request_id" => "req-3", "audited_changes" => { "duration" => 45.5 }, "created_at" => created_at }
+        ],
+        reservation_operations: held[:reservation_operations] + [
+          { "invoice_id" => 602, "operation_id" => "b5e2c1d0-4f3a-4b2c-8d1e-0f9a8b7c6d5e", "company_id" => 2, "kind" => "save",
+            "invoice_state" => "draft", "entry_ids" => [240], "state" => "committed", "created_at" => created_at, "updated_at" => created_at }
+        ],
+        idempotency_receipts: held[:idempotency_receipts] + [
+          { "company_id" => 2, "key" => "web-2", "request_digest" => "d3", "status" => 201,
+            "response" => { "entry" => { "id" => 240, "duration" => 45.5 } }, "created_at" => created_at }
+        ]
+      )
+    end
+
+    # The checkpoint as the wire carries it, part by part.
+    def carried(checkpoint)
+      {
+        "entries" => checkpoint.entries, "reservations" => checkpoint.reservations.map { |carried| wire(carried) },
+        "entry_audits" => checkpoint.entry_audits, "reservation_operations" => checkpoint.reservation_operations,
+        "idempotency_receipts" => checkpoint.idempotency_receipts
+      }
+    end
+
+    def frozen_for_recutover!
+      client.run_step(:close, generation: 2)
+      client.run_step(:freeze, generation: 3)
+    end
+
+    it "carries every part exactly as taken and answers how many rows of each Timekeeping loaded" do
+      frozen_for_recutover!
+
+      receipt = client.load_recutover_checkpoint(checkpoint)
+
+      expect(receipt).to eq(described_class::RecutoverReceipt.new(
+        entries: 6, reservations: 4, entry_audits: 3, reservation_operations: 3, idempotency_receipts: 3
+      ))
+      expect(fake.held).to eq(carried(checkpoint))
+      expect(fake.held.fetch("entries").map { |held_entry| held_entry.values_at("id", "version", "duration", "locked") }).to eq(
+        [[101, 4, 0.1, false], [102, 1, 479.99999, false], [103, 2, 90.7, true], [104, 1, 90.7, false], [230, 5, 90.7, true], [240, 1, 45.5, true]]
+      )
+      expect(fake.held.dig("entries", 4, "proof_metadata")).to eq("tags" => [nil, "a"])
+      expect(fake.held.dig("entries", 5, "source_metadata")).to eq("skipped" => [nil])
+      expect(fake.held.dig("entries", 3, "discarded_at")).to eq("2026-11-04T08:00:00.000001Z")
+      expect(fake.held.fetch("reservations")).to include(
+        "entry_id" => 103, "invoice_id" => 503, "company_id" => 1, "operation_id" => nil,
+        "state" => "committed", "disposition" => "retained", "edit_lock" => true
+      )
+    end
+
+    it "carries the generation in X-Ownership-Generation and the body, and Timekeeping writes no outbox snapshot" do
+      frozen_for_recutover!
+
+      client.load_recutover_checkpoint(checkpoint)
+
+      expect(fake.calls.last).to have_attributes(operation: :load_recutover_checkpoint)
+      expect(fake.calls.last.input.fetch("generation")).to eq(3)
+      expect(a_request(:post, "#{TimekeepingContracts::FakeHandoff::URL}/internal/v1/handoff/recutover/checkpoint")
+        .with(headers: { "X-Ownership-Generation" => "3" })).to have_been_made.once
+      expect(client.status).to eq(described_class::Status.new(
+        copy: described_class::Copy.new(generation: 3, owner: "monolith", state: "frozen"),
+        outbox: described_class::Outbox.new(latest_position: nil, undelivered: 0)
+      ))
+    end
+
+    it "may be sent again: Timekeeping holds the same and answers the same" do
+      frozen_for_recutover!
+      first = client.load_recutover_checkpoint(checkpoint)
+
+      expect(client.load_recutover_checkpoint(checkpoint)).to eq(first)
+      expect(fake.held).to eq(carried(checkpoint))
+    end
+
+    it "carries back what the rollback took, and after the flip Timekeeping gives it back again (§13 item 3)" do
+      rolled_back = TimekeepingContracts::FakeHandoff.new(generation: 1, owner: "timekeeping").install!.hold!(**held)
+      client.run_step(:close, generation: 1)
+      client.run_step(:freeze, generation: 2)
+      taken = client.take_checkpoint(generation: 2)
+      client.run_step(:flip, generation: 2)
+      client.run_step(:close, generation: 2)
+      client.run_step(:freeze, generation: 3)
+
+      client.load_recutover_checkpoint(taken.with(generation: 3))
+      client.run_step(:flip, generation: 3)
+      client.run_step(:close, generation: 3)
+      client.run_step(:freeze, generation: 4)
+
+      expect(client.take_checkpoint(generation: 4)).to eq(taken.with(generation: 4))
+      expect(rolled_back.violations).to be_empty
+    end
+
+    it "raises Timekeeping's out-of-step refusal anywhere but frozen under monolith at the checkpoint's generation" do
+      refusals = {
+        "open" => -> { },
+        "closed" => -> { client.run_step(:close, generation: 2) },
+        "frozen, carried another generation" => -> { client.run_step(:freeze, generation: 3) }
+      }
+
+      refusals.each do |where, reach|
+        reach.call
+        carrying = where.include?("another") ? checkpoint.with(generation: 4) : checkpoint
+
+        expect { client.load_recutover_checkpoint(carrying) }.to raise_error(described_class::Problem) { |problem|
+          expect([problem.status, problem.type, problem.retryable]).to eq([409, "out-of-step", false]), where
+        }
+      end
+      expect(fake.held).to eq(held.transform_keys(&:to_s))
+    end
+
+    it "raises out-of-step for a rollback's copy, frozen under timekeeping" do
+      rollback = TimekeepingContracts::FakeHandoff.new(generation: 2, owner: "timekeeping").install!
+      frozen_for_recutover!
+
+      expect { client.load_recutover_checkpoint(checkpoint) }.to raise_error(described_class::Problem, /409 out-of-step.*expects owner monolith/)
+      expect(rollback.calls.last.operation).to eq(:load_recutover_checkpoint)
+    end
+
+    it "raises checkpoint-refused with its lists when the checkpoint would drop a write Timekeeping holds" do
+      frozen_for_recutover!
+      fake.fail_next(:load_recutover_checkpoint, status: 422, slug: "checkpoint-refused",
+        lists: { "dropped_entry" => [104], "dropped_idempotency_receipt" => ["1/web-1"] })
+
+      expect { client.load_recutover_checkpoint(checkpoint) }.to raise_error(described_class::Problem) { |problem|
+        expect([problem.status, problem.type, problem.retryable]).to eq([422, "checkpoint-refused", false])
+        expect(problem.lists).to eq("dropped_entry" => [104], "dropped_idempotency_receipt" => ["1/web-1"])
+      }
+      expect(fake.held).to eq(held.transform_keys(&:to_s))
+    end
+
+    it "raises checkpoint-refused for a provisional reservation, which the request may carry but no take answers" do
+      frozen_for_recutover!
+      provisional = checkpoint.reservations.last.with(state: :provisional, operation_id: "b5e2c1d0-4f3a-4b2c-8d1e-0f9a8b7c6d5e")
+
+      expect { client.load_recutover_checkpoint(checkpoint.with(reservations: checkpoint.reservations[0..-2] + [provisional])) }
+        .to raise_error(described_class::Problem) { |problem|
+          expect([problem.status, problem.type, problem.lists]).to eq([422, "checkpoint-refused", { "provisional_reservation" => [240] }])
+        }
+      expect(fake.held).to eq(held.transform_keys(&:to_s))
+    end
+
+    it "refuses a checkpoint the contract cannot carry without sending it" do
+      broken = {
+        "a reservation in no state of the rule" =>
+          checkpoint.with(reservations: [reservation(entry_id: 240, invoice_id: 602, company_id: 2).with(state: :pending)]),
+        "an entry without its version" => checkpoint.with(entries: [checkpoint.entries.last.except("version")]),
+        "an audit row without its id" => checkpoint.with(entry_audits: [checkpoint.entry_audits.last.except("id")]),
+        "a receipt without its operation" => checkpoint.with(reservation_operations: [checkpoint.reservation_operations.last.except("operation_id")]),
+        "an idempotency receipt without its key" => checkpoint.with(idempotency_receipts: [checkpoint.idempotency_receipts.last.except("key")])
+      }
+
+      broken.each do |what, carrying|
+        expect { client.load_recutover_checkpoint(carrying) }.to raise_error(described_class::Invalid, /load_recutover_checkpoint/), what
+      end
+      expect(fake.calls).to be_empty
+    end
+
+    it "raises Unavailable on a lost response, though the load ran; sending it again answers the same" do
+      frozen_for_recutover!
+      fake.lose_next_response(:load_recutover_checkpoint)
+
+      expect { client.load_recutover_checkpoint(checkpoint) }.to raise_error(described_class::Unavailable, /load_recutover_checkpoint/)
+      expect(fake.held).to eq(carried(checkpoint))
+      expect(client.load_recutover_checkpoint(checkpoint).entries).to eq(6)
+      expect(fake.held).to eq(carried(checkpoint))
+    end
+
+    it "raises ContractViolation on a receipt outside the contract" do
+      stub_request(:post, "#{TimekeepingContracts::FakeHandoff::URL}/internal/v1/handoff/recutover/checkpoint").to_return(
+        status: 200, headers: { "Content-Type" => "application/json" }, body: JSON.generate({ "entries" => 6, "reservations" => 4 })
+      )
+
+      expect { client.load_recutover_checkpoint(checkpoint) }.to raise_error(described_class::ContractViolation)
     end
   end
 

@@ -13,6 +13,9 @@
 #                          owner of a rollback (§10.2 step 6)
 #   #load_checkpoint       §10.5 steps 4 and 5 in Timekeeping
 #   #reconcile_checkpoint  step 6 in Timekeeping
+#   #load_recutover_checkpoint
+#                          the re-cutover's steps 4 and 5 in Timekeeping,
+#                          the incoming owner again (§10.2 step 6)
 #
 # Every call carries the handoff tool's service token (Timekeeping::
 # HandoffToken), never a user token, and every POST the generation it expects
@@ -21,7 +24,8 @@
 #
 # This client never retries and sends no Idempotency-Key. Each of
 # Timekeeping's steps guards itself by where the copy is: a replayed step is
-# refused out-of-step, a second load already-loaded, and reconcile writes
+# refused out-of-step, a second first-cutover load already-loaded, the
+# re-cutover's load run again leaves the same tables, and reconcile writes
 # nothing. So after Unavailable, whether the step ran is unknown: the tool
 # reads #status and runs again only the step that did not commit.
 #
@@ -48,6 +52,14 @@ class Timekeeping::HandoffClient < Timekeeping::InternalApi
   # How many entries and reservations a checkpoint carried, loaded or
   # reconciled.
   Receipt = Data.define(:entries, :reservations)
+
+  # How many rows of each part the re-cutover's checkpoint carried and
+  # Timekeeping loaded (recutover_receipt).
+  RecutoverReceipt = Data.define(:entries, :reservations, :entry_audits, :reservation_operations, :idempotency_receipts)
+
+  # The parts a re-cutover's checkpoint carries besides the first cutover's
+  # entries and reservations, each in the contract's form as taken.
+  RECUTOVER_PARTS = %i[entry_audits reservation_operations idempotency_receipts].freeze
 
   # The rollback's checkpoint as Timekeeping took it (taken_checkpoint;
   # CheckpointTake in services/timekeeping), for the handoff tool to load into
@@ -115,6 +127,26 @@ class Timekeeping::HandoffClient < Timekeeping::InternalApi
   # checkpoint-differs, whose `lists` gives what each failed check found.
   def reconcile_checkpoint(checkpoint)
     receipt_of(request(:reconcile_checkpoint, checkpoint_body(checkpoint), generation: checkpoint.generation))
+  end
+
+  # Carries the re-cutover's checkpoint to Timekeeping, frozen under the
+  # monolith owner at its generation, which loads it over what it still holds
+  # from before the rollback (RecutoverLoad there), and answers how many rows
+  # of each part it loaded. The checkpoint is anything with generation and
+  # the six parts of taken_checkpoint in their forms, reservations as
+  # TimekeepingReservations::Reservation values: what Timekeeping::
+  # LocalCheckpoint takes. Every part is sent exactly as taken (§8 item 1).
+  #
+  # Loading the same checkpoint again leaves the same tables and answers the
+  # same, so after Unavailable the tool may simply send it again. Timekeeping
+  # refuses it out-of-step anywhere but frozen under monolith at that
+  # generation, and checkpoint-refused, with its `lists`, when it does not
+  # hold together or would drop a write Timekeeping holds (§13 item 3); no
+  # retry changes that, so the tool aborts. The load writes no outbox
+  # snapshot, so no request id names the handoff in one.
+  def load_recutover_checkpoint(checkpoint)
+    body = checkpoint_body(checkpoint).merge(RECUTOVER_PARTS.to_h { |part| [part.to_s, checkpoint.public_send(part)] })
+    RecutoverReceipt.new(**request(:load_recutover_checkpoint, body, generation: checkpoint.generation).symbolize_keys)
   end
 
   private

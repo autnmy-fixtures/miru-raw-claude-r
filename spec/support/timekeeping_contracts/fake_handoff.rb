@@ -23,6 +23,12 @@ module TimekeepingContracts
   #   the fake holds as the owner (#held): the entries and reservations a load
   #   stored, and whatever a test sets with #hold! or #write!, as the writes
   #   Timekeeping took after the cutover. It writes nothing;
+  # - the re-cutover's load (load_recutover_checkpoint) only while the copy is
+  #   frozen under the monolith owner at the checkpoint's generation. It
+  #   replaces what the fake holds with the checkpoint's six parts as carried,
+  #   writes no outbox snapshot (freeze drained the prepared application's
+  #   outbox into the projection), and run again holds the same and answers
+  #   the same;
   # - reconcile against the checkpoint it loaded: an entry missing,
   #   unexpected or different, or another set of reservations for an entry,
   #   is checkpoint-differs with its lists, and nothing changes;
@@ -35,9 +41,15 @@ module TimekeepingContracts
   # answers 400 and is recorded in #violations. Every answer the fake gives is
   # checked too, and a mismatch there raises, because it is a bug in the fake.
   #
-  # Of the load's checkpoint-refused checks (§10.4) it keeps only the one the
-  # outbox needs, not_a_contract_entry. It keeps none of the other rules of
-  # Timekeeping's own services: the load's other refusals, the take's
+  # Of the loads' checkpoint-refused checks (§10.4) it keeps only those that
+  # stop it holding a row the contract does not allow: not_a_contract_entry,
+  # which the outbox needs, and for the re-cutover's load the checks on each
+  # part a take must answer in taken_checkpoint's form (provisional_
+  # reservation, not_a_contract_audit, not_a_terminal_receipt, not_a_contract_
+  # idempotency_receipt), named and listed as RecutoverLoad lists them. It
+  # keeps none of the other rules of Timekeeping's own services: the loads'
+  # other refusals, the re-cutover's refusal of a checkpoint that would drop
+  # what Timekeeping holds, the take's
   # checkpoint-unsettled (it holds no pending operation), the 60 s drain, and
   # the entry and reservation tables themselves. Those are tested in
   # services/timekeeping. A test that needs one of their refusals scripts it
@@ -53,12 +65,32 @@ module TimekeepingContracts
 
     HANDLERS = {
       read_handoff: :read_handoff, run_step: :run_step, take_checkpoint: :take_checkpoint,
-      load_checkpoint: :load_checkpoint, reconcile_checkpoint: :reconcile_checkpoint
+      load_checkpoint: :load_checkpoint, reconcile_checkpoint: :reconcile_checkpoint,
+      load_recutover_checkpoint: :load_recutover_checkpoint
     }.freeze
 
     # The parts of a taken checkpoint (taken_checkpoint) other than its
     # generation: what Timekeeping holds as the owner.
     HELD = %w[entries reservations entry_audits reservation_operations idempotency_receipts].freeze
+
+    # The re-cutover load's checks on a carried row that a take could not
+    # answer (taken_checkpoint), by part: the list RecutoverLoad names, whether
+    # a row may be held, and what identifies the row in that list. The request
+    # already holds each reservation to the strict `reservation`, so only its
+    # state is left to check.
+    RECUTOVER_ROWS = {
+      "entries" => ["not_a_contract_entry", ->(row) { TimekeepingContracts.valid?(:entry_api, "common.json#/$defs/entry", row) }, ->(row) { row.fetch("id") }],
+      "reservations" => ["provisional_reservation", ->(row) { row.fetch("state") == "committed" }, ->(row) { row.fetch("entry_id") }],
+      "entry_audits" => ["not_a_contract_audit", ->(row) { TimekeepingContracts.valid?(CONTRACT, "#/$defs/entry_audit", row) }, ->(row) { row.fetch("id") }],
+      "reservation_operations" => [
+        "not_a_terminal_receipt", ->(row) { TimekeepingContracts.valid?(CONTRACT, "#/$defs/operation_receipt", row) },
+        ->(row) { row.values_at("invoice_id", "operation_id").join("/") }
+      ],
+      "idempotency_receipts" => [
+        "not_a_contract_idempotency_receipt", ->(row) { TimekeepingContracts.valid?(CONTRACT, "#/$defs/idempotency_receipt", row) },
+        ->(row) { row.values_at("company_id", "key").join("/") }
+      ]
+    }.freeze
 
     # Timekeeping's copy of the ownership record (§10.1).
     Copy = Data.define(:generation, :owner, :state)
@@ -280,10 +312,34 @@ module TimekeepingContracts
         receipt(input)
       end
 
+      # The re-cutover's checkpoint, taken out of the prepared application,
+      # the outgoing monolith owner, loaded over what the fake holds from
+      # before the rollback: the checkpoint's parts become what it holds, as
+      # carried, so a later take answers them. No snapshot goes into the
+      # outbox. Loading it again holds the same and answers the same.
+      def load_recutover_checkpoint(_params, input)
+        ensure_frozen!(:load, input.fetch("generation"), owner: "monolith")
+        ensure_holdable!(input)
+
+        hold!(**input.slice(*HELD).symbolize_keys)
+        [200, HELD.index_with { |part| input.fetch(part).size }]
+      end
+
+      # Refuses a re-cutover checkpoint holding a row a take could not
+      # answer, listing each, as RecutoverLoad lists them, and loads nothing.
+      def ensure_holdable!(input)
+        lists = RECUTOVER_ROWS.to_h do |part, (list, holdable, identify)|
+          [list, input.fetch(part).reject(&holdable).map(&identify).uniq]
+        end.reject { |_, found| found.empty? }
+        return if lists.empty?
+
+        halt(*problem(422, "checkpoint-refused", detail: "the checkpoint does not hold together; nothing loaded", lists:))
+      end
+
       # Where the provider's Ownership.lock_frozen! lets a checkpoint step run:
       # frozen at the handoff's generation, under the outgoing owner, legacy
       # for the first cutover's load and reconcile, timekeeping for the
-      # rollback's take.
+      # rollback's take, monolith for the re-cutover's load.
       def ensure_frozen!(name, generation, owner:)
         TimekeepingReservations::Handoff.ensure_in_step!(name, %w[frozen], @copy, generation)
         return if @copy.owner == owner

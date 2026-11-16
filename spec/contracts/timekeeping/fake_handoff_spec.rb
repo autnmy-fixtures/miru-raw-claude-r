@@ -318,6 +318,152 @@ RSpec.describe TimekeepingContracts::FakeHandoff do
     end
   end
 
+  describe "the re-cutover's checkpoint, loaded into Timekeeping" do
+    # The prepared application owns the entries after a rollback at
+    # generation 2; Timekeeping still holds the entries it held then.
+    subject!(:fake) { described_class.new(generation: 2, owner: "monolith").install!.hold!(entries:, reservations:) }
+
+    let(:created_at) { "2026-11-02T09:15:30.123456Z" }
+    let(:audit) do
+      { "id" => 15, "entry_id" => 240, "company_id" => 2, "version" => 1, "action" => "create", "actor" => "user:8", "agent_id" => nil,
+        "writer" => "web", "request_id" => "req-3", "audited_changes" => { "note" => nil }, "created_at" => created_at }
+    end
+    let(:operation_receipt) do
+      { "invoice_id" => 602, "operation_id" => "b5e2c1d0-4f3a-4b2c-8d1e-0f9a8b7c6d5e", "company_id" => 2, "kind" => "save",
+        "invoice_state" => "draft", "entry_ids" => [240], "state" => "committed", "created_at" => created_at, "updated_at" => created_at }
+    end
+    let(:idempotency_receipt) do
+      { "company_id" => 2, "key" => "web-2", "request_digest" => "d3", "status" => 201, "response" => { "entry" => { "id" => 240 } },
+        "created_at" => created_at }
+    end
+
+    # What the prepared application holds: 101 released by a discarded draft
+    # (F2) at version 2, and a new Copper Kettle entry 240 on a new draft.
+    let(:recutover) do
+      {
+        "generation" => 3,
+        "entries" => [entries[0], entries[1].merge("version" => 2, "locked" => false), entries[2], entry(id: 240, company_id: 2, locked: true)],
+        "reservations" => [reservations[1], reservation(entry_id: 240, invoice_id: 602, company_id: 2)],
+        "entry_audits" => [audit], "reservation_operations" => [operation_receipt], "idempotency_receipts" => [idempotency_receipt]
+      }
+    end
+
+    def load(body = recutover) = request(:load_recutover_checkpoint, body:)
+
+    def frozen_for_recutover!
+      step(:close, 2)
+      step(:freeze, 3)
+    end
+
+    it "loads while frozen under monolith: what it holds becomes the checkpoint as carried, and no snapshot is written" do
+      frozen_for_recutover!
+
+      loaded = load
+
+      expect(loaded.status).to eq(200)
+      expect(loaded.body).to eq(
+        "entries" => 4, "reservations" => 2, "entry_audits" => 1, "reservation_operations" => 1, "idempotency_receipts" => 1
+      )
+      TimekeepingContracts.validate!(:handoff_api, "#/$defs/recutover_receipt", loaded.body)
+      expect(fake.held).to eq(recutover.except("generation"))
+      expect(fake.held.dig("entries", 0, "duration")).to eq(479.99999)
+      expect(fake.outbox).to be_empty
+      expect(fake.loaded).to be_nil
+      expect(fake.copy).to eq(described_class::Copy.new(generation: 3, owner: "monolith", state: "frozen"))
+    end
+
+    it "answers the same when loaded again, holding the same" do
+      frozen_for_recutover!
+      first = load
+
+      expect([load.status, load.body]).to eq([200, first.body])
+      expect(fake.held).to eq(recutover.except("generation"))
+      expect(fake.calls.map(&:operation).last(3)).to eq(%i[load_recutover_checkpoint] * 3)
+    end
+
+    it "gives back what it loaded when the next rollback takes it" do
+      frozen_for_recutover!
+      load
+      step(:flip, 3)
+      step(:close, 3)
+      step(:freeze, 4)
+
+      expect(take(4).body).to eq(recutover.merge("generation" => 4))
+    end
+
+    it "refuses the load anywhere but frozen under monolith at the checkpoint's generation, and changes nothing" do
+      [[-> { nil }, 3], [-> { nil }, 2], [-> { step(:close, 2) }, 3], [-> { step(:freeze, 3) }, 2], [-> { nil }, 4]].each do |reach, carried|
+        reach.call
+        refused = load(recutover.merge("generation" => carried))
+
+        expect([refused.status, refused.body["type"]]).to eq([409, type("out-of-step")]), "carried #{carried} at #{fake.copy.to_h}"
+      end
+      expect(fake.held.slice("entries", "reservations")).to eq("entries" => entries, "reservations" => reservations)
+    end
+
+    it "refuses the load under legacy and under timekeeping, naming the owner it expects" do
+      { "legacy" => 0, "timekeeping" => 2 }.each do |owner, generation|
+        other = described_class.new(generation:, owner:).install!
+        step(:close, generation)
+        step(:freeze, generation + 1)
+
+        refused = load(recutover.merge("generation" => generation + 1))
+
+        expect([refused.status, refused.body["type"]]).to eq([409, type("out-of-step")]), owner
+        expect(refused.body["detail"]).to include("expects owner monolith, found owner #{owner}")
+        expect(other.held).to eq(described_class::HELD.index_with { [] })
+        expect(other.violations).to be_empty
+      end
+    end
+
+    it "refuses a row no take could answer, listing each as RecutoverLoad does, and loads nothing" do
+      frozen_for_recutover!
+      provisional = recutover["reservations"].last.merge("state" => "provisional", "operation_id" => operation_receipt["operation_id"])
+
+      refused = load(recutover.merge(
+        "entries" => recutover["entries"].map { |carried| carried["id"] == 240 ? carried.except("duration") : carried },
+        "reservations" => [recutover["reservations"].first, provisional],
+        "entry_audits" => [audit.merge("action" => "rewrite")],
+        "reservation_operations" => [operation_receipt.merge("state" => "prepared")],
+        "idempotency_receipts" => [idempotency_receipt.except("request_digest")]
+      ))
+
+      expect([refused.status, refused.body["type"]]).to eq([422, type("checkpoint-refused")])
+      expect(refused.body["lists"]).to eq(
+        "not_a_contract_entry" => [240], "provisional_reservation" => [240], "not_a_contract_audit" => [15],
+        "not_a_terminal_receipt" => ["602/b5e2c1d0-4f3a-4b2c-8d1e-0f9a8b7c6d5e"], "not_a_contract_idempotency_receipt" => ["2/web-2"]
+      )
+      expect(fake.held.slice("entries", "reservations")).to eq("entries" => entries, "reservations" => reservations)
+      expect(fake.outbox).to be_empty
+    end
+
+    it "answers a scripted refusal of a checkpoint that would drop what it holds" do
+      frozen_for_recutover!
+      fake.fail_next(:load_recutover_checkpoint, status: 422, slug: "checkpoint-refused", lists: { "dropped_entry" => [205] })
+
+      refused = load
+
+      expect([refused.status, refused.body["lists"]]).to eq([422, { "dropped_entry" => [205] }])
+      expect(fake.held.slice("entries", "reservations")).to eq("entries" => entries, "reservations" => reservations)
+      expect(load.status).to eq(200)
+    end
+
+    it "records a body outside the request contract, loading nothing", :violates do
+      frozen_for_recutover!
+
+      [
+        recutover.except("idempotency_receipts"),
+        recutover.merge("payments" => []),
+        recutover.merge("entries" => [entries.first.except("version")]),
+        recutover.merge("entry_audits" => [audit.except("id")])
+      ].each { |body| expect(load(body).status).to eq(400) }
+      expect(request(:load_recutover_checkpoint, body: recutover, generation: 2).status).to eq(400)
+
+      expect(fake.violations.size).to eq(5)
+      expect(fake.held.slice("entries", "reservations")).to eq("entries" => entries, "reservations" => reservations)
+    end
+  end
+
   it "relays the loaded snapshots to the projection endpoint, after which the outbox is drained" do
     company = create(:company)
     client = create(:client, company:)
