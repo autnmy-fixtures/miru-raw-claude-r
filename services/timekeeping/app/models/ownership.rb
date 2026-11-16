@@ -13,8 +13,18 @@ class Ownership < ApplicationRecord
   FROZEN = %w[frozen].freeze
 
   # Raised by .admit! when this copy refuses a mutating call. Nothing was
-  # written; `problem` is the contract's answer (§5.1).
-  class Refused < Problem::Raised; end
+  # written; `problem` is the contract's answer (§5.1), and `ownership` the
+  # record as the refusal read it, under its lock, so what is reported of it
+  # (Signals.stale_generation_refused) is what decided the refusal, not what
+  # a handoff has made of it since.
+  class Refused < Problem::Raised
+    attr_reader :ownership
+
+    def initialize(problem, ownership: nil)
+      @ownership = ownership
+      super(problem)
+    end
+  end
 
   # Why a mutating call is refused; the first that holds wins (§5.1, §9.3).
   #
@@ -58,14 +68,14 @@ class Ownership < ApplicationRecord
       next if settle && ownership.settling?(generation)
 
       refusal = REFUSALS.find { |candidate| candidate.refuses.call(ownership, generation) }
-      raise Refused, refusal_problem(refusal, ownership, generation) if refusal
+      raise Refused.new(refusal_problem(refusal, ownership, generation), ownership:) if refusal
     end
   end
 
   # Refuses as `slug`, one of REFUSALS, for a call carrying `generation`
   # that admission let through but its endpoint will not answer.
   def self.refuse!(slug, ownership, generation)
-    raise Refused, refusal_problem(REFUSALS.find { |refusal| refusal.slug == slug }, ownership, generation)
+    raise Refused.new(refusal_problem(REFUSALS.find { |refusal| refusal.slug == slug }, ownership, generation), ownership:)
   end
 
   def self.lock_shared!

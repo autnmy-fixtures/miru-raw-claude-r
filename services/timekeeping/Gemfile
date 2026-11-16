@@ -24,6 +24,11 @@ gem "jwt", "~> 3.2"
 # Queue tables (§5.4, §11.1), as the existing application runs its jobs.
 gem "solid_queue", "~> 0.6.1"
 
+# Errors and alerts go to Sentry with a `service` tag, as the existing
+# application's do (§11.3); same versions as the root Gemfile.lock.
+gem "sentry-rails", "~> 5.17.3"
+gem "sentry-ruby", "~> 5.17.3"
+
 group :test do
   gem "rspec-rails", "~> 8.0"
 end

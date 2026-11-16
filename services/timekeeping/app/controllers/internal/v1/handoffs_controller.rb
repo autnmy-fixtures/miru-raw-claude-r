@@ -53,7 +53,9 @@ class Internal::V1::HandoffsController < Internal::BaseController
     answer_problem!(Problem.new(slug: "checkpoint-refused", status: 422, detail: error.message, lists: error.lists))
   end
 
+  # Any difference aborts the handoff (§10.4), and is an alert (§11.3).
   rescue_from CheckpointReconcile::Differs do |error|
+    Signals.reconciliation_differs(error, request:)
     answer_problem!(Problem.new(slug: "checkpoint-differs", status: 409, detail: error.message, lists: error.lists))
   end
 

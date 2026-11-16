@@ -2,7 +2,8 @@
 # dedicated worker for the `timekeeping_relay` queue and nothing else, on this
 # service's own Solid Queue tables. The dispatcher enqueues the relay every
 # second; one thread keeps the runs in order, and two runs at once would only
-# deliver different rows (OutboxRelay). Start it with
+# deliver different rows (OutboxRelay). Every 15 seconds it also enqueues the
+# relay's lag signal (SignalsJob, §11.3) onto the same queue. Start it with
 # `bin/rails solid_queue:start`; stop it to pause the relay.
 default: &default
   dispatchers:
@@ -12,6 +13,9 @@ default: &default
         outbox_relay:
           class: OutboxRelayJob
           schedule: "* * * * * *"
+        signals:
+          class: SignalsJob
+          schedule: "*/15 * * * * *"
   workers:
     - queues: timekeeping_relay
       threads: 1

@@ -451,6 +451,30 @@ RSpec.describe "Reservation API" do
       expect_nothing_written(entry)
     end
 
+    # §11.3: "Stale-generation refusals outside a handoff: any".
+    it "reports each stale-generation refusal it makes with its copy open, so outside a handoff, as an alert" do
+      allow(Rails.error).to receive(:report)
+
+      commit(body: { "generation" => generation - 1 }, carried: generation - 1)
+
+      expect_problem(409, "stale-generation")
+      expect(Rails.error).to have_received(:report).once.with(
+        an_object_having_attributes(signal: :stale_generation, message: %r{POST /internal/v1/invoices/501/operations/.+/commit was refused}),
+        handled: true, severity: :error,
+        context: { signal: :stale_generation, request_id: "req-1", ownership: "generation 3, owner timekeeping, state open" }
+      )
+    end
+
+    it "reports no ownership-moving refusal" do
+      allow(Rails.error).to receive(:report)
+      Ownership.current.update!(state: "closed")
+
+      prepare([entry!(company_id: fork_and_leaf).id])
+
+      expect_problem(503, "ownership-moving")
+      expect(Rails.error).not_to have_received(:report)
+    end
+
     it "refuses retryably while a handoff has admission closed" do
       entry = entry!(company_id: fork_and_leaf)
       Ownership.current.update!(state: "closed")
@@ -462,13 +486,17 @@ RSpec.describe "Reservation API" do
       expect_nothing_written(entry)
     end
 
-    it "refuses every call while Timekeeping does not own entries" do
+    it "refuses every call while Timekeeping does not own entries, and reports it: nothing should call it then" do
+      allow(Rails.error).to receive(:report)
       Ownership.current.update!(owner: "monolith")
 
       abort_operation
 
       expect_problem(409, "stale-generation")
       expect(ReservationOperation.count).to eq(0)
+      expect(Rails.error).to have_received(:report).with(
+        an_object_having_attributes(signal: :stale_generation), hash_including(context: hash_including(ownership: "generation 3, owner monolith, state open"))
+      )
     end
   end
 
@@ -536,16 +564,19 @@ RSpec.describe "Reservation API" do
       expect([entry.reload.version, OutboxSnapshot.count, Reservation.count]).to eq([1, 0, 0])
     end
 
-    it "refuses the commit of an operation it never registered as stale-generation, with nothing written" do
+    it "refuses the commit of an operation it never registered as stale-generation, with nothing written, and no alert" do
+      allow(Rails.error).to receive(:report)
       close_handoff
 
       commit
 
       expect_problem(409, "stale-generation")
       expect(ReservationOperation.count).to eq(0)
+      expect(Rails.error).not_to have_received(:report)
     end
 
     it "still refuses a prepare under the old generation as stale, and under the raised one as moving" do
+      allow(Rails.error).to receive(:report)
       entry = entry!(company_id: fork_and_leaf)
       close_handoff
 
@@ -556,6 +587,8 @@ RSpec.describe "Reservation API" do
       expect_problem(503, "ownership-moving")
 
       expect_nothing_written(entry)
+      # Refused while a handoff has the copy closed: expected, so no alert (§11.3).
+      expect(Rails.error).not_to have_received(:report)
     end
 
     it "refuses a commit carrying the raised generation as moving: no operation was admitted under it" do

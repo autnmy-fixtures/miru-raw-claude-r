@@ -17,6 +17,9 @@ class Internal::BaseController < ActionController::API
   wrap_parameters false
 
   rescue_from Problem::Raised do |raised|
+    # A stale-generation refusal outside a handoff is an alert (§11.3); it is
+    # answered exactly as any other refusal.
+    Signals.stale_generation_refused(raised, request:) if raised.is_a?(Ownership::Refused)
     render json: raised.problem, status: raised.problem.status, content_type: "application/problem+json"
   end
 
