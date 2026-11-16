@@ -35,11 +35,12 @@ RSpec.describe OutboxRelayJob do
     expect(schedule.next_time(now).to_t - now).to eq(1)
   end
 
-  it "loads in Solid Queue as that one worker and one dispatcher, which schedules the relay" do
+  it "loads in Solid Queue as that one worker and one dispatcher, which schedules the relay and its lag signal" do
     processes = SolidQueue::Configuration.new(load_from: Rails.root.join("config/solid_queue.yml")).configured_processes
     expect(processes.map(&:kind)).to contain_exactly(:worker, :dispatcher)
 
-    (task,) = processes.find { |process| process.kind == :dispatcher }.attributes.fetch(:recurring_tasks)
-    expect([task.key, task.class_name, task.valid?]).to eq(["outbox_relay", "OutboxRelayJob", true])
+    tasks = processes.find { |process| process.kind == :dispatcher }.attributes.fetch(:recurring_tasks)
+    expect(tasks.map { |task| [task.key, task.class_name, task.valid?] })
+      .to contain_exactly(["outbox_relay", "OutboxRelayJob", true], ["signals", "SignalsJob", true])
   end
 end

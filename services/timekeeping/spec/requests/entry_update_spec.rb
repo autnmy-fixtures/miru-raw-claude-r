@@ -248,6 +248,7 @@ RSpec.describe "Entry API update and discard" do
     end
 
     it "refuses a stale generation and a moving owner, changing nothing (§10.1)" do
+      allow(Rails.error).to receive(:report)
       entry = owned!
 
       update(entry, carried: generation - 1)
@@ -258,6 +259,10 @@ RSpec.describe "Entry API update and discard" do
       expect_problem(503, "ownership-moving")
 
       expect_unchanged(entry)
+      # Only the stale generation, refused with the copy open, is an alert (§11.3).
+      expect(Rails.error).to have_received(:report).once.with(
+        an_object_having_attributes(signal: :stale_generation, message: %r{PATCH /internal/v1/entries/#{entry.id} was refused}), any_args
+      )
     end
 
     it "replays the stored answer for the same key and request, and refuses the key for another (§9.4)" do

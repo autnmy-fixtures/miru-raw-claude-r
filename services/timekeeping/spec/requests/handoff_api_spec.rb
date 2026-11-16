@@ -258,6 +258,7 @@ RSpec.describe "Handoff API" do
     end
 
     it "answers every difference as checkpoint-differs, listing what each check found, and changes nothing" do
+      allow(Rails.error).to receive(:report)
       before = held_rows
       carried = checkpoint(
         entries: [locked, unlocked_link.merge("duration" => 479.99998), retained, discarded, released],
@@ -269,6 +270,12 @@ RSpec.describe "Handoff API" do
       expect_problem(409, "checkpoint-differs")
       expect(body["lists"]).to eq("entry_unexpected" => [230], "entry_differs" => [102], "reservations_differ" => [101])
       expect(held_rows).to eq(before)
+      # §11.3: "Reconciliation differences: any (aborts the handoff)".
+      expect(Rails.error).to have_received(:report).once.with(
+        an_object_having_attributes(signal: :reconciliation_differences, message: %r{POST /internal/v1/handoff/checkpoint/reconcile: Timekeeping checkpoint reconcile: }),
+        handled: true, severity: :error,
+        context: hash_including(signal: :reconciliation_differences, lists: { entry_unexpected: [230], entry_differs: [102], reservations_differ: [101] })
+      )
     end
 
     it "refuses a reconcile outside the frozen first cutover as out-of-step" do
