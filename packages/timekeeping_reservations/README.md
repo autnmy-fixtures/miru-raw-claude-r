@@ -127,6 +127,14 @@ load's `recutover_checkpoint` request), which answers the load's `recutover_rece
 answers a `RecutoverReceipt`; it writes nothing, so the tool may ask again after a lost response.
 `TimekeepingContracts::FakeHandoff` serves it for the tool's tests, comparing the five parts with
 what it holds under `RecutoverReconcile`'s list names.
+On this side, `Timekeeping::RecutoverReconcile` (`app/services/timekeeping/recutover_reconcile.rb`,
+§10.5 step 6) reconciles the same checkpoint with this application's tables while its copy is `frozen`
+under owner `monolith` at the checkpoint's generation, and writes nothing. Here the prepared tables are
+the checkpoint's source, so it runs the rollback's checks (`Timekeeping::RollbackReconcile.differences`):
+the prepared entries, reservations, audit rows and receipts still exactly what was carried; kept
+invoices' lines against the active reservations; `timesheet_entries`, which freeze drained the local
+outbox into, against the carried entries; and money by financial snapshot. Any difference raises
+`CheckpointReconcile::Differs`, and the handoff is aborted.
 
 Timekeeping's provider is `ReservationProtocol` (`services/timekeeping/app/services/reservation_protocol.rb`),
 behind the reservation API's three endpoints. It keeps the same protocol on tables with the same shape,

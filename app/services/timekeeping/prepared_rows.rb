@@ -10,7 +10,9 @@
 # Two readers, one rendering, so they cannot drift apart: the re-cutover's
 # checkpoint takes these rows out of the prepared application
 # (Timekeeping::LocalCheckpoint), and the rollback's reconcile compares them
-# with the checkpoint it loaded (Timekeeping::RollbackReconcile).
+# with the checkpoint it loaded (Timekeeping::RollbackReconcile), as the
+# re-cutover's reconcile compares them with the checkpoint taken from them
+# (Timekeeping::RecutoverReconcile).
 #
 # Values are read as stored (§8 item 1): the float duration, timestamps in
 # UTC to the microsecond, JSON columns as stored. No guard and no write: each

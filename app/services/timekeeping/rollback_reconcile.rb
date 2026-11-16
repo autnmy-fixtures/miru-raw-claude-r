@@ -72,6 +72,12 @@ module Timekeeping::RollbackReconcile
     end
   end
 
+  # What each check finds between `checkpoint` and this application's
+  # tables, the prepared application's and the projection, invoices and
+  # money, by check, leaving out the checks that agree; empty when every check
+  # agrees. The caller holds the ownership record. The re-cutover's reconcile
+  # (Timekeeping::RecutoverReconcile) runs the same checks against the
+  # checkpoint taken out of these prepared tables, where they are its source.
   def self.differences(checkpoint, financial_snapshot)
     lists = incoming_owner_lists(checkpoint).merge(
       Timekeeping::CheckpointReconcile.differences(
@@ -80,7 +86,6 @@ module Timekeeping::RollbackReconcile
     )
     lists.transform_values { |found| found.uniq.sort }.reject { |_, found| found.empty? }
   end
-  private_class_method :differences
 
   # What the prepared application holds against what the checkpoint carries.
   def self.incoming_owner_lists(checkpoint)
