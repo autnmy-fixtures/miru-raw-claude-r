@@ -378,6 +378,51 @@ RSpec.describe "Timekeeping entry forwarding", type: :request do
         expect(writers).to eq(["agent_destroy"])
       end
 
+      # The relay's snapshot of the owner's entry, as the projection consumer
+      # receives it (§5.4).
+      def delivered(entry_id, version: fake.entry(entry_id).fetch("version"))
+        data = fake.entry(entry_id).slice("project_id", "user_id", "agent_id", "duration", "work_date", "note", "bill_status")
+        TimekeepingContracts::FakeRelay.new.snapshot(entry_id:, version:, company_id: tenant_a.company.id, **data.symbolize_keys)
+      end
+
+      # Every entry the first cutover copied is already projected (§10.3). The
+      # projection lags the detach until the relay delivers it, so the
+      # timesheet_entries -> agents key is dropped before cutover, like the
+      # two billing keys (§10.2 step 3), and does not refuse the delete.
+      it "deletes the agent while the projection still names it, and the relay's snapshot then detaches the row" do
+        projected = unbilled_entry(tenant_a, agent:)
+        fake.seed_entry(
+          company_id: tenant_a.company.id, id: projected.id, project_id: projected.project_id, user_id: projected.user_id,
+          agent_id: agent.id, duration: projected.duration, work_date: projected.work_date.iso8601, note: projected.note
+        )
+
+        without_projection_writes { agent.destroy! }
+
+        expect(Agent.exists?(agent.id)).to be(false)
+        expect(fake.entry(projected.id)).to include("agent_id" => nil, "version" => 2)
+        row = TimesheetEntry.find(projected.id)
+        expect(row.agent_id).to eq(agent.id)
+        expect(row.agent).to be_nil
+
+        Timekeeping::ProjectionConsumer.process([delivered(projected.id)])
+        expect(TimesheetEntry.find(projected.id).agent_id).to be_nil
+      end
+
+      # The relay delivers in order, but an entry logged just before the
+      # destroy can reach the projection after it: its first snapshot still
+      # names the agent. That must not stall the relay (as §10.1 describes for
+      # users), and the detach's snapshot then clears it.
+      it "projects an entry's earlier snapshot that names the deleted agent, then its detach" do
+        agent.destroy!
+
+        expect(Timekeeping::ProjectionConsumer.process([delivered(held["id"], version: 1).deep_merge("data" => { "agent_id" => agent.id })]))
+          .to eq(Timekeeping::ProjectionConsumer::Applied.new(applied: 1, ignored: 0))
+        expect(TimesheetEntry.find(held["id"]).agent_id).to eq(agent.id)
+
+        Timekeeping::ProjectionConsumer.process([delivered(held["id"])])
+        expect(TimesheetEntry.find(held["id"]).agent_id).to be_nil
+      end
+
       it "keeps the agent when the owner refuses the detach, so nothing is half done" do
         fake.fail_next(:detach_agent, status: 409, slug: "stale-generation", retryable: false)
 

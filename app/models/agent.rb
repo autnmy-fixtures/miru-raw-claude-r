@@ -10,7 +10,10 @@ class Agent < ApplicationRecord
   has_many :agent_keys, dependent: :destroy
   has_many :timesheet_entries
   # W6 (docs/architecture/timekeeping-soa.md §3.1): what `dependent: :nullify`
-  # did, through the write gateway, at the same point in the destroy.
+  # did, through the write gateway, at the same point in the destroy. Once
+  # entries leave the legacy owner the projection may still name the agent
+  # until the relay delivers the detach, so timesheet_entries has no foreign
+  # key to agents (20261116120000).
   before_destroy { Timekeeping::Gateway.call(Timekeeping::Gateway::DetachAgent.new(agent: self)) }
 
   validates :name, presence: true, length: { maximum: 80 }, uniqueness: { scope: :company_id, case_sensitive: false }
