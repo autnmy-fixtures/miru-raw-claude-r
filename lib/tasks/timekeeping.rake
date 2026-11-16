@@ -226,6 +226,25 @@
 # as the save-failures step does, and CHECK_WAIT sets the seconds a check
 # waits on a worker (60 by default). bin/timekeeping-demo hard-delete runs it.
 #
+# The stale-generation part of the failure injection (§12.4, §9.3,
+# Timekeeping::StaleGenerationCheck), while Timekeeping owns the entries, in
+# one step; RUN names its writes:
+#
+#   bin/rails timekeeping:stale_generation     entry writes and reservation
+#                                              calls carrying another
+#                                              generation are refused 409
+#                                              stale-generation and change
+#                                              nothing; the gateway's retry of
+#                                              one never admitted goes
+#                                              through, and an admitted one's
+#                                              retry answers its stored result
+#
+# It exits 1 at the first check that fails. It signs in and reaches
+# Timekeeping as the save-failures step does, and CHECK_WAIT sets the seconds
+# a check waits on a worker (60 by default). Its last line names the request
+# id of every refused call. bin/timekeeping-demo stale-generation runs it,
+# and then finds Timekeeping's alert for each id in timekeeping-web's log.
+#
 # What the existing application measures of its Timekeeping machinery
 # (§11.3, Timekeeping::Signals), read once, for an operator or a script:
 #
@@ -678,5 +697,30 @@ namespace :timekeeping do
   desc "A failed hard delete of a non-draft changes nothing; a successful one keeps the edit lock until a successor (docs/architecture/timekeeping-soa.md 12.4, 9.3; RUN)"
   task hard_delete: :environment do
     TimekeepingHardDeleteTask.run
+  end
+end
+
+module TimekeepingStaleGenerationTask
+  def self.check
+    Timekeeping::StaleGenerationCheck.new(
+      client: Timekeeping::PublicApi::Client.new(base_url: ENV.fetch("MIRU_URL", "http://127.0.0.1:3000")),
+      password: ENV.fetch("MIRU_SEED_PASSWORD") { abort "MIRU_SEED_PASSWORD is the seeded users' password; the check signs in with it" },
+      run: ENV.fetch("RUN") { abort "RUN names the writes of one run" },
+      logger: TimekeepingFirstCutoverTask.logger,
+      options: Timekeeping::StaleGenerationCheck::Options.new(wait: Integer(ENV.fetch("CHECK_WAIT", Timekeeping::PublicApi::DEFAULT_WAIT)))
+    )
+  end
+
+  def self.run
+    check.call
+  rescue Timekeeping::StaleGenerationCheck::Failed => error
+    abort "Timekeeping stale-generation proof failed: #{error.message}"
+  end
+end
+
+namespace :timekeeping do
+  desc "Calls carrying another generation are refused 409 stale-generation and change nothing; retries go to the current owner (docs/architecture/timekeeping-soa.md 12.4, 9.3; RUN)"
+  task stale_generation: :environment do
+    TimekeepingStaleGenerationTask.run
   end
 end

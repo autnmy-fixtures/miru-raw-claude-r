@@ -145,6 +145,7 @@ bin/timekeeping-demo billing-handoff         # billing writes during a handoff (
 bin/timekeeping-demo save-failures           # the save-failure rows of §9.3 (§12.4 failure injection): lost prepare answers, a crash, a rollback, replays
 bin/timekeeping-demo reservation-failures    # the reservation-protocol rows of §9.3: wrong company, earlier operation unresolved, lost commit answer
 bin/timekeeping-demo hard-delete             # §9.3's hard delete of a non-draft: a failed one changes nothing, a successful one keeps the edit lock until a successor
+bin/timekeeping-demo stale-generation        # §9.3's stale generation: calls carrying another generation refused and changing nothing, retries to the current owner
 bin/timekeeping-demo compose stop timekeeping-relay   # pauses the relay (§12.4); `compose start` resumes it
 bin/timekeeping-demo down        # stops everything; both databases and the handoff journals are kept
 ```
@@ -365,7 +366,39 @@ bin/timekeeping-demo down        # stops everything; both databases and the hand
   seconds, a check waits on a worker (default 60). The check is covered by
   `spec/requests/timekeeping/hard_delete_check_spec.rb`, which runs it whole under the prepared application, whose
   reservation table keeps the decision table's rules. Against `FakeTimekeeping`, which keeps none of them, it stops
-  at the first edit lock it reads. Still not on the demo from §9.3: stale generation and projection consumer down.
+  at the first edit lock it reads. The stale-generation proof below covers another row of §9.3.
+- **Stale generation (§12.4 failure injection, §9.3, §13 item 6, §11.3).** `bin/timekeeping-demo stale-generation`
+  runs `bin/rails timekeeping:stale_generation` (`Timekeeping::StaleGenerationCheck`) inside `miru-web`, in one step,
+  while Timekeeping owns the entries with admission open. Nothing is stopped or started, and no handoff runs. A stale
+  generation is what a queued job or a call already on its way carries once a handoff has raised the generation
+  (§10.1). The check sends such calls to the running Timekeeping, each built as the gateway, the invoice reservation
+  boundary or the invoice operation worker builds it, with only the generation changed: the one before the current
+  generation, and for one call the one after it. On both seeded businesses:
+  - **Never admitted.** The employee's create of entry X carrying the old generation, and then the next one, is
+    refused 409 `stale-generation`, not retryable. So is the gateway's own send of that create under the old
+    generation, which it answers as the public retryable 503 "Time entries are being moved between services, so
+    nothing was saved. Try again in a minute." Timekeeping holds no X after any of them. The employee then retries
+    over the public API: the gateway re-reads ownership, sends the create under the current generation, and
+    Timekeeping holds exactly one X.
+  - **Admitted.** The employee's update of X goes through under the current generation. Its retry with the same
+    `Idempotency-Key` and the old generation is refused and changes nothing. Its retry under the current generation
+    is answered the stored result, and X is unchanged (version, `locked`, `updated_at`): an admitted command never
+    runs twice.
+  - **Reservations.** The admin saves a draft holding X, and its commit is delivered. A prepare adding entry Y to the
+    draft, carrying the old generation, is refused, and Y is still offered. A commit and an abort of the draft's
+    committed operation, carrying the old generation, are refused too. The commit under the current generation is
+    answered its stored `committed` receipt. X and Y on Timekeeping, and the draft's ledger rows, are unchanged. The
+    admin then retries the save adding Y over the public API, and it goes through.
+
+  Each refusal is also the §11.3 alert for a stale-generation refusal outside a handoff, on both sides. The check
+  counts the existing application's own report of each refusal as it happens (one per call). Every refused call
+  carries an `X-Request-Id` of the run, and the step's last line names them, so the command then finds Timekeeping's
+  alert for each one in `timekeeping-web`'s log (`[<request id>] Timekeeping signal stale_generation: …`), and fails if
+  one is missing. The step's output is kept under `tmp/timekeeping-demo/stale-generation/`. A run that finishes
+  deletes its draft and discards X and Y. `CHECK_WAIT` sets how long, in seconds, a check waits on a worker (default
+  60). The check is covered by `spec/services/timekeeping/stale_generation_check_spec.rb` against `FakeTimekeeping`,
+  which refuses another generation before it reads a receipt, as Timekeeping's admission does. Still not on the demo
+  from §9.3: projection consumer down.
 - **Signals (§11.3).** Each of the existing application's two workers reads the other's alerts, so a
   stopped worker is still noticed: `invoice_operations` reads the local relay's lag (above 60 s for
   5 minutes), and `timekeeping_relay` reads the invoice operation ledger (an intent pending past 60 s, a

@@ -84,6 +84,15 @@
 #                                    retained, until a successor draft takes
 #                                    it over; while Timekeeping or the
 #                                    prepared application owns the entries
+#   bin/timekeeping-demo stale-generation
+#                                    the stale-generation part of the failure
+#                                    injection (§12.4, §9.3): entry writes and
+#                                    reservation calls carrying another
+#                                    generation are refused 409
+#                                    stale-generation and change nothing, the
+#                                    gateway's retry goes through, and
+#                                    Timekeeping logs each refusal as an
+#                                    alert; while Timekeeping owns the entries
 #   bin/timekeeping-demo down        stop everything; the databases are kept
 #   bin/timekeeping-demo compose …   any other docker compose command
 #
@@ -541,6 +550,33 @@ cmd_hard_delete() {
   echo "== hard delete: a failed hard delete of a non-draft changed nothing, and a successful one kept the edit lock until a successor took the entry over"
 }
 
+# The stale-generation part of §12.4's failure injection (§9.3), while
+# Timekeeping owns the entries: one step in miru-web
+# (bin/rails timekeeping:stale_generation, Timekeeping::StaleGenerationCheck).
+# It sends calls carrying another generation to the running Timekeeping, so
+# nothing is stopped or started. The step's output is kept under
+# tmp/timekeeping-demo/stale-generation; its last line names the request id
+# of every refused call, and each must be in timekeeping-web's log as
+# Timekeeping's own stale-generation alert (§11.3).
+cmd_stale_generation() {
+  local run output ids id logs
+  require_env_file
+  processes "${EXISTING_SERVICES[@]}" "${TIMEKEEPING_SERVICES[@]}" > /dev/null
+  run="$(date -u +%Y%m%dT%H%M%SZ)-$(secret 2)"
+  output="$(dirname "${ENV_FILE}")/stale-generation/${run}.log"
+  mkdir -p "$(dirname "${output}")"
+  echo "== stale generation: run ${run}"
+  compose exec -T --env "RUN=${run}" miru-web bin/rails timekeeping:stale_generation | tee "${output}"
+  ids="$(sed -n 's/^stale generation: refused request ids: //p' "${output}" | tail -n 1)"
+  [ -n "${ids}" ] || die "the stale-generation step named no refused request"
+  logs="$(compose logs --no-color --no-log-prefix timekeeping-web)"
+  for id in ${ids}; do
+    grep -qF "[${id}] Timekeeping signal stale_generation: " <<< "${logs}" ||
+      die "timekeeping-web's log has no stale-generation alert for request ${id} (§11.3)"
+  done
+  echo "== stale generation: every call carrying another generation was refused and changed nothing, the retries went to the current owner, and Timekeeping reported each of the $(wc -w <<< "${ids}" | tr -d ' ') refusals as an alert"
+}
+
 cmd_handoff() {
   case "${1:-}" in
     first_cutover|first_cutover:abort|rollback|rollback:abort|recutover|recutover:abort) ;;
@@ -574,6 +610,7 @@ case "${1:-}" in
   save-failures) cmd_save_failures ;;
   reservation-failures) cmd_reservation_failures ;;
   hard-delete) cmd_hard_delete ;;
+  stale-generation) cmd_stale_generation ;;
   down) compose down ;;
   compose) shift; compose "$@" ;;
   ""|help|-h|--help) usage ;;
