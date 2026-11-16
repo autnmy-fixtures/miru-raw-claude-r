@@ -14,6 +14,15 @@
 #                                    run a handoff runner in the existing app
 #   bin/timekeeping-demo journey     the end-to-end journey (§13 item 1), from a
 #                                    freshly seeded demo, in the existing app
+#   bin/timekeeping-demo contract-check
+#                                    every contract between the two running
+#                                    apps, while Timekeeping owns the entries
+#   bin/timekeeping-demo independent-deploys
+#                                    the independent-deployment proof (§13
+#                                    item 4): rebuild and restart Timekeeping,
+#                                    then the existing app, each alone, with the
+#                                    contract check after each; recorded under
+#                                    tmp/timekeeping-demo/deploys
 #   bin/timekeeping-demo down        stop everything; the databases are kept
 #   bin/timekeeping-demo compose …   any other docker compose command
 #
@@ -25,9 +34,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE_FILE="${ROOT}/docker-compose.timekeeping-demo.yml"
 ENV_FILE="${TIMEKEEPING_DEMO_ENV_FILE:-${ROOT}/tmp/timekeeping-demo/demo.env}"
+# Where independent-deploys keeps its records: next to the credentials.
+RECORD_DIR="${TIMEKEEPING_DEMO_RECORD_DIR:-$(dirname "${ENV_FILE}")/deploys}"
 
 EXISTING_SERVICES=(miru-web miru-jobs)
 TIMEKEEPING_SERVICES=(timekeeping-web timekeeping-relay)
+
+# Where each application's image holds the contract documents (§5) it reads.
+EXISTING_CONTRACTS=/rails/packages/timekeeping_reservations/contracts/v1
+TIMEKEEPING_CONTRACTS=/app/packages/timekeeping_reservations/contracts/v1
 
 usage() {
   # The comment block at the top of this file, up to its first code line.
@@ -114,18 +129,120 @@ cmd_rebuild() {
   cmd_versions
 }
 
+# "<container id> <image id> <revision>" for a service's running process, or
+# nothing when it is not running. Each container is inspected by its name,
+# and each --format given as one argument.
+process_state() {
+  local name container image rev
+  name="$(compose ps --format '{{.Name}}' "$1")"
+  [ -n "${name}" ] || return 0
+  container="$(docker inspect --format='{{.Id}}' "${name}")"
+  image="$(docker inspect --format='{{.Image}}' "${name}")"
+  rev="$(docker image inspect --format='{{index .Config.Labels "org.opencontainers.image.revision"}}' "${image}")"
+  echo "${container} ${image} ${rev}"
+}
+
 cmd_versions() {
   local service container image rev
   for service in "${EXISTING_SERVICES[@]}" "${TIMEKEEPING_SERVICES[@]}"; do
-    container="$(compose ps --quiet "${service}")"
+    read -r container image rev <<< "$(process_state "${service}")"
     if [ -z "${container}" ]; then
       echo "${service} not running"
       continue
     fi
-    image="$(docker inspect --format '{{.Image}}' "${container}")"
-    rev="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${image}")"
     echo "${service} revision=${rev} image=${image}"
   done
+}
+
+# One line per running process: its container, the image it runs and the
+# revision that image was built from. Fails when a process is not running.
+processes() {
+  local service container image rev
+  for service in "$@"; do
+    read -r container image rev <<< "$(process_state "${service}")"
+    [ -n "${container}" ] || die "${service} is not running; start the demo with bin/timekeeping-demo up"
+    echo "${service} container=${container} image=${image} revision=${rev}"
+  done
+}
+
+# The digest of every contract document a running process reads.
+contract_digests() {
+  compose exec -T "$1" sh -c "cd '$2' && sha256sum *.json"
+}
+
+# The contract check of §13 item 4: both running applications read the same
+# contract documents, byte for byte, and every contract holds between them
+# (bin/rails timekeeping:contract_check, Timekeeping::ContractCheck).
+cmd_contract_check() {
+  local existing timekeeping
+  existing="$(contract_digests miru-web "${EXISTING_CONTRACTS}")"
+  timekeeping="$(contract_digests timekeeping-web "${TIMEKEEPING_CONTRACTS}")"
+  if [ -z "${existing}" ] || [ "${existing}" != "${timekeeping}" ]; then
+    die "$(printf 'the two applications do not read the same contract documents\nexisting application:\n%s\nTimekeeping:\n%s' "${existing}" "${timekeeping}")"
+  fi
+  echo "contract documents: both applications read the same $(echo "${existing}" | wc -l | tr -d ' ') files"
+  compose exec -T miru-web bin/rails timekeeping:contract_check
+}
+
+# One deploy of the independent-deployment proof: rebuild and restart one
+# application, then prove the other still runs the containers and images it
+# ran before, that each of this one's processes was restarted, and that the
+# contract check holds.
+deploy() {
+  local name="$1" other_name before_other after_other before after service
+  local -a services others
+  case "${name}" in
+    timekeeping) services=("${TIMEKEEPING_SERVICES[@]}"); others=("${EXISTING_SERVICES[@]}"); other_name="the existing application" ;;
+    existing) services=("${EXISTING_SERVICES[@]}"); others=("${TIMEKEEPING_SERVICES[@]}"); other_name="Timekeeping" ;;
+  esac
+  echo "== deploy: ${name}, alone ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+  before_other="$(processes "${others[@]}")"
+  before="$(processes "${services[@]}")"
+  cmd_rebuild "${name}"
+  after_other="$(processes "${others[@]}")"
+  if [ "${before_other}" != "${after_other}" ]; then
+    die "$(printf 'rebuilding %s changed %s\nbefore:\n%s\nafter:\n%s' "${name}" "${other_name}" "${before_other}" "${after_other}")"
+  fi
+  after="$(processes "${services[@]}")"
+  for service in "${services[@]}"; do
+    if [ "$(grep "^${service} " <<< "${before}" | cut -d' ' -f2)" = "$(grep "^${service} " <<< "${after}" | cut -d' ' -f2)" ]; then
+      die "${service} was not restarted"
+    fi
+  done
+  echo "${name} now runs:"
+  echo "${after}"
+  echo "${other_name} stayed at its prior artifact:"
+  echo "${after_other}"
+  cmd_contract_check
+}
+
+# The independent-deployment proof of §13 item 4 (§11.2): no paired release.
+# The contract check holds first; then Timekeeping is rebuilt and restarted
+# while the existing application stays at its prior artifact, and the check
+# holds again; then the existing application while Timekeeping stays
+# unchanged, and the check holds again. Every version is recorded.
+independent_deploys() {
+  echo "== before the deploys ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+  processes "${EXISTING_SERVICES[@]}" "${TIMEKEEPING_SERVICES[@]}"
+  cmd_contract_check
+  deploy timekeeping
+  deploy existing
+  echo "== independent deploys done: two deploys, one of each application, the contract check green after each"
+}
+
+cmd_independent_deploys() {
+  local record status
+  require_env_file
+  mkdir -p "${RECORD_DIR}"
+  record="${RECORD_DIR}/$(date -u +%Y%m%dT%H%M%SZ).log"
+  # Not as an `if` condition, which would turn off errexit inside it: the
+  # first step that fails must end the proof.
+  set +e
+  (set -e; independent_deploys) 2>&1 | tee "${record}"
+  status=$?
+  set -e
+  echo "Recorded in ${record}."
+  return "${status}"
 }
 
 cmd_handoff() {
@@ -147,6 +264,8 @@ case "${1:-}" in
   versions) cmd_versions ;;
   handoff) shift; cmd_handoff "$@" ;;
   journey) cmd_journey ;;
+  contract-check) cmd_contract_check ;;
+  independent-deploys) cmd_independent_deploys ;;
   down) compose down ;;
   compose) shift; compose "$@" ;;
   ""|help|-h|--help) usage ;;

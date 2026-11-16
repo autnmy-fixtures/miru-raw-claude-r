@@ -79,6 +79,9 @@ module TimekeepingContracts
 
     def entry(id) = @entries[id]
 
+    # Every entry it holds, discarded ones included, as last written.
+    def entries = @entries.values
+
     def holding(entry_id) = @holdings[entry_id]
 
     # The next call of operation answers this problem instead of running.
