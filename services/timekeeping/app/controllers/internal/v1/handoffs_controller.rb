@@ -12,6 +12,8 @@
 #   POST /internal/v1/handoff/checkpoint            CheckpointLoad (§10.5 steps 4 and 5)
 #   POST /internal/v1/handoff/checkpoint/reconcile  CheckpointReconcile (step 6)
 #   POST /internal/v1/handoff/recutover/checkpoint  RecutoverLoad (the re-cutover's steps 4 and 5)
+#   POST /internal/v1/handoff/recutover/checkpoint/reconcile
+#                                                   RecutoverReconcile (the re-cutover's step 6)
 #
 # Only the handoff tool's service token is accepted, never a user token. The
 # calls are not admitted writes: each service guards itself by the step the
@@ -95,16 +97,15 @@ class Internal::V1::HandoffsController < Internal::BaseController
   # holds from before the rollback. RecutoverLoad refuses it whole as
   # CheckpointLoad::Refused, answered as checkpoint-refused above.
   def load_recutover_checkpoint
-    input = contract_input!("#/$defs/recutover_checkpoint", body!)
-    loaded = RecutoverLoad.call(
-      CheckpointTake::Checkpoint.new(
-        generation: carried_generation!(input),
-        entries: input.fetch("entries"),
-        reservations: input.fetch("reservations").map { |reservation| reservation_of(reservation) },
-        **input.slice("entry_audits", "reservation_operations", "idempotency_receipts").symbolize_keys
-      )
-    )
-    render json: loaded.to_h
+    render json: RecutoverLoad.call(recutover_checkpoint!).to_h
+  end
+
+  # The re-cutover's step 6 (§10.5 step 6, §10.4): what Timekeeping holds once
+  # the load has run, compared with the same checkpoint, carried again. It
+  # writes nothing; RecutoverReconcile raises CheckpointReconcile::Differs on
+  # any difference, answered as checkpoint-differs above.
+  def reconcile_recutover_checkpoint
+    render json: RecutoverReconcile.call(recutover_checkpoint!).to_h
   end
 
   private
@@ -136,6 +137,19 @@ class Internal::V1::HandoffsController < Internal::BaseController
         entries: input.fetch("entries"),
         reservations: input.fetch("reservations").map { |reservation| reservation_of(reservation) }
       }
+    end
+
+    # The re-cutover's checkpoint as RecutoverLoad and RecutoverReconcile take
+    # it: a CheckpointTake::Checkpoint with every part as carried, its
+    # reservations as TimekeepingReservations::Reservation values.
+    def recutover_checkpoint!
+      input = contract_input!("#/$defs/recutover_checkpoint", body!)
+      CheckpointTake::Checkpoint.new(
+        generation: carried_generation!(input),
+        entries: input.fetch("entries"),
+        reservations: input.fetch("reservations").map { |reservation| reservation_of(reservation) },
+        **input.slice("entry_audits", "reservation_operations", "idempotency_receipts").symbolize_keys
+      )
     end
 
     def reservation_of(reservation)
