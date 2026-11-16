@@ -210,6 +210,22 @@
 # bin/timekeeping-demo reservation-failures stops and starts miru-jobs around
 # them.
 #
+# The hard-delete-of-a-non-draft part of the failure injection (§12.4, §9.3,
+# §7.3, Timekeeping::HardDeleteCheck), while Timekeeping or the prepared
+# application owns the entries, in one step; RUN names its writes:
+#
+#   bin/rails timekeeping:hard_delete          a bulk delete of a sent invoice
+#                                              with a recorded payment fails
+#                                              and changes nothing; one of a
+#                                              sent invoice with none keeps its
+#                                              entry's edit lock, retained,
+#                                              until a successor draft takes
+#                                              it over
+#
+# It exits 1 at the first check that fails. It signs in and reaches the owner
+# as the save-failures step does, and CHECK_WAIT sets the seconds a check
+# waits on a worker (60 by default). bin/timekeeping-demo hard-delete runs it.
+#
 # What the existing application measures of its Timekeeping machinery
 # (§11.3, Timekeeping::Signals), read once, for an operator or a script:
 #
@@ -637,5 +653,30 @@ namespace :timekeeping do
     task resumed: :environment do
       TimekeepingReservationFailuresTask.run(:resumed)
     end
+  end
+end
+
+module TimekeepingHardDeleteTask
+  def self.check
+    Timekeeping::HardDeleteCheck.new(
+      client: Timekeeping::PublicApi::Client.new(base_url: ENV.fetch("MIRU_URL", "http://127.0.0.1:3000")),
+      password: ENV.fetch("MIRU_SEED_PASSWORD") { abort "MIRU_SEED_PASSWORD is the seeded users' password; the check signs in with it" },
+      run: ENV.fetch("RUN") { abort "RUN names the writes of one run" },
+      logger: TimekeepingFirstCutoverTask.logger,
+      options: Timekeeping::HardDeleteCheck::Options.new(wait: Integer(ENV.fetch("CHECK_WAIT", Timekeeping::PublicApi::DEFAULT_WAIT)))
+    )
+  end
+
+  def self.run
+    check.call
+  rescue Timekeeping::HardDeleteCheck::Failed => error
+    abort "Timekeeping hard-delete proof failed: #{error.message}"
+  end
+end
+
+namespace :timekeeping do
+  desc "A failed hard delete of a non-draft changes nothing; a successful one keeps the edit lock until a successor (docs/architecture/timekeeping-soa.md 12.4, 9.3; RUN)"
+  task hard_delete: :environment do
+    TimekeepingHardDeleteTask.run
   end
 end

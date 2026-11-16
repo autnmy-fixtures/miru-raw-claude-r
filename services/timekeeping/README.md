@@ -144,6 +144,7 @@ bin/timekeeping-demo aggregate-line          # the aggregate-line proof (§12.4,
 bin/timekeeping-demo billing-handoff         # billing writes during a handoff (§12.4): the handoff waits for a paused one, then refuses them
 bin/timekeeping-demo save-failures           # the save-failure rows of §9.3 (§12.4 failure injection): lost prepare answers, a crash, a rollback, replays
 bin/timekeeping-demo reservation-failures    # the reservation-protocol rows of §9.3: wrong company, earlier operation unresolved, lost commit answer
+bin/timekeeping-demo hard-delete             # §9.3's hard delete of a non-draft: a failed one changes nothing, a successful one keeps the edit lock until a successor
 bin/timekeeping-demo compose stop timekeeping-relay   # pauses the relay (§12.4); `compose start` resumes it
 bin/timekeeping-demo down        # stops everything; both databases and the handoff journals are kept
 ```
@@ -334,8 +335,37 @@ bin/timekeeping-demo down        # stops everything; both databases and the hand
   step under a minute: with `miru-jobs` stopped, nothing reads the ledger's alerts, and an outcome undelivered past
   60 s raises the §11.3 alert once `miru-jobs` is back, until it is delivered. `CHECK_WAIT` sets how long, in seconds,
   a check waits on a worker (default 60). The check itself is covered by
-  `spec/services/timekeeping/reservation_failures_check_spec.rb`. Still not on the demo from §9.3: stale generation,
-  projection consumer down, and a failed hard delete of a non-draft.
+  `spec/services/timekeeping/reservation_failures_check_spec.rb`. The hard-delete proof below covers the last row of
+  §9.3.
+- **Hard delete of a non-draft (§12.4 failure injection, §9.3, §7.3, §13 item 6).** `bin/timekeeping-demo hard-delete`
+  runs `bin/rails timekeeping:hard_delete` (`Timekeeping::HardDeleteCheck`) inside `miru-web`, in one step, while
+  Timekeeping or the prepared application owns the entries with admission open; run it after a cutover, and after a
+  rollback for the prepared application's own reservation table. Nothing is stopped or started: the failure is the
+  one a user meets, a bulk delete (the hard destroy, §1.4) refused because the invoice has a recorded payment, inside
+  the invoice transaction after the owner prepared it. On both seeded businesses the employee creates entries X and Y
+  over the public API. The admin saves a draft holding each, which locks it (L1), and marks both sent, a non-draft
+  save that keeps each entry and its lock, then records a payment of 1 on X's invoice. Then:
+  - **A failed hard delete.** The bulk delete of X's invoice answers 422 "Some invoices could not be deleted because
+    they have recorded payments.", naming it. The invoice, its line and its payment are as they were, the ledger
+    records the destroy `failed` and delivers its abort, and X is unchanged on its owner (version, `locked`,
+    `updated_at`): still left out of the candidates, and the employee's edit is still refused with "Cannot edit a
+    locked timesheet entry. Please contact admin."
+  - **A successful hard delete.** The bulk delete of Y's invoice answers 204, the invoice is gone, and the ledger
+    records the destroy `succeeded` and delivers its commit. Y keeps its edit lock (still `locked` on its owner, and
+    the employee's edit still refused), and the candidates offer it again (L3): the reservation is retained, carrying
+    the deleted invoice as its owner.
+  - **The successor.** The admin saves a draft holding Y, which is accepted: a retained reservation does not refuse a
+    provisional successor. Once its commit is delivered the admin deletes the draft, which releases it (F2), and Y is
+    unlocked and the employee's edit goes through. Had the successor's commit not removed the retained reservation,
+    Y would still be locked. Then the employee discards Y.
+
+  The lock is read twice: on the owner, through the entry reads under the current owner (`Timekeeping::EntryReads`),
+  and as the employee meets it. A run that finishes leaves, per business, X's sent invoice with its payment, still
+  holding X, which cannot be hard-deleted; one discarded draft; and Y discarded. `CHECK_WAIT` sets how long, in
+  seconds, a check waits on a worker (default 60). The check is covered by
+  `spec/requests/timekeeping/hard_delete_check_spec.rb`, which runs it whole under the prepared application, whose
+  reservation table keeps the decision table's rules. Against `FakeTimekeeping`, which keeps none of them, it stops
+  at the first edit lock it reads. Still not on the demo from §9.3: stale generation and projection consumer down.
 - **Signals (§11.3).** Each of the existing application's two workers reads the other's alerts, so a
   stopped worker is still noticed: `invoice_operations` reads the local relay's lag (above 60 s for
   5 minutes), and `timekeeping_relay` reads the invoice operation ledger (an intent pending past 60 s, a
