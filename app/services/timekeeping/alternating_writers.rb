@@ -151,7 +151,7 @@ class Timekeeping::AlternatingWriters
 
     def create_other_project(project, employee)
       rate = employee.project_members.kept.find_by!(project:).hourly_rate
-      Project.create!(client: project.client, name: "#{project.name} (alternating)"[0, 30], billable: true).tap do |other|
+      Project.create!(client: project.client, name: "Alternating writers", billable: true).tap do |other|
         ProjectMember.create!(project: other, user: employee, hourly_rate: rate)
         say "#{project.client.name}: added the project #{other.name} for W2's moves"
       end

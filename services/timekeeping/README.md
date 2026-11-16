@@ -250,6 +250,9 @@ bin/timekeeping-demo down        # stops everything; both databases and the hand
   project, the run first adds a second project to the same client, before any handoff, for W2's moves.
   `CHECK_WAIT` sets how long, in seconds, a check waits on a worker (default 60). Like the journey, it does
   not resume, and the next run needs a reset.
+  It does not pass yet: under the timekeeping and monolith owners W6 fails. The owner detaches the entries,
+  but the agent's delete is then refused by the `timesheet_entries → agents` foreign key, because the
+  projection still holds the agent's id until the relay delivers the detach. That is an open question on #8.
 - **Mail.** Development mail goes to `letter_opener`, under `tmp/letter_opener` in `miru-web`. `BROWSER=/bin/true`
   stops Launchy from looking for a browser the container does not have.
 - **Reset.** `bin/timekeeping-demo compose down --volumes` deletes both databases and the journals. The next
