@@ -7,7 +7,9 @@
 #
 #   services/timekeeping/bin/ci tests
 #       This service's suite, the contract provider tests included, on its own
-#       test database (DB_HOST, DB_USER and DB_PASS, as for bin/rails).
+#       test database (DB_HOST, DB_USER and DB_PASS, as for bin/rails). Then
+#       the shared package's own specs, packages/timekeeping_reservations/spec:
+#       the decision table row by row (§12.3) and the handoff state machine.
 #
 #   services/timekeeping/bin/ci image
 #       Builds this service's image from the repository root, as the local
@@ -42,6 +44,9 @@ cmd_tests() {
   cd "${SERVICE_DIR}"
   RAILS_ENV=test bin/rails db:prepare
   RAILS_ENV=test bundle exec rspec
+  # Plain Ruby, outside this service's spec_helper: --options /dev/null skips
+  # this service's .rspec.
+  bundle exec rspec --options /dev/null "${ROOT}/packages/timekeeping_reservations/spec"
 }
 
 running() {

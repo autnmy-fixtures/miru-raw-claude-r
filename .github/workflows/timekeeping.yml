@@ -1,0 +1,98 @@
+# Timekeeping's own CI (docs/architecture/timekeeping-soa.md §12.3: "Provider
+# tests run against the schema in Timekeeping's CI"; §14 "Deployment and
+# runtime": the second image and its CI build job). Timekeeping has its own
+# bundle, so the existing application's CI (validations.yml, bin/parallel_test)
+# never runs it. The steps live in services/timekeeping/bin/ci, which runs the
+# same on a developer machine; this file only provides Ruby and Postgres.
+name: Timekeeping
+on:
+  push:
+    branches: [develop, main, stable-3-0, production]
+    paths:
+      - "services/timekeeping/**"
+      - "packages/timekeeping_reservations/**"
+      - ".github/workflows/timekeeping.yml"
+  pull_request:
+    branches: [develop, main, production]
+    types: [labeled, opened, synchronize, reopened]
+    paths:
+      - "services/timekeeping/**"
+      - "packages/timekeeping_reservations/**"
+      - ".github/workflows/timekeeping.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Timekeeping specs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      DB_HOST: localhost
+      DB_USER: root
+      DB_PASS: password
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: timekeeping_test
+          POSTGRES_USER: root
+          POSTGRES_PASSWORD: password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U root -d timekeeping_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: '4.0.1'
+          bundler-cache: true
+          bundler: latest
+          working-directory: services/timekeeping
+
+      - name: Timekeeping's suite, the contract provider tests and the shared package included
+        run: services/timekeeping/bin/ci tests
+
+  image:
+    name: Timekeeping image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      # bin/ci takes the checked-out commit as REVISION. The database is a
+      # throwaway on this job's own Postgres service; nothing here is a real
+      # credential (§11.2).
+      TIMEKEEPING_CI_DATABASE_URL: postgres://timekeeping:password@127.0.0.1:5432/timekeeping_production
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: timekeeping_production
+          POSTGRES_USER: timekeeping
+          POSTGRES_PASSWORD: password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U timekeeping -d timekeeping_production"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Build, check the revision, boot on an empty database
+        run: services/timekeeping/bin/ci image
