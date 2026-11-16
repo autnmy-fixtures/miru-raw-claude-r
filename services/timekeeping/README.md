@@ -139,6 +139,7 @@ bin/timekeeping-demo alternating-writers     # every writer across cutover, roll
 bin/timekeeping-demo contract-check          # every contract between the two running applications
 bin/timekeeping-demo independent-deploys     # the independent-deployment proof (§13 item 4), recorded
 bin/timekeeping-demo relay-paused            # the relay-paused proof (§13 item 5)
+bin/timekeeping-demo user-delete-refused     # the user-hard-delete proof (§12.4); after a cutover, then after a rollback
 bin/timekeeping-demo compose stop timekeeping-relay   # pauses the relay (§12.4); `compose start` resumes it
 bin/timekeeping-demo down        # stops everything; both databases and the handoff journals are kept
 ```
@@ -195,6 +196,26 @@ bin/timekeeping-demo down        # stops everything; both databases and the hand
   started again however the first half ends. A run that finishes leaves one discarded entry and one
   discarded draft per business, with nothing reserved. `CHECK_WAIT` sets how long, in seconds, a check
   waits on a worker (default 60).
+- **User hard delete refused (§12.4, §10.1).** `bin/timekeeping-demo user-delete-refused` runs while
+  Timekeeping or the prepared application owns the entries; run it once after a cutover and once after a
+  rollback. It asks `bin/rails timekeeping:user_delete_refused:relay` which service runs the current owner's
+  relay: `timekeeping-relay` for Timekeeping, `miru-jobs` for the prepared application's local relay. It stops
+  that service and checks that it no longer runs. Then `bin/rails timekeeping:user_delete_refused:paused`
+  (`Timekeeping::UserDeleteRefusedCheck`) runs in `miru-web`. On both seeded businesses it makes a new
+  employee on the business's billable project, with an agent of theirs, in process, as the alternating-writers
+  driver makes its agents. That user creates their first entry over the public API, and their entry list
+  shows it at once. The projection must not hold it yet. The super admin's `DELETE /api/v1/users/:id` must
+  answer 422 with the handoff refusal. After it, the user, their agent and their entry must be as before,
+  with no `super_admin_delete` audit row. The super admin is `SuperAdmin`'s address, made with the seeded
+  password when the demo has none, and employed with no role in the first business, as token sign-in needs.
+  Then the script starts the relay again and runs `timekeeping:user_delete_refused:resumed`: the projection
+  must hold the entry under that user, the key to `users` holding. Then the user discards it. If the
+  projection already holds the entry while the relay should be stopped, the run fails. All three steps name
+  their writes after one run (`RUN`, set by the script), and the relay is started again however the first
+  half ends. A run that finishes leaves, per business, the user, which cannot be deleted while the
+  extraction is active, its agent and one discarded entry. Making a user queues its `HubspotIntegrationJob` on
+  `default`, which the demo never starts (§11.1), so nothing is sent. `CHECK_WAIT` sets how long, in seconds,
+  a check waits on a worker (default 60).
 - **Signals (§11.3).** Each of the existing application's two workers reads the other's alerts, so a
   stopped worker is still noticed: `invoice_operations` reads the local relay's lag (above 60 s for
   5 minutes), and `timekeeping_relay` reads the invoice operation ledger (an intent pending past 60 s, a

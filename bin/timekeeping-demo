@@ -32,6 +32,13 @@
 #                                    Timekeeping's relay, list and invoice a new
 #                                    entry at once, start the relay again, and
 #                                    see the projection catch up
+#   bin/timekeeping-demo user-delete-refused
+#                                    the user-hard-delete proof (§12.4): stop
+#                                    the current owner's relay, see the
+#                                    super-admin delete of a user with a first,
+#                                    unprojected entry refused, start the relay
+#                                    again, and see the entry projected; run it
+#                                    after a cutover and after a rollback
 #   bin/timekeeping-demo down        stop everything; the databases are kept
 #   bin/timekeeping-demo compose …   any other docker compose command
 #
@@ -284,6 +291,45 @@ cmd_relay_paused() {
   echo "== relay paused: a new entry was listed and invoiced before the relay delivered it, and the projection caught up once it resumed"
 }
 
+# Starts a stopped relay's service again, and shows it runs.
+resume_service() {
+  echo "== resuming $1"
+  compose start "$1"
+  processes "$1"
+}
+
+# The user-hard-delete proof of §12.4, while Timekeeping or the prepared
+# application owns the entries: the existing application names the service
+# that runs the current owner's relay (timekeeping-relay, or miru-jobs for
+# the prepared application's local relay;
+# bin/rails timekeeping:user_delete_refused:relay). With it stopped, the
+# super-admin delete of a user whose first entry is not yet projected is
+# refused with nothing changed (timekeeping:user_delete_refused:paused); with
+# it started again, the entry is projected
+# (timekeeping:user_delete_refused:resumed). All three run in miru-web under
+# one run name. The relay is started again however the first half ends.
+cmd_user_delete_refused() {
+  local run relay
+  require_env_file
+  processes "${EXISTING_SERVICES[@]}" "${TIMEKEEPING_SERVICES[@]}" > /dev/null
+  run="$(date -u +%Y%m%dT%H%M%SZ)-$(secret 2)"
+  relay="$(compose exec -T --env "RUN=${run}" miru-web bin/rails timekeeping:user_delete_refused:relay | tail -n 1)"
+  case "${relay}" in
+    timekeeping-relay|miru-jobs) ;;
+    *) die "the existing application named no relay to pause: ${relay:-nothing}" ;;
+  esac
+  echo "== pausing the owner's relay (${relay}): run ${run}"
+  # Expanded now: the trap runs after this function, and its locals, are gone.
+  trap "resume_service ${relay}" EXIT
+  compose stop "${relay}"
+  [ -z "$(process_state "${relay}")" ] || die "${relay} still runs after it was stopped"
+  compose exec -T --env "RUN=${run}" miru-web bin/rails timekeeping:user_delete_refused:paused
+  trap - EXIT
+  resume_service "${relay}"
+  compose exec -T --env "RUN=${run}" miru-web bin/rails timekeeping:user_delete_refused:resumed
+  echo "== user delete refused: the super-admin delete of a user with an unprojected first entry was refused, and the entry was projected once ${relay} resumed"
+}
+
 cmd_handoff() {
   case "${1:-}" in
     first_cutover|first_cutover:abort|rollback|rollback:abort|recutover|recutover:abort) ;;
@@ -311,6 +357,7 @@ case "${1:-}" in
   contract-check) cmd_contract_check ;;
   independent-deploys) cmd_independent_deploys ;;
   relay-paused) cmd_relay_paused ;;
+  user-delete-refused) cmd_user_delete_refused ;;
   down) compose down ;;
   compose) shift; compose "$@" ;;
   ""|help|-h|--help) usage ;;
