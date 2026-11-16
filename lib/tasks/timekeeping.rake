@@ -165,6 +165,23 @@
 # billing-handoff starts the handoff, stops and starts timekeeping-web, and
 # writes the release around them.
 #
+# The save-failure part of the failure injection (§12.4, §9.3,
+# Timekeeping::SaveFailuresCheck), while Timekeeping owns the entries, in one
+# step; RUN names its writes:
+#
+#   bin/rails timekeeping:save_failures        a lost prepare answer, a crash
+#                                              after prepare, a rolled-back
+#                                              save, and the replays of a
+#                                              committed, an aborted and a
+#                                              forced-pending operation
+#
+# It exits 1 at the first check that fails. It signs in as the journey does
+# (MIRU_URL, MIRU_SEED_PASSWORD), reaches Timekeeping as the invoice writes do
+# (TIMEKEEPING_URL, TIMEKEEPING_TOKEN_KEY), and CHECK_WAIT sets the seconds a
+# check waits on a worker (60 by default; the crash's recovery waits for the
+# save's 30 s time limit too). The crash forks a child process of this one,
+# which kills itself. bin/timekeeping-demo save-failures runs it.
+#
 # What the existing application measures of its Timekeeping machinery
 # (§11.3, Timekeeping::Signals), read once, for an operator or a script:
 #
@@ -535,5 +552,30 @@ namespace :timekeeping do
     task resumed: :environment do
       TimekeepingBillingHandoffTask.run(:resumed)
     end
+  end
+end
+
+module TimekeepingSaveFailuresTask
+  def self.check
+    Timekeeping::SaveFailuresCheck.new(
+      client: Timekeeping::PublicApi::Client.new(base_url: ENV.fetch("MIRU_URL", "http://127.0.0.1:3000")),
+      password: ENV.fetch("MIRU_SEED_PASSWORD") { abort "MIRU_SEED_PASSWORD is the seeded users' password; the check signs in with it" },
+      run: ENV.fetch("RUN") { abort "RUN names the writes of one run" },
+      logger: TimekeepingFirstCutoverTask.logger,
+      options: Timekeeping::SaveFailuresCheck::Options.new(wait: Integer(ENV.fetch("CHECK_WAIT", Timekeeping::PublicApi::DEFAULT_WAIT)))
+    )
+  end
+
+  def self.run
+    check.call
+  rescue Timekeeping::SaveFailuresCheck::Failed => error
+    abort "Timekeeping save-failures proof failed: #{error.message}"
+  end
+end
+
+namespace :timekeeping do
+  desc "A lost prepare answer, a crash after prepare, a rolled-back save and terminal-receipt replays each leave what 9.3 says (docs/architecture/timekeeping-soa.md 12.4; RUN)"
+  task save_failures: :environment do
+    TimekeepingSaveFailuresTask.run
   end
 end

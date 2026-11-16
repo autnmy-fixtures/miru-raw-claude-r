@@ -7,8 +7,9 @@ require "net/http"
 # the live contract check of the independent-deployment proof
 # (Timekeeping::ContractCheck, §13 item 4), the relay-paused proof
 # (Timekeeping::RelayPausedCheck, §13 item 5), the user-hard-delete proof
-# (Timekeeping::UserDeleteRefusedCheck, §12.4) and the billing-handoff proof
-# (Timekeeping::BillingHandoffCheck, §12.4). They drive the existing
+# (Timekeeping::UserDeleteRefusedCheck, §12.4), the billing-handoff proof
+# (Timekeeping::BillingHandoffCheck, §12.4) and the save-failures proof
+# (Timekeeping::SaveFailuresCheck, §12.4). They drive the existing
 # application the way its users do, over its public HTTP API as each seeded
 # business's own users (an employee writes entries, an admin or owner writes
 # invoices and reads reports), so every write goes through the controllers,

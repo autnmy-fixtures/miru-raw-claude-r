@@ -330,6 +330,7 @@ RSpec.describe "Timekeeping local demo runtime" do
     # :refused exit. A handoff task stops on its first run, as with
     # timekeeping-web stopped, and finishes when run again, unless
     # FAKE_HANDOFF_FINISHES is set, when it finishes at once.
+    # FAKE_SAVE_FAILURES_STATUS is how timekeeping:save_failures exits.
     context "with running applications" do
       let(:record_dir) { dir.join("deploys") }
       let(:fakes) { {} }
@@ -386,6 +387,9 @@ RSpec.describe "Timekeeping local demo runtime" do
                       echo "user delete: refused, ${service} stopped: $([ -e "${state}/stopped-${service}" ] && echo yes || echo no)"
                     done
                     exit "${FAKE_REFUSED_STATUS:-0}" ;;
+                  *timekeeping:save_failures*)
+                    echo "save failures: every case held"
+                    exit "${FAKE_SAVE_FAILURES_STATUS:-0}" ;;
                   *timekeeping:aggregate_line:held*)
                     echo "aggregate line: held, timekeeping-web stopped: $([ -e "${state}/stopped-timekeeping-web" ] && echo yes || echo no)"
                     exit "${FAKE_HELD_STATUS:-0}" ;;
@@ -708,6 +712,40 @@ RSpec.describe "Timekeeping local demo runtime" do
             expect(status).not_to be_success
             expect(err).to include("timekeeping-web still runs after it was stopped")
             expect(steps.map(&:split).map(&:first)).to eq(%w[held stop start])
+          end
+        end
+      end
+
+      describe "the save-failure part of the failure injection (§12.4, §9.3)" do
+        it "runs the one step in the existing application under a run name, and stops and starts nothing" do
+          out, err, status = run("save-failures")
+          expect(status).to be_success, err
+
+          step = docker_calls.grep(/timekeeping:save_failures/).sole
+          expect(step).to match(/exec -T --env RUN=\d{8}T\d{6}Z-\h{4} miru-web bin\/rails timekeeping:save_failures\z/)
+          expect(out).to include("save failures: every case held", "no replay of a resolved operation changed anything")
+          expect(docker_calls.join("\n")).not_to match(/ (stop|start|up|build|kill) /)
+        end
+
+        context "when the step fails" do
+          let(:fakes) { { "FAKE_SAVE_FAILURES_STATUS" => "1" } }
+
+          it "fails, and says nothing held" do
+            out, _err, status = run("save-failures")
+
+            expect(status).not_to be_success
+            expect(out).not_to include("no replay of a resolved operation changed anything")
+          end
+        end
+
+        context "when a process is not running" do
+          it "runs nothing" do
+            run("compose", "stop", "timekeeping-web")
+            _out, err, status = run("save-failures")
+
+            expect(status).not_to be_success
+            expect(err).to include("timekeeping-web is not running")
+            expect(docker_calls.grep(/timekeeping:save_failures/)).to be_empty
           end
         end
       end
