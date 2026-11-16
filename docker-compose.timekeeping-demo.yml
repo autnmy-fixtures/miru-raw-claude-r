@@ -1,0 +1,165 @@
+# The Timekeeping local demo runtime (docs/architecture/timekeeping-soa.md
+# §11.1, §11.2, §14 "Deployment and runtime").
+#
+# Both applications run on this one machine, each from its own image, with
+# its own Postgres server and database. They share no database credential:
+# the only credential they share is the token key (§6.1). There is no deploy
+# lane and no Kamal configuration for it (§15.3).
+#
+#   existing application   miru-web   (Dockerfile, target development)
+#                          miru-jobs  (same image; the dedicated workers only)
+#                          miru-db
+#   Timekeeping            timekeeping-web    (services/timekeeping/Dockerfile)
+#                          timekeeping-relay  (same image; the relay's worker)
+#                          timekeeping-db
+#
+# Only the dedicated workers run (§11.1): Timekeeping's relay worker on
+# `timekeeping_relay`, and the existing application's invoice operation
+# worker on `invoice_operations` next to its prepared application's relay on
+# `timekeeping_relay` (config/solid_queue_timekeeping_demo.yml). The `default`
+# worker is never started: the seeded data already holds queued integration
+# jobs, and it would run them.
+#
+# Credentials never sit in a checked-in file (§11.2). They are read from an
+# env file that bin/timekeeping-demo writes outside the checkout's tracked
+# files, and compose refuses to start without them. Drive the demo with that
+# script; see services/timekeeping/README.md, "The local demo runtime".
+name: miru-timekeeping-demo
+
+services:
+  miru-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: miru
+      POSTGRES_PASSWORD: ${MIRU_DB_PASSWORD:?run bin/timekeeping-demo init}
+      POSTGRES_DB: miru_web_development
+    volumes:
+      - miru_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U miru -d miru_web_development"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # The existing application. Its web process creates or migrates its
+  # database and, on a new one, seeds the two businesses (bin/docker-entrypoint
+  # runs db:prepare for `falcon serve`) in the initial legacy state.
+  miru-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+      labels:
+        org.opencontainers.image.title: miru-web
+        org.opencontainers.image.revision: ${MIRU_REVISION:-unknown}
+    image: miru-timekeeping-demo/miru-web:local
+    command: ["bundle", "exec", "falcon", "serve", "--bind", "http://0.0.0.0:3000"]
+    restart: unless-stopped
+    environment: &miru-environment
+      RAILS_ENV: development
+      RAILS_LOG_TO_STDOUT: "true"
+      DATABASE_URL: postgres://miru:${MIRU_DB_PASSWORD:?run bin/timekeeping-demo init}@miru-db:5432/miru_web_development
+      SECRET_KEY_BASE: ${MIRU_SECRET_KEY_BASE:?run bin/timekeeping-demo init}
+      # The seeded users' password (db/seeds.rb). Its default, "password",
+      # fails the breached-password check outside the test environment.
+      MIRU_SEED_PASSWORD: ${MIRU_SEED_PASSWORD:?run bin/timekeeping-demo init}
+      TIMEKEEPING_TOKEN_KEY: ${TIMEKEEPING_TOKEN_KEY:?run bin/timekeeping-demo init}
+      TIMEKEEPING_URL: http://timekeeping-web:3100
+      # Timekeeping's relay calls this process by its service name.
+      RAILS_DEVELOPMENT_HOSTS: miru-web
+      # Development mail goes to letter_opener, which writes it under
+      # tmp/letter_opener and then opens a browser; a container has none, so
+      # the seeds' invitation mail would fail. Launchy runs this instead.
+      BROWSER: /bin/true
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes: &miru-volumes
+      # The handoff runners' journals (lib/tasks/timekeeping.rake), kept
+      # across a rebuild and restart of this application.
+      - miru_handoff_journals:/rails/tmp/timekeeping
+      # The recorded seed disposition the first cutover reads (§10.4). It is
+      # checked in with the fixtures, which the image leaves out.
+      - ./spec/fixtures/timekeeping/seed_disposition.yml:/rails/spec/fixtures/timekeeping/seed_disposition.yml:ro
+    depends_on:
+      miru-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 600s
+      retries: 3
+
+  # The existing application's dedicated workers, from the same image. It
+  # does not migrate; it starts once the web process is healthy.
+  miru-jobs:
+    image: miru-timekeeping-demo/miru-web:local
+    pull_policy: never
+    command: ["bundle", "exec", "rake", "solid_queue:start"]
+    restart: unless-stopped
+    environment:
+      <<: *miru-environment
+      SOLID_QUEUE_CONFIG: config/solid_queue_timekeeping_demo.yml
+    volumes: *miru-volumes
+    depends_on:
+      miru-web:
+        condition: service_healthy
+
+  timekeeping-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: timekeeping
+      POSTGRES_PASSWORD: ${TIMEKEEPING_DB_PASSWORD:?run bin/timekeeping-demo init}
+      POSTGRES_DB: timekeeping_production
+    volumes:
+      - timekeeping_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U timekeeping -d timekeeping_production"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Timekeeping. Its web process creates or migrates its own database, Solid
+  # Queue's tables included (services/timekeeping/bin/docker-entrypoint). The
+  # image's HEALTHCHECK answers GET /up.
+  timekeeping-web:
+    build:
+      context: .
+      dockerfile: services/timekeeping/Dockerfile
+      args:
+        REVISION: ${TIMEKEEPING_REVISION:-unknown}
+    image: miru-timekeeping-demo/timekeeping:local
+    restart: unless-stopped
+    environment: &timekeeping-environment
+      DATABASE_URL: postgres://timekeeping:${TIMEKEEPING_DB_PASSWORD:?run bin/timekeeping-demo init}@timekeeping-db:5432/timekeeping_production
+      SECRET_KEY_BASE: ${TIMEKEEPING_SECRET_KEY_BASE:?run bin/timekeeping-demo init}
+      TIMEKEEPING_TOKEN_KEY: ${TIMEKEEPING_TOKEN_KEY:?run bin/timekeeping-demo init}
+      EXISTING_APP_URL: http://miru-web:3000
+    ports:
+      - "127.0.0.1:3100:3100"
+    depends_on:
+      timekeeping-db:
+        condition: service_healthy
+
+  # Timekeeping's relay: its one dedicated worker, on `timekeeping_relay`
+  # only (services/timekeeping/config/solid_queue.yml), from the same image.
+  # Stopping it pauses the relay (§12.4, §13 item 5).
+  timekeeping-relay:
+    image: miru-timekeeping-demo/timekeeping:local
+    pull_policy: never
+    command: ["bin/rails", "solid_queue:start"]
+    restart: unless-stopped
+    environment: *timekeeping-environment
+    # The image's health check is the web process's; this one serves nothing.
+    healthcheck:
+      disable: true
+    depends_on:
+      timekeeping-web:
+        condition: service_healthy
+
+volumes:
+  miru_db:
+  miru_handoff_journals:
+  timekeeping_db:

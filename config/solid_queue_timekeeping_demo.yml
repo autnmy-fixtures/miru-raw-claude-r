@@ -1,0 +1,39 @@
+# The existing application's jobs in the Timekeeping local demo
+# (docs/architecture/timekeeping-soa.md §11.1, §11.2, §14 "Runtime"). The demo
+# starts only the dedicated workers: the seeded data already holds queued
+# integration jobs, and the `default` worker would run them, so this file
+# names no `default` (or `billing_sync`) worker and schedules none of the
+# recurring tasks that enqueue onto those queues.
+#
+# Two workers, each reading one queue:
+#
+# - `invoice_operations`: the invoice operation worker, which delivers commit
+#   and abort from the ledger and runs the recovery sweep (§9.1, §9.2 step 4);
+# - `timekeeping_relay`: the prepared application's relay, which feeds the
+#   projection from its own outbox while the `monolith` owner holds the data
+#   after a rollback (§10.5).
+#
+# Their schedules and worker settings are the ones in config/solid_queue.yml,
+# and spec/config/timekeeping_demo_runtime_spec.rb keeps the two files in
+# step. The demo's jobs container (docker-compose.timekeeping-demo.yml) points
+# Solid Queue at this file with SOLID_QUEUE_CONFIG. It has no environment
+# keys: it is only read when that variable names it.
+dispatchers:
+  - polling_interval: 1
+    batch_size: 500
+    recurring_tasks:
+      invoice_operations:
+        class: Timekeeping::InvoiceOperationsJob
+        schedule: '*/5 * * * * *'  # Every 5 seconds: Timekeeping invoice operation recovery and delivery
+      timekeeping_local_relay:
+        class: Timekeeping::LocalRelayJob
+        schedule: '* * * * * *'  # Every second: the prepared application's outbox into the Timekeeping projection
+workers:
+  - queues: invoice_operations
+    threads: 1
+    processes: 1
+    polling_interval: 0.5
+  - queues: timekeeping_relay
+    threads: 1
+    processes: 1
+    polling_interval: 0.1

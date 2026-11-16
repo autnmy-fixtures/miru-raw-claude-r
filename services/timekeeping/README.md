@@ -85,3 +85,61 @@ docker build -f services/timekeeping/Dockerfile --build-arg REVISION="$(git rev-
 docker run -e DATABASE_URL=… -e SECRET_KEY_BASE=… -e TIMEKEEPING_TOKEN_KEY=… -e EXISTING_APP_URL=… -p 3100:3100 timekeeping
 docker run -e DATABASE_URL=… -e SECRET_KEY_BASE=… -e TIMEKEEPING_TOKEN_KEY=… -e EXISTING_APP_URL=… timekeeping bin/rails solid_queue:start
 ```
+
+## The local demo runtime (§11.1, §11.2)
+
+The demo runs both applications on one machine, each from its own image with its own Postgres server
+and database. They share no database credential; the token key is the only credential they share.
+There is no deploy lane and no Kamal configuration for it (§15.3). It is
+`docker-compose.timekeeping-demo.yml` at the repository root, driven by `bin/timekeeping-demo`:
+
+| Service | Image | Runs |
+|---|---|---|
+| `miru-web` | the existing application, `Dockerfile` target `development` | Falcon on `127.0.0.1:3000`. On a new database, `db:prepare` creates it and seeds the two businesses in the initial legacy state |
+| `miru-jobs` | the same image | Solid Queue with `config/solid_queue_timekeeping_demo.yml`: the invoice operation worker (`invoice_operations`) and the prepared application's relay (`timekeeping_relay`), and nothing else |
+| `miru-db` | `postgres:16-alpine` | the existing application's database, user `miru` |
+| `timekeeping-web` | this service's `Dockerfile` | Puma on `127.0.0.1:3100`, migrating its own database first |
+| `timekeeping-relay` | the same image | the relay's worker, on `timekeeping_relay` only |
+| `timekeeping-db` | `postgres:16-alpine` | this service's database, user `timekeeping` |
+
+The existing application's `default` worker, and its `billing_sync` worker, are never started (§11.1).
+Seeding leaves integration and mail jobs queued on `default`, and the `default` worker would run them. Each
+worker starts once its web process is healthy, so only the web processes migrate.
+
+```sh
+bin/timekeeping-demo init        # once: writes the credentials to tmp/timekeeping-demo/demo.env (0600)
+bin/timekeeping-demo up          # builds both images, starts all six services, prints the versions
+bin/timekeeping-demo versions    # each process's image id and the revision it was built from
+bin/timekeeping-demo handoff first_cutover   # or rollback, recutover; each with :abort
+bin/timekeeping-demo rebuild timekeeping     # rebuilds and restarts Timekeeping; the existing application stays as it is
+bin/timekeeping-demo rebuild existing        # the other way round
+bin/timekeeping-demo compose stop timekeeping-relay   # pauses the relay (§12.4); `compose start` resumes it
+bin/timekeeping-demo down        # stops everything; both databases and the handoff journals are kept
+```
+
+- **Credentials.** `init` generates each application's database password and `SECRET_KEY_BASE`, the
+  shared `TIMEKEEPING_TOKEN_KEY`, and `MIRU_SEED_PASSWORD`, the seeded users' password (sign in to the
+  existing application as, for example, `grace@forkandleaf.example` with it). The seeds' default,
+  `password`, fails the breached-password check outside the test environment. The file is under the
+  ignored `tmp/`, and `init` never overwrites it. Set `TIMEKEEPING_DEMO_ENV_FILE` to keep it elsewhere.
+  Compose refuses to start when a credential is missing.
+- **Wiring.** The existing application calls `TIMEKEEPING_URL=http://timekeeping-web:3100`, and the relay
+  delivers to `EXISTING_APP_URL=http://miru-web:3000`. `RAILS_DEVELOPMENT_HOSTS=miru-web` lets that host
+  through development's host authorization.
+- **Handoffs.** The runners in `lib/tasks/timekeeping.rake` run inside `miru-web`. Their journals sit in
+  the `miru_handoff_journals` volume, so an interrupted handoff can resume after a rebuild of the existing
+  application. The first cutover reads the recorded seed disposition (§10.4) from
+  `spec/fixtures/timekeeping/seed_disposition.yml`. The image leaves out `spec/`, so the demo mounts that
+  file read-only at its default path.
+- **Versions.** Each image records the commit it was built from, marked `-dirty` when the working tree
+  differs from it: Timekeeping's as the `REVISION` build argument, the existing application's as a build
+  label. `rebuild` rebuilds and recreates only the named application's two processes, web first. The
+  independent rebuild-and-restart proof (§13 item 4) runs on this.
+- **Mail.** Development mail goes to `letter_opener`, under `tmp/letter_opener` in `miru-web`. `BROWSER=/bin/true`
+  stops Launchy from looking for a browser the container does not have.
+- **Reset.** `bin/timekeeping-demo compose down --volumes` deletes both databases and the journals. The next
+  `up` reseeds. This is the "fresh demo reset" of §10.1: the seed builders refuse once a handoff has begun.
+
+`spec/config/timekeeping_demo_runtime_spec.rb` checks these files as written: the images, the separate
+databases and credentials, the dedicated workers (loading the demo's Solid Queue configuration), the
+wiring and the script. It starts no container.
