@@ -150,6 +150,7 @@ bin/timekeeping-demo stale-generation        # §9.3's stale generation: calls c
 bin/timekeeping-demo consumer-down           # §9.3's projection consumer down: entries listed and invoiced at once, the relay's deliveries refused, then its resend caught up
 bin/timekeeping-demo redelivery              # §13 item 6's duplicate and reordered delivery: snapshots resent out of order and twice, only the newest applied
 bin/timekeeping-demo tenant-isolation        # §13 item 7: neither business reaches the other's entries, the ownership guards hold, no single-writer violation; under any owner
+bin/timekeeping-demo interrupted-handoff     # §13 item 6's interrupted and resumed handoff: killed in its transfer, then stopped there, fenced each time, then resumed to its end; under any owner
 bin/timekeeping-demo compose stop timekeeping-relay   # pauses the relay (§12.4); `compose start` resumes it
 bin/timekeeping-demo down        # stops everything; both databases and the handoff journals are kept
 ```
@@ -167,7 +168,8 @@ bin/timekeeping-demo down        # stops everything; both databases and the hand
   the `miru_handoff_journals` volume, so an interrupted handoff can resume after a rebuild of the existing
   application. The first cutover reads the recorded seed disposition (§10.4) from
   `spec/fixtures/timekeeping/seed_disposition.yml`. The image leaves out `spec/`, so the demo mounts that
-  file read-only at its default path.
+  file read-only at its default path. `DRAIN_TIMEOUT` sets how long, in seconds, each runner's transfer waits for
+  its relay to drain (§10.5 step 3; 60 by default).
 - **Versions.** Each image records the commit it was built from, marked `-dirty` when the working tree
   differs from it: Timekeeping's as the `REVISION` build argument, the existing application's as a build
   label. `rebuild` rebuilds and recreates only the named application's two processes, web first. The
@@ -511,6 +513,54 @@ bin/timekeeping-demo down        # stops everything; both databases and the hand
   `tmp/timekeeping-demo/tenant-isolation/`. A run that finishes leaves, per business, two discarded entries and no
   invoice. `CHECK_WAIT` sets how long, in seconds, a check waits on a worker (default 60). The check is covered by
   `spec/requests/timekeeping/tenant_isolation_check_spec.rb`, under each of the three owners.
+- **An interrupted and resumed handoff (§13 item 6, §10.5).** `bin/timekeeping-demo interrupted-handoff` runs under
+  any owner with admission open, and runs the handoff that owner hands over with, which
+  `bin/rails timekeeping:interrupted_handoff:plan` (`Timekeeping::InterruptedHandoffCheck`) names. That step also
+  names the service that runs the relay the handoff's transfer waits on: `timekeeping-relay` for the first cutover
+  (the snapshots its load wrote) and the rollback (Timekeeping's outbox), `miru-jobs` for the re-cutover (the prepared
+  application's local relay). With that service stopped, the transfer cannot finish, and both interruptions happen
+  there. A run first reads both copies, so a run started with Timekeeping stopped fails before step 1 and changes
+  nothing, which interrupts nothing. Every step runs in `miru-web` under one run name (`RUN`). On both seeded
+  businesses:
+  - **Held** (relay running). The employee creates entry X and edits it, and the admin saves a draft with a direct
+    line for X. The candidates leave X out, and the draft's commit is delivered (no ledger under `legacy`).
+  - **Paused.** The command stops the relay's service. The employee creates entry Y and edits it. Under
+    `timekeeping` and `monolith` the projection must not hold Y, so the outbox holds it undelivered. The step keeps
+    X's and Y's record on the owner: version, note, duration, `locked`, `updated_at`.
+  - **Killed.** The command starts the handoff task in the background with `DRAIN_TIMEOUT=600`, writing its pid to
+    `runner.pid`. `:transferring` waits until the run stands in its transfer: both copies frozen under the outgoing
+    owner at the next generation, and the relay's outbox not drained. For the first cutover that outbox is
+    Timekeeping's, which only the load writes, and the journal must already hold the checkpoint, so the load has
+    run. The command then kills the run with SIGKILL, and fails if it had finished or stopped on its own. In
+    `:crashed`, both copies are still frozen at that generation. The journal holds the financial snapshot the run's
+    close took, and for the first cutover its checkpoint, and the step keeps a digest of both. X and Y on the owner
+    are exactly as `:paused` kept them. The employee's create of an entry and edit of Y, and the admin's save of a
+    draft holding Y, each answer 503 with the ownership-moving message, and change no row of `timesheet_entries`,
+    the prepared entries, invoices, line items or the invoice operation ledger.
+  - **Stopped for a resume.** The command runs the handoff task again with `DRAIN_TIMEOUT=5`, the relay still
+    stopped. It resumes in its transfer (the first cutover's load answers already-loaded), gives up waiting, and
+    stops with `DrainTimeout` and its resume hint. `:timed_out` repeats `:crashed`'s checks, and the journal must
+    still hold what the killed run took: the resumed run reused the snapshot and the checkpoint and took neither
+    again.
+  - **Resumed.** The command starts the relay's service again and runs the handoff task to its end. In `:resumed`,
+    both copies hand the entries to the incoming owner with admission open, at the generation the killed run raised,
+    raised once only. The journal is cleared, and the financial snapshot is identical to the one the killed run's
+    close took (§13 item 2). X and Y read back on the incoming owner as last written, and the projection catches up
+    to them. The candidates leave X out, as the draft still holds it, and offer Y (§13 item 3). Then writes are
+    accepted again: the employee edits Y, the admin deletes the draft, which releases X (F2), and the employee
+    discards X and Y.
+
+  The relay's service is started again, and a background run killed, however the steps in between end. Each handoff
+  run's output is shown, and kept under `tmp/timekeeping-demo/interrupted-handoff/<run>/` (`killed.log`,
+  `stopped.log`, `resumed.log`). The steps pass what they need through `tmp/timekeeping/interrupted-handoff/<run>/`
+  in the `miru_handoff_journals` volume (`state.json` and `runner.pid`). A run that finishes leaves, per
+  business, two discarded entries and one discarded draft, with nothing reserved, and the handoff done, so the demo
+  has moved to the next owner. Run it once under each owner to see all three handoffs interrupted and resumed.
+  `CHECK_WAIT` sets how long, in seconds, a step waits on another process (default 60). The steps are covered by
+  `spec/requests/timekeeping/interrupted_handoff_check_spec.rb`, which interrupts the real first cutover the same
+  two ways against `FakeHandoff`, and checks the resumed step under the prepared application. The runners'
+  resume at every step is pinned by `spec/services/timekeeping/first_cutover_spec.rb`, `rollback_spec.rb` and
+  `recutover_spec.rb`.
 - **Signals (§11.3).** Each of the existing application's two workers reads the other's alerts, so a
   stopped worker is still noticed: `invoice_operations` reads the local relay's lag (above 60 s for
   5 minutes), and `timekeeping_relay` reads the invoice operation ledger (an intent pending past 60 s, a

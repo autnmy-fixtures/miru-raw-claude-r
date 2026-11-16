@@ -353,6 +353,12 @@ RSpec.describe "Timekeeping local demo runtime" do
     # (11 12 21 22); FAKE_REDELIVERY_HELD_STATUS, FAKE_REDELIVER_STATUS and
     # FAKE_REDELIVERY_REORDERED_STATUS are how :held, timekeeping:redeliver
     # and :reordered exit.
+    # FAKE_INTERRUPTED_PLAN is what timekeeping:interrupted_handoff:plan
+    # prints, after a line of boot noise, and FAKE_INTERRUPTED_<STEP>_STATUS
+    # how each of its other steps exits. The handoff run with DRAIN_TIMEOUT=600
+    # waits until it is killed, and then exits 137, unless
+    # FAKE_KILLED_FINISHES is set, when it finishes at once; the one with
+    # DRAIN_TIMEOUT=5 stops for a resume, unless FAKE_STOPPED_FINISHES is set.
     context "with running applications" do
       let(:record_dir) { dir.join("deploys") }
       let(:fakes) { {} }
@@ -446,7 +452,26 @@ RSpec.describe "Timekeeping local demo runtime" do
                       touch "${state}/handoff-stopped"
                       echo "Timekeeping handoff stopped: Unavailable"; exit 1
                     fi
-                    echo "Timekeeping handoff: done" ;;
+                    echo "Timekeeping handoff: done at generation 2" ;;
+                  *"DRAIN_TIMEOUT=600 miru-web sh -c echo"*)
+                    echo "Timekeeping handoff: transfer at generation 2"
+                    if [ -n "${FAKE_KILLED_FINISHES:-}" ]; then echo "Timekeeping handoff: done at generation 2"; exit 0; fi
+                    for _ in $(seq 1 200); do [ -e "${state}/runner-killed" ] && exit 137; sleep 0.05; done
+                    exit 0 ;;
+                  *"miru-web sh -c pid='tmp/timekeeping/interrupted-handoff/"*) touch "${state}/runner-killed" ;;
+                  *"DRAIN_TIMEOUT=5 miru-web bin/rails timekeeping:"*)
+                    if [ -n "${FAKE_STOPPED_FINISHES:-}" ]; then echo "Timekeeping handoff: done at generation 2"; exit 0; fi
+                    echo "Timekeeping handoff stopped: Timekeeping::Rollback::DrainTimeout: 3 snapshots undelivered after 5 s"
+                    exit 1 ;;
+                  *timekeeping:interrupted_handoff:plan*)
+                    echo "booting"; echo "${FAKE_INTERRUPTED_PLAN-timekeeping:rollback timekeeping-relay}" ;;
+                  *timekeeping:interrupted_handoff:*)
+                    step="${!#}"; step="${step##*:}"
+                    for service in timekeeping-relay miru-jobs; do
+                      echo "interrupted handoff: ${step}, ${service} stopped: $([ -e "${state}/stopped-${service}" ] && echo yes || echo no)"
+                    done
+                    status="FAKE_INTERRUPTED_${step^^}_STATUS"
+                    exit "${!status:-0}" ;;
                   *"timekeeping-web sh -c"*) echo "${FAKE_TIMEKEEPING_CONTRACTS:-0a1b  entry_api.json}" ;;
                   *"miru-web sh -c"*) echo "0a1b  entry_api.json" ;;
                   *timekeeping:contract_check*) echo "contract check: every contract held"; exit "${FAKE_CHECK_STATUS:-0}" ;;
@@ -1304,6 +1329,155 @@ RSpec.describe "Timekeeping local demo runtime" do
             expect(status).not_to be_success
             expect(foreground_kinds.last(3)).to eq(%w[release refused start])
             expect(kinds.grep(/\Atimekeeping:/).size).to eq(1)
+          end
+        end
+      end
+
+      describe "the interrupted-and-resumed-handoff proof (§13 item 6)" do
+        let(:state_dir) { "tmp/timekeeping/interrupted-handoff" }
+        # The plain handoff run is the last one, which finishes.
+        let(:fakes) { { "FAKE_HANDOFF_FINISHES" => "1" } }
+
+        def steps
+          docker_calls.filter_map do |call|
+            case call
+            when /exec -T --env RUN=(\S+) miru-web bin\/rails timekeeping:interrupted_handoff:(\w+)\z/
+              "#{Regexp.last_match(2)} #{Regexp.last_match(1)}"
+            when /exec -T --env DRAIN_TIMEOUT=600 miru-web sh -c echo \$\$ > '#{state_dir}\/(\S+)\/runner.pid' && exec bin\/rails (timekeeping:\w+)\z/
+              "killed-run #{Regexp.last_match(2)} #{Regexp.last_match(1)}"
+            when /exec -T miru-web sh -c pid='#{state_dir}\/(\S+)\/runner.pid'; .*kill -KILL/ then "kill #{Regexp.last_match(1)}"
+            when /exec -T --env DRAIN_TIMEOUT=5 miru-web bin\/rails (timekeeping:\w+)\z/ then "stopped-run #{Regexp.last_match(1)}"
+            when /exec -T miru-web bin\/rails (timekeeping:\w+)\z/ then "run #{Regexp.last_match(1)}"
+            when / (stop|start) (timekeeping-relay|miru-jobs|timekeeping-web)\z/ then "#{Regexp.last_match(1)} #{Regexp.last_match(2)}"
+            end
+          end
+        end
+
+        def run_name = steps.first[/\Aplan (\S+)\z/, 1]
+
+        # The killed run goes to the background, so where its call lands
+        # among the script's own is not fixed: these are the calls the
+        # script makes in turn, which keep their order.
+        def foreground = steps.reject { |step| step.start_with?("killed-run ") }
+
+        def kinds = steps.map { |step| step.split.first }
+
+        it "writes X with the relay running and Y with it stopped, kills the handoff in its transfer, lets it stop there, " \
+           "then starts the relay and resumes it to its end, under one run name" do
+          out, err, status = run("interrupted-handoff")
+          expect(status).to be_success, err
+
+          expect(run_name).to match(/\A\d{8}T\d{6}Z-\h{4}\z/)
+          expect(steps).to include("killed-run timekeeping:rollback #{run_name}")
+          expect(foreground).to eq([
+            "plan #{run_name}", "held #{run_name}", "stop timekeeping-relay", "paused #{run_name}",
+            "transferring #{run_name}", "kill #{run_name}", "crashed #{run_name}",
+            "stopped-run timekeeping:rollback", "timed_out #{run_name}",
+            "start timekeeping-relay", "run timekeeping:rollback", "resumed #{run_name}"
+          ])
+          expect(out).to include(
+            "handing over with timekeeping:rollback, whose transfer waits on timekeeping-relay",
+            "interrupted handoff: held, timekeeping-relay stopped: no",
+            "interrupted handoff: paused, timekeeping-relay stopped: yes",
+            "interrupted handoff: crashed, timekeeping-relay stopped: yes",
+            "Timekeeping handoff stopped: Timekeeping::Rollback::DrainTimeout",
+            "interrupted handoff: timed_out, timekeeping-relay stopped: yes",
+            "interrupted handoff: resumed, timekeeping-relay stopped: no",
+            "resumed to its end with money, entries and reservations kept"
+          )
+          output = dir.join("interrupted-handoff", run_name)
+          expect(output.join("killed.log").read).to include("transfer at generation 2")
+          expect(output.join("stopped.log").read).to include("DrainTimeout")
+          expect(output.join("resumed.log").read).to include("done at generation 2")
+          expect(docker_calls.join("\n")).not_to match(/ (stop|start|up|build) .*(miru-|timekeeping-web)/)
+        end
+
+        context "when the existing application names the re-cutover" do
+          let(:fakes) { { "FAKE_HANDOFF_FINISHES" => "1", "FAKE_INTERRUPTED_PLAN" => "timekeeping:recutover miru-jobs" } }
+
+          it "stops and starts miru-jobs, the prepared application's relay, around the interruptions" do
+            out, err, status = run("interrupted-handoff")
+
+            expect(status).to be_success, err
+            expect(kinds.grep(/\A(stop|start)\z/).zip(steps.grep(/\A(stop|start) /))).to eq([
+              ["stop", "stop miru-jobs"], ["start", "start miru-jobs"]
+            ])
+            expect(steps.grep(/run /).map { |step| step.split[1] }.uniq).to eq(["timekeeping:recutover"])
+            expect(out).to include("interrupted handoff: crashed, miru-jobs stopped: yes")
+          end
+        end
+
+        context "when the existing application names no handoff" do
+          let(:fakes) { { "FAKE_INTERRUPTED_PLAN" => "timekeeping:rollback miru-jobs" } }
+
+          it "writes nothing and stops nothing" do
+            _out, err, status = run("interrupted-handoff")
+
+            expect(status).not_to be_success
+            expect(err).to include("named no handoff and relay to interrupt: timekeeping:rollback miru-jobs")
+            expect(kinds).to eq(%w[plan])
+          end
+        end
+
+        context "when the relay keeps running after it is stopped" do
+          let(:fakes) { { "FAKE_STOP_IGNORED" => "timekeeping-relay" } }
+
+          it "starts no handoff" do
+            _out, err, status = run("interrupted-handoff")
+
+            expect(status).not_to be_success
+            expect(err).to include("timekeeping-relay still runs after it was stopped")
+            expect(kinds).not_to include("paused", "killed-run", "run")
+          end
+        end
+
+        context "when the handoff is never seen in its transfer" do
+          let(:fakes) { { "FAKE_INTERRUPTED_TRANSFERRING_STATUS" => "1" } }
+
+          it "kills the handoff run and starts the relay again, and resumes nothing" do
+            _out, _err, status = run("interrupted-handoff")
+
+            expect(status).not_to be_success
+            expect(foreground.last(3)).to eq(["transferring #{run_name}", "kill #{run_name}", "start timekeeping-relay"])
+            expect(kinds).not_to include("crashed", "stopped-run", "run")
+          end
+        end
+
+        context "when the handoff finishes before it is killed" do
+          let(:fakes) { { "FAKE_KILLED_FINISHES" => "1" } }
+
+          it "fails before the crashed step, and starts the relay again" do
+            _out, err, status = run("interrupted-handoff")
+
+            expect(status).not_to be_success
+            expect(err).to include("timekeeping:rollback finished, though it was killed")
+            expect(kinds).not_to include("crashed")
+            expect(foreground.last).to eq("start timekeeping-relay")
+          end
+        end
+
+        context "when the handoff run again finishes with the relay stopped" do
+          let(:fakes) { { "FAKE_STOPPED_FINISHES" => "1" } }
+
+          it "fails before the timed-out step, and starts the relay again" do
+            _out, err, status = run("interrupted-handoff")
+
+            expect(status).not_to be_success
+            expect(err).to include("timekeeping:rollback finished while timekeeping-relay was stopped")
+            expect(kinds).not_to include("timed_out", "run")
+            expect(foreground.last).to eq("start timekeeping-relay")
+          end
+        end
+
+        context "when the crashed step fails" do
+          let(:fakes) { { "FAKE_INTERRUPTED_CRASHED_STATUS" => "1" } }
+
+          it "starts the relay again and does not run the handoff again" do
+            _out, _err, status = run("interrupted-handoff")
+
+            expect(status).not_to be_success
+            expect(foreground.last(2)).to eq(["crashed #{run_name}", "start timekeeping-relay"])
+            expect(kinds).not_to include("stopped-run", "run")
           end
         end
       end

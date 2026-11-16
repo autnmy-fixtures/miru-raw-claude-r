@@ -125,6 +125,18 @@
 #                                    app has logged a single-writer guard
 #                                    violation; under any owner with
 #                                    admission open
+#   bin/timekeeping-demo interrupted-handoff
+#                                    the interrupted-and-resumed-handoff
+#                                    proof (§13 item 6, §10.5): with the
+#                                    relay its transfer waits on stopped, the
+#                                    handoff the current owner hands over
+#                                    with is killed with SIGKILL in its
+#                                    transfer, then run again and stopped
+#                                    there for a resume; each time it stays
+#                                    fenced and changes nothing, and resumed
+#                                    with the relay started it finishes with
+#                                    money, entries and reservations kept;
+#                                    under any owner with admission open
 #   bin/timekeeping-demo down        stop everything; the databases are kept
 #   bin/timekeeping-demo compose …   any other docker compose command
 #
@@ -806,6 +818,106 @@ cmd_tenant_isolation() {
   echo "== tenant isolation: neither business could reach the other's entries, the ownership guards held on both, and no process of the existing application logged a single-writer guard violation"
 }
 
+# Where the interrupted-handoff proof's steps keep their state, in miru-web
+# (the miru_handoff_journals volume; Timekeeping::InterruptedHandoffCheck).
+INTERRUPTED_HANDOFF_DIR=tmp/timekeeping/interrupted-handoff
+
+# How long, in seconds, the handoff's transfer waits for the stopped relay:
+# long for the run the proof kills, so it still waits when it is killed, and
+# short for the run that must stop there on its own.
+INTERRUPTED_HANDOFF_KILLED_DRAIN=600
+INTERRUPTED_HANDOFF_STOPPED_DRAIN=5
+
+# Kills the handoff run the interrupted-handoff proof started in the
+# background, if it still runs, so a proof that fails never leaves it to
+# finish the handoff on its own once the relay is started again.
+stop_interrupted_runner() {
+  compose exec -T miru-web sh -c \
+    "pid='${INTERRUPTED_HANDOFF_DIR}/$1/runner.pid'; if [ -f \"\$pid\" ]; then kill -KILL \"\$(cat \"\$pid\")\" 2>/dev/null; rm -f \"\$pid\"; fi; true"
+}
+
+# One step of the interrupted-handoff proof, in miru-web.
+interrupted_handoff_step() {
+  compose exec -T --env "RUN=$1" miru-web bin/rails "timekeeping:interrupted_handoff:$2"
+}
+
+# The interrupted-and-resumed-handoff part of §13 item 6 (§10.5), under any
+# owner with admission open: the existing application names the handoff that
+# owner hands over with, and the service that runs the relay its transfer
+# waits on (bin/rails timekeeping:interrupted_handoff:plan). With that relay
+# running, entry X is written and reserved by a draft (:held); with it
+# stopped, entry Y is written (:paused). Then the handoff is interrupted
+# twice in its transfer, which cannot finish while the relay is stopped.
+# First it runs in the background, with its drain timeout raised, and once it
+# stands in its transfer (:transferring) its process is killed with SIGKILL:
+# still fenced, nothing changed, writes refused (:crashed). Then it runs again
+# with a short drain timeout and stops there for a resume: the same, with the
+# journal the killed run left reused (:timed_out). Last, the relay is started
+# again and the handoff resumed to its end, with money, entries and
+# reservations kept, and writes accepted again (:resumed). Every step runs in
+# miru-web under one run name; each handoff run's own output is shown, and
+# kept under tmp/timekeeping-demo/interrupted-handoff. The relay is started
+# again, and a background run killed, however the steps between end.
+cmd_interrupted_handoff() {
+  local run plan handoff relay output runner
+  require_env_file
+  processes "${EXISTING_SERVICES[@]}" "${TIMEKEEPING_SERVICES[@]}" > /dev/null
+  run="$(date -u +%Y%m%dT%H%M%SZ)-$(secret 2)"
+  plan="$(interrupted_handoff_step "${run}" plan | tail -n 1)"
+  read -r handoff relay <<< "${plan}"
+  case "${handoff} ${relay}" in
+    "timekeeping:first_cutover timekeeping-relay"|"timekeeping:rollback timekeeping-relay"|"timekeeping:recutover miru-jobs") ;;
+    *) die "the existing application named no handoff and relay to interrupt: ${plan:-nothing}" ;;
+  esac
+  output="$(dirname "${ENV_FILE}")/interrupted-handoff/${run}"
+  mkdir -p "${output}"
+  echo "== interrupted handoff: run ${run}, handing over with ${handoff}, whose transfer waits on ${relay}"
+  interrupted_handoff_step "${run}" held
+  echo "== stopping ${relay}"
+  # Expanded now: the trap runs after this function, and its locals, are gone.
+  trap "stop_interrupted_runner ${run}; resume_service ${relay}" EXIT
+  compose stop "${relay}"
+  [ -z "$(process_state "${relay}")" ] || die "${relay} still runs after it was stopped"
+  interrupted_handoff_step "${run}" paused
+
+  echo "== first interruption: starting ${handoff}, and killing it with SIGKILL in its transfer"
+  # sh's own pid is the handoff's: exec runs it in sh's place.
+  compose exec -T --env "DRAIN_TIMEOUT=${INTERRUPTED_HANDOFF_KILLED_DRAIN}" miru-web \
+    sh -c "echo \$\$ > '${INTERRUPTED_HANDOFF_DIR}/${run}/runner.pid' && exec bin/rails ${handoff}" \
+    > "${output}/killed.log" 2>&1 &
+  runner=$!
+  interrupted_handoff_step "${run}" transferring
+  stop_interrupted_runner "${run}"
+  trap "resume_service ${relay}" EXIT
+  if wait "${runner}"; then
+    cat "${output}/killed.log"
+    die "${handoff} finished, though it was killed"
+  fi
+  cat "${output}/killed.log"
+  if grep -q "done at generation\| stopped: " "${output}/killed.log"; then
+    die "${handoff} ended on its own before it was killed"
+  fi
+  interrupted_handoff_step "${run}" crashed
+
+  echo "== second interruption: running ${handoff} again, with ${relay} still stopped, until its transfer gives up"
+  if compose exec -T --env "DRAIN_TIMEOUT=${INTERRUPTED_HANDOFF_STOPPED_DRAIN}" miru-web bin/rails "${handoff}" \
+    > "${output}/stopped.log" 2>&1; then
+    cat "${output}/stopped.log"
+    die "${handoff} finished while ${relay} was stopped"
+  fi
+  cat "${output}/stopped.log"
+  grep -q " stopped: .*DrainTimeout" "${output}/stopped.log" || die "${handoff} did not stop in its transfer for a resume"
+  interrupted_handoff_step "${run}" timed_out
+
+  trap - EXIT
+  resume_service "${relay}"
+  echo "== resuming ${handoff} to its end"
+  compose exec -T miru-web bin/rails "${handoff}" 2>&1 | tee "${output}/resumed.log"
+  grep -q "done at generation" "${output}/resumed.log" || die "${handoff} did not finish when resumed"
+  interrupted_handoff_step "${run}" resumed
+  echo "== interrupted handoff: ${handoff} was killed in its transfer and then stopped there for a resume, stayed fenced and changed nothing each time, and resumed to its end with money, entries and reservations kept"
+}
+
 cmd_handoff() {
   case "${1:-}" in
     first_cutover|first_cutover:abort|rollback|rollback:abort|recutover|recutover:abort) ;;
@@ -843,6 +955,7 @@ case "${1:-}" in
   consumer-down) cmd_consumer_down ;;
   redelivery) cmd_redelivery ;;
   tenant-isolation) cmd_tenant_isolation ;;
+  interrupted-handoff) cmd_interrupted_handoff ;;
   down) compose down ;;
   compose) shift; compose "$@" ;;
   ""|help|-h|--help) usage ;;
