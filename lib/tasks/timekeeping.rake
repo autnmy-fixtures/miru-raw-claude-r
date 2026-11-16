@@ -66,6 +66,21 @@
 # worker (60 by default). bin/timekeeping-demo independent-deploys runs it
 # before the two deploys and after each one.
 #
+# The relay-paused proof (§13 item 5, Timekeeping::RelayPausedCheck), while
+# Timekeeping owns the entries, in two halves around a stopped
+# timekeeping-relay; RUN names the writes of one run, the same for both:
+#
+#   bin/rails timekeeping:relay_paused:paused   with the relay stopped: a new
+#                                               entry is listed and invoiced
+#                                               at once, and is not projected
+#   bin/rails timekeeping:relay_paused:resumed  with the relay started again:
+#                                               the projection catches up
+#
+# Each exits 1 at the first check that fails. They sign in as the journey
+# does (MIRU_URL, MIRU_SEED_PASSWORD), and CHECK_WAIT sets the seconds a check
+# waits on a worker (60 by default). bin/timekeeping-demo relay-paused stops
+# and starts the relay around them.
+#
 # What the existing application measures of its Timekeeping machinery
 # (§11.3, Timekeeping::Signals), read once, for an operator or a script:
 #
@@ -267,5 +282,37 @@ namespace :timekeeping do
     ).call
   rescue Timekeeping::ContractCheck::Failed, Timekeeping::InternalApi::Error => error
     abort "Timekeeping contract check failed: #{error.class}: #{error.message}"
+  end
+end
+
+module TimekeepingRelayPausedTask
+  def self.check
+    Timekeeping::RelayPausedCheck.new(
+      client: Timekeeping::PublicApi::Client.new(base_url: ENV.fetch("MIRU_URL", "http://127.0.0.1:3000")),
+      password: ENV.fetch("MIRU_SEED_PASSWORD") { abort "MIRU_SEED_PASSWORD is the seeded users' password; the check signs in with it" },
+      run: ENV.fetch("RUN") { abort "RUN names the writes of one run; give both halves the same one" },
+      logger: TimekeepingFirstCutoverTask.logger,
+      options: Timekeeping::RelayPausedCheck::Options.new(wait: Integer(ENV.fetch("CHECK_WAIT", Timekeeping::PublicApi::DEFAULT_WAIT)))
+    )
+  end
+
+  def self.run(half)
+    check.public_send(half)
+  rescue Timekeeping::RelayPausedCheck::Failed => error
+    abort "Timekeeping relay-paused proof failed (#{half}): #{error.message}"
+  end
+end
+
+namespace :timekeeping do
+  namespace :relay_paused do
+    desc "With Timekeeping's relay stopped: a new entry is listed and invoiced at once (docs/architecture/timekeeping-soa.md 13 item 5; RUN)"
+    task paused: :environment do
+      TimekeepingRelayPausedTask.run(:paused)
+    end
+
+    desc "With Timekeeping's relay started again: the projection catches up (docs/architecture/timekeeping-soa.md 13 item 5; RUN)"
+    task resumed: :environment do
+      TimekeepingRelayPausedTask.run(:resumed)
+    end
   end
 end

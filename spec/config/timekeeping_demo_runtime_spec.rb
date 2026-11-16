@@ -307,7 +307,9 @@ RSpec.describe "Timekeeping local demo runtime" do
     # recreated. FAKE_ALSO_RECREATE names a service it recreates along with
     # any other; FAKE_TIMEKEEPING_CONTRACTS what Timekeeping's contract
     # documents digest to; FAKE_CHECK_STATUS how timekeeping:contract_check
-    # exits.
+    # exits. A stopped service is not listed by `ps` until it is started
+    # again; FAKE_STOP_IGNORED names one that `stop` leaves running, and
+    # FAKE_PAUSED_STATUS how timekeeping:relay_paused:paused exits.
     context "with running applications" do
       let(:record_dir) { dir.join("deploys") }
       let(:fakes) { {} }
@@ -322,7 +324,9 @@ RSpec.describe "Timekeeping local demo runtime" do
           if [ "$1" = compose ]; then
             shift 5
             case "$1" in
-              ps) echo "demo-${!#}-1" ;;
+              ps) [ -e "${state}/stopped-${!#}" ] || echo "demo-${!#}-1" ;;
+              stop) [ "${!#}" = "${FAKE_STOP_IGNORED:-}" ] || touch "${state}/stopped-${!#}" ;;
+              start) rm -f "${state}/stopped-${!#}" ;;
               up)
                 if [[ " $* " == *" --force-recreate "* ]]; then
                   for service in "${!#}" ${FAKE_ALSO_RECREATE:-}; do echo $(( $(generation "${service}") + 1 )) > "${state}/${service}"; done
@@ -332,6 +336,11 @@ RSpec.describe "Timekeeping local demo runtime" do
                   *"timekeeping-web sh -c"*) echo "${FAKE_TIMEKEEPING_CONTRACTS:-0a1b  entry_api.json}" ;;
                   *"miru-web sh -c"*) echo "0a1b  entry_api.json" ;;
                   *timekeeping:contract_check*) echo "contract check: every contract held"; exit "${FAKE_CHECK_STATUS:-0}" ;;
+                  *timekeeping:relay_paused:paused*)
+                    echo "relay paused: listed and invoiced at once, relay stopped: $([ -e "${state}/stopped-timekeeping-relay" ] && echo yes || echo no)"
+                    exit "${FAKE_PAUSED_STATUS:-0}" ;;
+                  *timekeeping:relay_paused:resumed*)
+                    echo "relay paused: caught up, relay stopped: $([ -e "${state}/stopped-timekeeping-relay" ] && echo yes || echo no)" ;;
                 esac ;;
             esac
             exit 0
@@ -441,6 +450,66 @@ RSpec.describe "Timekeeping local demo runtime" do
           expect(status).not_to be_success
           expect(docker_calls.grep(/ build /)).to be_empty
           expect(records.first.read).not_to include("independent deploys done")
+        end
+      end
+
+      describe "the relay-paused proof (§13 item 5)" do
+        def steps
+          docker_calls.filter_map do |call|
+            case call
+            when / (stop|start) timekeeping-relay\z/ then "#{Regexp.last_match(1)} relay"
+            when /exec -T --env RUN=(\S+) miru-web bin\/rails timekeeping:relay_paused:(\w+)\z/ then "#{Regexp.last_match(2)} #{Regexp.last_match(1)}"
+            end
+          end
+        end
+
+        it "stops Timekeeping's relay, runs the paused half, starts the relay, then runs the resumed half under the same run" do
+          out, err, status = run("relay-paused")
+          expect(status).to be_success, err
+
+          run_name = steps.second.split.last
+          expect(run_name).to match(/\A\d{8}T\d{6}Z-\h{4}\z/)
+          expect(steps).to eq(["stop relay", "paused #{run_name}", "start relay", "resumed #{run_name}"])
+          expect(out).to include(
+            "relay paused: listed and invoiced at once, relay stopped: yes",
+            "timekeeping-relay container=timekeeping-relay-container-1",
+            "relay paused: caught up, relay stopped: no",
+            "the projection caught up once it resumed"
+          )
+          expect(docker_calls.join("\n")).not_to match(/ (stop|start|up|build) .*miru-/)
+        end
+
+        context "when the paused half fails" do
+          let(:fakes) { { "FAKE_PAUSED_STATUS" => "1" } }
+
+          it "starts the relay again and does not run the resumed half" do
+            _out, _err, status = run("relay-paused")
+
+            expect(status).not_to be_success
+            expect(steps.map(&:split).map(&:first)).to eq(%w[stop paused start])
+          end
+        end
+
+        context "when the relay keeps running after it is stopped" do
+          let(:fakes) { { "FAKE_STOP_IGNORED" => "timekeeping-relay" } }
+
+          it "fails before either half, since nothing would be paused" do
+            _out, err, status = run("relay-paused")
+
+            expect(status).not_to be_success
+            expect(err).to include("timekeeping-relay still runs after it was stopped")
+            expect(steps).to eq(["stop relay", "start relay"])
+          end
+        end
+
+        it "fails before stopping anything when a process is not running" do
+          dir.join("bin/docker").write("#!/bin/sh\necho \"$*\" >> \"#{docker_log}\"\n")
+
+          _out, err, status = run("relay-paused")
+
+          expect(status).not_to be_success
+          expect(err).to include("miru-web is not running")
+          expect(steps).to be_empty
         end
       end
 

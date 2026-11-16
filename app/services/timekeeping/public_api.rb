@@ -2,10 +2,11 @@
 
 require "net/http"
 
-# What the local demo's two drivers share: the end-to-end journey
-# (Timekeeping::Journey, docs/architecture/timekeeping-soa.md §13 item 1) and
+# What the local demo's drivers share: the end-to-end journey
+# (Timekeeping::Journey, docs/architecture/timekeeping-soa.md §13 item 1),
 # the live contract check of the independent-deployment proof
-# (Timekeeping::ContractCheck, §13 item 4). Both drive the existing
+# (Timekeeping::ContractCheck, §13 item 4) and the relay-paused proof
+# (Timekeeping::RelayPausedCheck, §13 item 5). Both drive the existing
 # application the way its users do, over its public HTTP API as each seeded
 # business's own users (an employee writes entries, an admin or owner writes
 # invoices and reads reports), so every write goes through the controllers,
@@ -133,6 +134,12 @@ module Timekeeping::PublicApi
       return if response.status == 200
 
       fail! "could not #{what}: #{response.status} #{response.body.to_s.truncate(500)}"
+    end
+
+    # A delete answers 200 with a notice, or 204 with nothing.
+    def delete(tenant, role, path, what)
+      response = as(tenant, role).call(:delete, path)
+      expect_ok!(response, what) unless response.status == 204
     end
 
     def eventually(what)
