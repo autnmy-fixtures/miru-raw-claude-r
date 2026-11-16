@@ -429,10 +429,11 @@ RSpec.describe "Timekeeping entry writes under the monolith owner", type: :reque
       expect(entry.reload).to have_attributes(agent_id: agent.id, version: 1)
     end
 
-    # The projection keeps today's timesheet_entries -> agents foreign key
-    # (db/schema.rb). While a projected row still names the agent, the
-    # delete is refused by that key, and the detach rolls back with it.
-    it "is refused whole, with nothing half done, while the projection still names the agent" do
+    # The projection lags the detach until the local relay delivers it, so
+    # the timesheet_entries -> agents key is dropped before cutover, like the
+    # two billing keys (§10.2 step 3), and does not refuse the delete while a
+    # projected row still names the agent.
+    it "deletes the agent while the projection still names it, and the relay then detaches the row" do
       entry = held_entry
       Timekeeping::LocalEntryChange.record!(
         entry, action: "create", audited_changes: {},
@@ -441,13 +442,16 @@ RSpec.describe "Timekeeping entry writes under the monolith owner", type: :reque
       Timekeeping::LocalRelay.new.run
       expect(TimesheetEntry.find(entry.id).agent_id).to eq(agent.id)
 
-      without_projection_writes do
-        expect { agent.destroy! }.to raise_error(ActiveRecord::InvalidForeignKey)
-      end
+      without_projection_writes { agent.destroy! }
 
-      expect(Agent.exists?(agent.id)).to be(true)
-      expect(entry.reload).to have_attributes(agent_id: agent.id, version: 1)
-      expect(entry.outbox_snapshots.count).to eq(1)
+      expect(Agent.exists?(agent.id)).to be(false)
+      expect(entry.reload).to have_attributes(agent_id: nil, version: 2)
+      row = TimesheetEntry.find(entry.id)
+      expect(row.agent_id).to eq(agent.id)
+      expect(row.agent).to be_nil
+
+      Timekeeping::LocalRelay.new.run
+      expect(TimesheetEntry.find(entry.id)).to have_attributes(agent_id: nil, version: 2)
     end
   end
 end
