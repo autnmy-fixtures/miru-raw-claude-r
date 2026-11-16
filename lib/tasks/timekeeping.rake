@@ -26,6 +26,18 @@
 # (tmp/timekeeping/rollback.json by default). The rollback takes no
 # disposition: its reservations come out of Timekeeping as Timekeeping holds
 # them.
+#
+# The runner for the re-cutover from the prepared application back to
+# Timekeeping (§10.2 step 6, §10.5) works the same way again, with its own
+# journal (Timekeeping::RecutoverJournal), which keeps the financial snapshot:
+#
+#   bin/rails timekeeping:recutover            run, or resume, to the end
+#   bin/rails timekeeping:recutover:abort      reopen admission on both copies
+#
+# They read TIMEKEEPING_URL and TIMEKEEPING_TOKEN_KEY too, and JOURNAL
+# (tmp/timekeeping/recutover.json by default). The re-cutover takes no
+# disposition either: its reservations come out of the prepared application
+# as it holds them.
 module TimekeepingFirstCutoverTask
   def self.journal = Timekeeping::FirstCutoverJournal.new(path: ENV.fetch("JOURNAL", Timekeeping::FirstCutoverJournal::DEFAULT_PATH))
 
@@ -119,6 +131,47 @@ namespace :timekeeping do
       journal.clear
       puts "Timekeeping rollback: aborted at generation #{generation}, admission reopened on both copies under Timekeeping"
     rescue Timekeeping::Rollback::Unresumable, Timekeeping::InternalApi::NotConfigured => error
+      abort error.message
+    end
+  end
+end
+
+module TimekeepingRecutoverTask
+  def self.journal = Timekeeping::RecutoverJournal.new(path: ENV.fetch("JOURNAL", Timekeeping::RecutoverJournal::DEFAULT_PATH))
+
+  def self.resume_hint(journal)
+    "Both copies stay where the run left them, and #{journal.path} keeps what it took. " \
+      "Run bin/rails timekeeping:recutover again to resume, or bin/rails timekeeping:recutover:abort to reopen admission."
+  end
+end
+
+namespace :timekeeping do
+  desc "Run or resume the re-cutover from the prepared application to Timekeeping (JOURNAL=path)"
+  task recutover: :environment do
+    journal = TimekeepingRecutoverTask.journal
+    result = Timekeeping::Recutover.new(journal:, logger: TimekeepingFirstCutoverTask.logger).call
+    journal.clear
+    puts "Timekeeping re-cutover: done at generation #{result.generation}, Timekeeping owns entries " \
+      "(#{TimekeepingRollbackTask.reconciled(result.reconciled)})"
+  rescue Timekeeping::Recutover::Aborted => error
+    journal.clear
+    abort [error.message, *error.lists.map { |list, ids| "  #{list}: #{Array(ids).join(', ')}" }].join("\n")
+  rescue Timekeeping::Recutover::Unresumable, Timekeeping::HandoffJournal::Unreadable, Timekeeping::InternalApi::NotConfigured => error
+    abort error.message
+  rescue StandardError => error
+    raise unless journal
+
+    abort "Timekeeping re-cutover stopped: #{error.class}: #{error.message}\n#{TimekeepingRecutoverTask.resume_hint(journal)}"
+  end
+
+  namespace :recutover do
+    desc "Abort the re-cutover in progress, reopening admission on both copies under the prepared application (JOURNAL=path)"
+    task abort: :environment do
+      journal = TimekeepingRecutoverTask.journal
+      generation = Timekeeping::Recutover.new(logger: TimekeepingFirstCutoverTask.logger).abort!
+      journal.clear
+      puts "Timekeeping re-cutover: aborted at generation #{generation}, admission reopened on both copies under the prepared application"
+    rescue Timekeeping::Recutover::Unresumable, Timekeeping::InternalApi::NotConfigured => error
       abort error.message
     end
   end
