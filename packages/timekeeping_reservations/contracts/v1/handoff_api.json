@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://contracts.timekeeping.internal/v1/handoff_api.json",
   "title": "Timekeeping handoff API v1: Timekeeping's side of the handoff procedure",
-  "description": "Provider: Timekeeping. Consumer: the handoff tool, run from the existing application (docs/architecture/timekeeping-soa.md §10.1, §10.5). The two applications share no database (§11.2), so the tool moves Timekeeping's copy of the ownership record and carries the checkpoint to it over this API. No call needs an Idempotency-Key: every step names the generation and state it expects, so a replay is refused as out-of-step and changes nothing; a second load of the first cutover is already-loaded, and loading the re-cutover's checkpoint again leaves the same tables; reconcile writes nothing; taking a checkpoint out of Timekeeping, the outgoing owner of a rollback, is a read. A resumed handoff reads the copy first and re-runs the step that did not commit.",
+  "description": "Provider: Timekeeping. Consumer: the handoff tool, run from the existing application (docs/architecture/timekeeping-soa.md §10.1, §10.5). The two applications share no database (§11.2), so the tool moves Timekeeping's copy of the ownership record and carries the checkpoint to it over this API. No call needs an Idempotency-Key: every step names the generation and state it expects, so a replay is refused as out-of-step and changes nothing; a second load of the first cutover is already-loaded, and loading the re-cutover's checkpoint again leaves the same tables; reconcile, of either checkpoint, writes nothing; taking a checkpoint out of Timekeeping, the outgoing owner of a rollback, is a read. A resumed handoff reads the copy first and re-runs the step that did not commit.",
   "x-headers": {
     "every": ["Authorization", "X-Request-Id"],
     "mutating": ["X-Ownership-Generation"]
@@ -34,6 +34,11 @@
     },
     "load_recutover_checkpoint": {
       "method": "POST", "path": "/internal/v1/handoff/recutover/checkpoint", "mutating": true,
+      "request": "#/$defs/recutover_checkpoint",
+      "responses": { "200": "#/$defs/recutover_receipt" }
+    },
+    "reconcile_recutover_checkpoint": {
+      "method": "POST", "path": "/internal/v1/handoff/recutover/checkpoint/reconcile", "mutating": true,
       "request": "#/$defs/recutover_checkpoint",
       "responses": { "200": "#/$defs/recutover_receipt" }
     }
@@ -209,7 +214,7 @@
       "additionalProperties": false
     },
     "recutover_checkpoint": {
-      "description": "The frozen checkpoint of the re-cutover (§10.2 step 6, §10.5 step 4), taken out of the prepared existing application, the outgoing monolith owner, at generation, in the parts and forms of taken_checkpoint, for Timekeeping to load over what it still holds from before the rollback. The load refuses whatever does not hold together, or would drop what Timekeeping holds (checkpoint-refused, listing what each check found), so a row is only required here to name what identifies it: an entry its id and the version the load compares with the one held, an audit row its id, an operation receipt (invoice_id, operation_id) and an idempotency receipt (company_id, key).",
+      "description": "The frozen checkpoint of the re-cutover (§10.2 step 6, §10.5 step 4), taken out of the prepared existing application, the outgoing monolith owner, at generation, in the parts and forms of taken_checkpoint, for Timekeeping to load over what it still holds from before the rollback, and then to reconcile what it holds against. The load refuses whatever does not hold together, or would drop what Timekeeping holds (checkpoint-refused, listing what each check found), and the reconcile compares every carried row exactly with the one held (checkpoint-differs, listing each row missing, unexpected or differing), so a row is only required here to name what identifies it: an entry its id and the version the load compares with the one held, an audit row its id, an operation receipt (invoice_id, operation_id) and an idempotency receipt (company_id, key).",
       "type": "object",
       "properties": {
         "generation": { "$ref": "common.json#/$defs/generation" },
@@ -247,7 +252,7 @@
       "additionalProperties": false
     },
     "recutover_receipt": {
-      "description": "How many rows of each part the re-cutover's checkpoint carried and the load wrote.",
+      "description": "How many rows of each part the re-cutover's checkpoint carried and the load wrote, or the reconcile found Timekeeping holding exactly as carried.",
       "type": "object",
       "properties": {
         "entries": { "type": "integer", "minimum": 0 },
