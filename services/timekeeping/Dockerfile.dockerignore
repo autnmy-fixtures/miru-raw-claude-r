@@ -1,0 +1,19 @@
+# The build context of services/timekeeping/Dockerfile, which is built from the
+# repository root. Only Timekeeping and the shared library it reads go in;
+# nothing of the existing application does (§13 item 4).
+*
+!services/timekeeping/
+!packages/timekeeping_reservations/
+
+# Nothing of this checkout's local state.
+services/timekeeping/.bundle
+services/timekeeping/log/*
+services/timekeeping/tmp/*
+!services/timekeeping/log/.keep
+!services/timekeeping/tmp/.keep
+services/timekeeping/.env*
+
+# The image runs the service, not its tests.
+services/timekeeping/spec/
+services/timekeeping/.rspec
+packages/timekeeping_reservations/spec/

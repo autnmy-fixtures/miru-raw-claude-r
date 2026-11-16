@@ -49,6 +49,7 @@ in its outbox to the existing application's projection consumer (§5.4), on its 
 | `app/jobs/outbox_relay_job.rb`, `config/solid_queue.yml` | The relay's runtime (§11.1, D3): `OutboxRelayJob` on the `timekeeping_relay` queue, enqueued every second by the dispatcher and run by one dedicated worker that reads no other queue, on this service's own Solid Queue tables (`db/migrate/*.solid_queue.rb`). Start it with `bin/rails solid_queue:start`; stopping it pauses the relay (§12.4), and the outbox keeps every change until it resumes. |
 | `db/migrate/*_create_idempotency_receipts.rb`, `app/models/idempotency_receipt.rb` | `(key, request hash, response)` per tenant (§9.4): the same key and request replay the answer, the same key and another request is `409 idempotency-conflict`, another company's same key is its own call. |
 | `GET /up` | Liveness, 200 once booted. |
+| `Dockerfile`, `Dockerfile.dockerignore`, `bin/docker-entrypoint` | Timekeeping's own image (§11.1, §14 "Deployment and runtime"), built from the repository root. It holds this service and `packages/timekeeping_reservations`, at the same relative paths as in a checkout, and nothing of the existing application, so either image is rebuilt and restarted without the other (§13 item 4). Gems are installed without the test group, and the build fails if the application does not boot in production. The image runs as a non-root user, records the revision it was built from (label `org.opencontainers.image.revision`, env `TIMEKEEPING_REVISION`), and runs both processes: by default Puma on `PORT`, which first creates or migrates this service's database, Solid Queue's tables included; and `bin/rails solid_queue:start`, the relay's worker, which does not migrate, so it is started once the web process answers `GET /up`. |
 
 ## Configuration (§11.2)
 
@@ -57,6 +58,7 @@ Each value comes from this process's environment; none sits in a checked-in file
 | Variable | Kind | Use |
 |---|---|---|
 | `DATABASE_URL` | credential | This service's database (production). Locally, `DB_HOST`, `DB_USER` and `DB_PASS` as in the existing application. |
+| `SECRET_KEY_BASE` | credential | Rails' own secret, which production needs to boot (Active Record builds its message verifier from it). This service has no encrypted credentials file, so there is no `RAILS_MASTER_KEY` to decrypt one; Rails reads `SECRET_KEY_BASE` from the environment instead. Nothing here signs a cookie or a session with it. |
 | `TIMEKEEPING_TOKEN_KEY` | credential | The key shared with the existing application to sign and verify tokens (§6.1). |
 | `EXISTING_APP_URL` | plain | Where the relay delivers entry snapshots (§5.4). The relay's worker refuses to run without it or the token key. |
 | `RAILS_MAX_THREADS`, `PORT` | plain | Puma. `PORT` defaults to 3100, next to the existing application's 3000. |
@@ -74,4 +76,12 @@ With the repository's test container: `miru-test 'cd services/timekeeping && bin
 This suite is where the provider side of the contract tests runs (§12.3): `spec/support/contracts.rb`
 checks answers against the same schemas the existing application's consumer and fakes read. It has its
 own bundle, so the existing application's CI job (`bin/parallel_test`) does not run it; a CI job of its
-own is not wired up yet.
+own, which would also build this service's image, is not wired up yet.
+
+To build and run the image, from the repository root:
+
+```sh
+docker build -f services/timekeeping/Dockerfile --build-arg REVISION="$(git rev-parse HEAD)" -t timekeeping .
+docker run -e DATABASE_URL=… -e SECRET_KEY_BASE=… -e TIMEKEEPING_TOKEN_KEY=… -e EXISTING_APP_URL=… -p 3100:3100 timekeeping
+docker run -e DATABASE_URL=… -e SECRET_KEY_BASE=… -e TIMEKEEPING_TOKEN_KEY=… -e EXISTING_APP_URL=… timekeeping bin/rails solid_queue:start
+```
