@@ -113,6 +113,13 @@ tables. The handoff tool carries it there over the handoff API (`load_recutover_
 On this side that call is `Timekeeping::HandoffClient#load_recutover_checkpoint`, which sends every
 part as taken and answers a `RecutoverReceipt`; after a lost response the tool can send it again.
 `TimekeepingContracts::FakeHandoff` serves it for the tool's tests.
+Timekeeping's `RecutoverReconcile` (`services/timekeeping/app/services/recutover_reconcile.rb`, §10.5
+step 6) then compares what Timekeeping holds with the same checkpoint, under the same guard, and writes
+nothing. Every part is compared exactly, both ways (missing, unexpected, differs): entries by id, every
+column, `version` and the derived `locked` included; each entry's reservations; audit rows by id;
+operation receipts by `invoice_id/operation_id`; and idempotency receipts by `company_id/key`. Any
+difference raises `CheckpointReconcile::Differs`, Timekeeping's first-cutover refusal, so the handoff is
+aborted. It is not yet served over the handoff API.
 
 Timekeeping's provider is `ReservationProtocol` (`services/timekeeping/app/services/reservation_protocol.rb`),
 behind the reservation API's three endpoints. It keeps the same protocol on tables with the same shape,
