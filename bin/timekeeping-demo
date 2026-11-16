@@ -93,6 +93,18 @@
 #                                    gateway's retry goes through, and
 #                                    Timekeeping logs each refusal as an
 #                                    alert; while Timekeeping owns the entries
+#   bin/timekeeping-demo consumer-down
+#                                    the projection-consumer-down part of the
+#                                    failure injection (§12.4, §9.3): with
+#                                    the consumer down as timekeeping-relay
+#                                    meets it and the relay running, an
+#                                    edited and a new entry are listed and
+#                                    invoiced at once and the projection
+#                                    stays as it was, while the relay's
+#                                    deliveries are refused; with it back,
+#                                    the same relay's resend brings the
+#                                    projection to Timekeeping's versions;
+#                                    while Timekeeping owns the entries
 #   bin/timekeeping-demo down        stop everything; the databases are kept
 #   bin/timekeeping-demo compose …   any other docker compose command
 #
@@ -577,6 +589,109 @@ cmd_stale_generation() {
   echo "== stale generation: every call carrying another generation was refused and changed nothing, the retries went to the current owner, and Timekeeping reported each of the $(wc -w <<< "${ids}" | tr -d ' ') refusals as an alert"
 }
 
+# The mark on the line consumer-down adds to timekeeping-relay's /etc/hosts.
+CONSUMER_DOWN_MARK="bin/timekeeping-demo consumer-down"
+
+# Whether timekeeping-relay reaches the projection consumer where it delivers
+# (its EXISTING_APP_URL): "reached <status>" for the existing application's
+# health check there, or "unreachable <error>".
+consumer_probe() {
+  compose exec -T timekeeping-relay ruby -rnet/http -e '
+    url = URI(ENV.fetch("EXISTING_APP_URL"))
+    begin
+      response = Net::HTTP.start(url.host, url.port, open_timeout: 5, read_timeout: 5) { |http| http.get("/health") }
+      puts "reached #{response.code}"
+    rescue SystemCallError, SocketError, IOError, Timeout::Error => error
+      puts "unreachable #{error.class}"
+    end'
+}
+
+# Takes the projection consumer down as timekeeping-relay meets it: inside
+# that one container, miru-web names 127.0.0.1, where nothing listens, so
+# each delivery is refused at connect, as from a consumer whose process is
+# not running. miru-web itself, and every other process, runs on.
+take_consumer_down() {
+  compose exec -T --user root timekeeping-relay sh -c "printf '127.0.0.1 miru-web # %s\n' '${CONSUMER_DOWN_MARK}' >> /etc/hosts"
+}
+
+# Removes that line again; the same relay process reaches miru-web on its
+# next run. /etc/hosts is a file Docker mounts, so it is rewritten in place.
+bring_consumer_back() {
+  echo "== bringing the projection consumer back for timekeeping-relay"
+  compose exec -T --user root timekeeping-relay sh -c \
+    "grep -vF '${CONSUMER_DOWN_MARK}' /etc/hosts > /tmp/hosts.consumer-up; cat /tmp/hosts.consumer-up > /etc/hosts; rm -f /tmp/hosts.consumer-up"
+}
+
+# How many of timekeeping-relay's deliveries were refused at connect since
+# $1 (OutboxRelay logs each batch it could not deliver as "relay: relay <id>:
+# <error>").
+refused_deliveries() {
+  compose logs --no-color --no-log-prefix --since "$1" timekeeping-relay | grep -c 'relay: relay .*Errno::ECONNREFUSED' || true
+}
+
+# The number of outbox positions Timekeeping's signals count undelivered.
+# Fails when they report an alert.
+undelivered_positions() {
+  local signals
+  signals="$(compose exec -T timekeeping-web bin/rails timekeeping:signals)" || die "Timekeeping's signals report an alert: ${signals}"
+  echo "${signals}" >&2
+  sed -n 's/^relay lag: .* s, \([0-9][0-9]*\) position(s) undelivered.*/\1/p' <<< "${signals}"
+}
+
+# The projection-consumer-down part of §12.4's failure injection (§9.3),
+# while Timekeeping owns the entries: with the consumer up, entry X is
+# projected (bin/rails timekeeping:consumer_down:projected). Then the
+# consumer is taken down as timekeeping-relay meets it while the relay keeps
+# running: X is edited and a new entry Y written, both are listed and
+# invoiced at once, and the projection stays as it was
+# (timekeeping:consumer_down:down), while the relay's log shows its
+# deliveries refused and Timekeeping's signals count the snapshots still
+# undelivered. Then the consumer is brought back, with no process restarted,
+# and the same relay's resend brings the projection to Timekeeping's
+# versions (timekeeping:consumer_down:restored), with nothing left
+# undelivered. All three run in miru-web under one run name. The consumer is
+# brought back however the down step ends.
+cmd_consumer_down() {
+  local run before after probe since refused undelivered
+  require_env_file
+  processes "${EXISTING_SERVICES[@]}" "${TIMEKEEPING_SERVICES[@]}" > /dev/null
+  run="$(date -u +%Y%m%dT%H%M%SZ)-$(secret 2)"
+  echo "== consumer down: run ${run}"
+  probe="$(consumer_probe)"
+  [ "${probe}" = "reached 200" ] || die "timekeeping-relay does not reach the projection consumer before the run: ${probe:-no answer}"
+  compose exec -T --env "RUN=${run}" miru-web bin/rails timekeeping:consumer_down:projected
+  before="$(processes "${EXISTING_SERVICES[@]}" "${TIMEKEEPING_SERVICES[@]}")"
+
+  echo "== taking the projection consumer down for timekeeping-relay, which keeps running"
+  since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  trap bring_consumer_back EXIT
+  take_consumer_down
+  probe="$(consumer_probe)"
+  case "${probe}" in
+    "unreachable "*) echo "timekeeping-relay: the projection consumer is ${probe}" ;;
+    *) die "timekeeping-relay still reaches the projection consumer after it was taken down: ${probe:-no answer}" ;;
+  esac
+  compose exec -T --env "RUN=${run}" miru-web bin/rails timekeeping:consumer_down:down
+  refused="$(refused_deliveries "${since}")"
+  [ "${refused}" -ge 2 ] || die "timekeeping-relay's log shows ${refused} refused deliveries while the consumer was down, not the retries of §9.3"
+  echo "timekeeping-relay: ${refused} deliveries refused while the consumer was down"
+  undelivered="$(undelivered_positions)"
+  [ "${undelivered:-0}" -gt 0 ] || die "Timekeeping counts no snapshot undelivered while the consumer is down"
+  trap - EXIT
+  bring_consumer_back
+  probe="$(consumer_probe)"
+  [ "${probe}" = "reached 200" ] || die "timekeeping-relay does not reach the projection consumer after it was brought back: ${probe:-no answer}"
+  after="$(processes "${EXISTING_SERVICES[@]}" "${TIMEKEEPING_SERVICES[@]}")"
+  if [ "${before}" != "${after}" ]; then
+    die "$(printf 'a process was restarted while the consumer was down\nbefore:\n%s\nafter:\n%s' "${before}" "${after}")"
+  fi
+
+  compose exec -T --env "RUN=${run}" miru-web bin/rails timekeeping:consumer_down:restored
+  undelivered="$(undelivered_positions)"
+  [ "${undelivered}" = 0 ] || die "Timekeeping still counts ${undelivered:-an unknown number of} snapshots undelivered after the consumer came back"
+  echo "== consumer down: entries were listed and invoiced at once while the relay's ${refused} deliveries were refused, and once the consumer was back the same relay delivered every snapshot and the projection holds Timekeeping's versions"
+}
+
 cmd_handoff() {
   case "${1:-}" in
     first_cutover|first_cutover:abort|rollback|rollback:abort|recutover|recutover:abort) ;;
@@ -611,6 +726,7 @@ case "${1:-}" in
   reservation-failures) cmd_reservation_failures ;;
   hard-delete) cmd_hard_delete ;;
   stale-generation) cmd_stale_generation ;;
+  consumer-down) cmd_consumer_down ;;
   down) compose down ;;
   compose) shift; compose "$@" ;;
   ""|help|-h|--help) usage ;;

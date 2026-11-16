@@ -336,7 +336,17 @@ RSpec.describe "Timekeeping local demo runtime" do
     # FAKE_STALE_GENERATION_STATUS is how timekeeping:stale_generation exits,
     # and FAKE_STALE_REFUSED the request ids its last line names;
     # FAKE_TIMEKEEPING_ALERTS the request ids timekeeping-web's log has a
-    # stale-generation alert for.
+    # stale-generation alert for. timekeeping-relay reaches the projection
+    # consumer, answering FAKE_CONSUMER_STATUS (200), until the line naming
+    # miru-web is added to its /etc/hosts, and again once it is removed;
+    # FAKE_HOSTS_IGNORED leaves it reachable. Its log holds
+    # FAKE_REFUSED_DELIVERIES (3) refused deliveries, and Timekeeping's
+    # signals count FAKE_UNDELIVERED_DOWN (3) positions undelivered while the
+    # consumer is down and FAKE_UNDELIVERED_UP (0) otherwise.
+    # FAKE_PROJECTED_STATUS and FAKE_DOWN_STATUS are how
+    # timekeeping:consumer_down:projected and :down exit, and
+    # FAKE_RESTART_ON_DOWN gives timekeeping-relay a new container during
+    # :down.
     context "with running applications" do
       let(:record_dir) { dir.join("deploys") }
       let(:fakes) { {} }
@@ -355,6 +365,13 @@ RSpec.describe "Timekeeping local demo runtime" do
               stop) [ "${!#}" = "${FAKE_STOP_IGNORED:-}" ] || touch "${state}/stopped-${!#}" ;;
               start) rm -f "${state}/stopped-${!#}" ;;
               logs)
+                if [ "${!#}" = timekeeping-relay ]; then
+                  for _ in $(seq 1 "${FAKE_REFUSED_DELIVERIES:-3}"); do
+                    echo "relay: relay 0f0f: Errno::ECONNREFUSED: Failed to open TCP connection to miru-web:3000 (Connection refused)"
+                  done
+                  echo "relay 0f0f: outbox 1..2, 2 snapshots, requests a, b"
+                  exit 0
+                fi
                 echo "=> Booting Puma"
                 for id in ${FAKE_TIMEKEEPING_ALERTS-run-1 run-2}; do
                   echo "[${id}] Timekeeping signal stale_generation: POST /internal/v1/entries was refused with no handoff in progress"
@@ -366,6 +383,25 @@ RSpec.describe "Timekeeping local demo runtime" do
                 fi ;;
               exec)
                 case "$*" in
+                  *"--user root timekeeping-relay sh -c printf '127.0.0.1 miru-web"*)
+                    [ -n "${FAKE_HOSTS_IGNORED:-}" ] || touch "${state}/consumer-down" ;;
+                  *"--user root timekeeping-relay sh -c grep -vF"*) rm -f "${state}/consumer-down" ;;
+                  *"-T timekeeping-relay ruby -rnet/http -e"*)
+                    if [ -e "${state}/consumer-down" ]; then echo "unreachable Errno::ECONNREFUSED"; else echo "reached ${FAKE_CONSUMER_STATUS:-200}"; fi ;;
+                  *"-T timekeeping-web bin/rails timekeeping:signals")
+                    echo "ownership: generation 1, owner timekeeping, state open"
+                    if [ -e "${state}/consumer-down" ]; then undelivered="${FAKE_UNDELIVERED_DOWN:-3}"; else undelivered="${FAKE_UNDELIVERED_UP:-0}"; fi
+                    echo "relay lag: 2.5 s, ${undelivered} position(s) undelivered"
+                    echo "no alerts" ;;
+                  *timekeeping:consumer_down:projected*)
+                    echo "consumer down: projected, consumer down: $([ -e "${state}/consumer-down" ] && echo yes || echo no)"
+                    exit "${FAKE_PROJECTED_STATUS:-0}" ;;
+                  *timekeeping:consumer_down:down*)
+                    echo "consumer down: stale, consumer down: $([ -e "${state}/consumer-down" ] && echo yes || echo no)"
+                    [ -z "${FAKE_RESTART_ON_DOWN:-}" ] || echo 2 > "${state}/timekeeping-relay"
+                    exit "${FAKE_DOWN_STATUS:-0}" ;;
+                  *timekeeping:consumer_down:restored*)
+                    echo "consumer down: caught up, consumer down: $([ -e "${state}/consumer-down" ] && echo yes || echo no)" ;;
                   *"sh -c test -f '"*)
                     marker="${!#}"; marker="${marker##*/}"; marker="${marker%?}"
                     [ "${marker}" != "${FAKE_MISSING_MARKER:-}" ]; exit $? ;;
@@ -866,6 +902,139 @@ RSpec.describe "Timekeeping local demo runtime" do
             expect(status).not_to be_success
             expect(err).to include("timekeeping-relay is not running")
             expect(docker_calls.grep(/timekeeping:stale_generation/)).to be_empty
+          end
+        end
+      end
+
+      describe "the projection-consumer-down part of the failure injection (§12.4, §9.3)" do
+        def steps
+          docker_calls.filter_map do |call|
+            case call
+            when /exec -T --env RUN=(\S+) miru-web bin\/rails timekeeping:consumer_down:(\w+)\z/ then "#{Regexp.last_match(2)} #{Regexp.last_match(1)}"
+            when /exec -T --user root timekeeping-relay sh -c printf '127\.0\.0\.1 miru-web # %s\\n' 'bin\/timekeeping-demo consumer-down' >> \/etc\/hosts\z/
+              "take down"
+            when /exec -T --user root timekeeping-relay sh -c grep -vF 'bin\/timekeeping-demo consumer-down' \/etc\/hosts > /
+              "bring back"
+            when /exec -T timekeeping-relay ruby -rnet\/http -e/ then "probe"
+            when /logs --no-color --no-log-prefix --since \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ timekeeping-relay\z/ then "relay log"
+            when /exec -T timekeeping-web bin\/rails timekeeping:signals\z/ then "signals"
+            end
+          end
+        end
+
+        it "takes the consumer down for the relay around the down step, without stopping or restarting anything, under one run name" do
+          out, err, status = run("consumer-down")
+          expect(status).to be_success, err
+
+          run_name = steps.first(2).last[/\Aprojected (\S+)\z/, 1]
+          expect(run_name).to match(/\A\d{8}T\d{6}Z-\h{4}\z/)
+          expect(steps).to eq([
+            "probe", "projected #{run_name}", "take down", "probe", "down #{run_name}", "relay log", "signals",
+            "bring back", "probe", "restored #{run_name}", "signals"
+          ])
+          expect(out).to include(
+            "consumer down: projected, consumer down: no", "consumer down: stale, consumer down: yes",
+            "the projection consumer is unreachable Errno::ECONNREFUSED", "3 deliveries refused while the consumer was down",
+            "consumer down: caught up, consumer down: no", "the same relay delivered every snapshot"
+          )
+          expect(err).to include("relay lag: 2.5 s, 3 position(s) undelivered", "relay lag: 2.5 s, 0 position(s) undelivered")
+          expect(docker_calls.join("\n")).not_to match(/ (stop|start|up|build|kill|restart) /)
+        end
+
+        context "when the down step fails" do
+          let(:fakes) { { "FAKE_DOWN_STATUS" => "1" } }
+
+          it "still brings the consumer back, and does not run the restored step" do
+            _out, _err, status = run("consumer-down")
+
+            expect(status).not_to be_success
+            expect(steps.last(2)).to eq(["down #{steps[1][/\S+\z/]}", "bring back"])
+            expect(dir.join("state/consumer-down")).not_to exist
+          end
+        end
+
+        context "when the relay still reaches the consumer after it was taken down" do
+          let(:fakes) { { "FAKE_HOSTS_IGNORED" => "1" } }
+
+          it "fails before the down step, and brings the consumer back" do
+            _out, err, status = run("consumer-down")
+
+            expect(status).not_to be_success
+            expect(err).to include("timekeeping-relay still reaches the projection consumer after it was taken down: reached 200")
+            expect(steps.grep(/\Adown /)).to be_empty
+            expect(steps.last).to eq("bring back")
+          end
+        end
+
+        context "when the relay does not reach the consumer before the run" do
+          let(:fakes) { { "FAKE_CONSUMER_STATUS" => "502" } }
+
+          it "runs nothing" do
+            _out, err, status = run("consumer-down")
+
+            expect(status).not_to be_success
+            expect(err).to include("timekeeping-relay does not reach the projection consumer before the run: reached 502")
+            expect(steps).to eq(["probe"])
+          end
+        end
+
+        context "when the relay's log shows fewer than two refused deliveries" do
+          let(:fakes) { { "FAKE_REFUSED_DELIVERIES" => "1" } }
+
+          it "fails, brings the consumer back, and does not run the restored step" do
+            _out, err, status = run("consumer-down")
+
+            expect(status).not_to be_success
+            expect(err).to include("timekeeping-relay's log shows 1 refused deliveries while the consumer was down")
+            expect(steps.last).to eq("bring back")
+            expect(steps.grep(/\Arestored /)).to be_empty
+          end
+        end
+
+        context "when Timekeeping counts nothing undelivered while the consumer is down" do
+          let(:fakes) { { "FAKE_UNDELIVERED_DOWN" => "0" } }
+
+          it "fails, and brings the consumer back" do
+            _out, err, status = run("consumer-down")
+
+            expect(status).not_to be_success
+            expect(err).to include("Timekeeping counts no snapshot undelivered while the consumer is down")
+            expect(steps.last).to eq("bring back")
+          end
+        end
+
+        context "when snapshots are still undelivered after the consumer came back" do
+          let(:fakes) { { "FAKE_UNDELIVERED_UP" => "2" } }
+
+          it "fails after the restored step" do
+            out, err, status = run("consumer-down")
+
+            expect(status).not_to be_success
+            expect(err).to include("Timekeeping still counts 2 snapshots undelivered after the consumer came back")
+            expect(out).not_to include("the same relay delivered every snapshot")
+          end
+        end
+
+        context "when a process is restarted while the consumer is down" do
+          let(:fakes) { { "FAKE_RESTART_ON_DOWN" => "1" } }
+
+          it "fails before the restored step" do
+            _out, err, status = run("consumer-down")
+
+            expect(status).not_to be_success
+            expect(err).to include("a process was restarted while the consumer was down")
+            expect(steps.grep(/\Arestored /)).to be_empty
+          end
+        end
+
+        context "when a process is not running" do
+          it "runs nothing" do
+            run("compose", "stop", "timekeeping-relay")
+            _out, err, status = run("consumer-down")
+
+            expect(status).not_to be_success
+            expect(err).to include("timekeeping-relay is not running")
+            expect(steps).to be_empty
           end
         end
       end

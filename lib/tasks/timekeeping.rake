@@ -245,6 +245,27 @@
 # id of every refused call. bin/timekeeping-demo stale-generation runs it,
 # and then finds Timekeeping's alert for each id in timekeeping-web's log.
 #
+# The projection-consumer-down part of the failure injection (§12.4, §9.3,
+# Timekeeping::ConsumerDownCheck), while Timekeeping owns the entries, in
+# three steps around a consumer that timekeeping-relay cannot reach; RUN
+# names the writes of one run, the same for all three:
+#
+#   bin/rails timekeeping:consumer_down:projected  with the consumer up: a
+#                                                  new entry X is projected
+#   bin/rails timekeeping:consumer_down:down       with it down: X edited and
+#                                                  a new entry Y are listed
+#                                                  and invoiced at once, and
+#                                                  the projection stays as
+#                                                  it was
+#   bin/rails timekeeping:consumer_down:restored   with it back: the
+#                                                  projection holds X and Y
+#                                                  at Timekeeping's versions
+#
+# Each exits 1 at the first check that fails. They sign in and reach
+# Timekeeping as the save-failures step does, and CHECK_WAIT sets the seconds
+# a check waits on a worker (60 by default). bin/timekeeping-demo
+# consumer-down takes the consumer down and brings it back around them.
+#
 # What the existing application measures of its Timekeeping machinery
 # (§11.3, Timekeeping::Signals), read once, for an operator or a script:
 #
@@ -722,5 +743,42 @@ namespace :timekeeping do
   desc "Calls carrying another generation are refused 409 stale-generation and change nothing; retries go to the current owner (docs/architecture/timekeeping-soa.md 12.4, 9.3; RUN)"
   task stale_generation: :environment do
     TimekeepingStaleGenerationTask.run
+  end
+end
+
+module TimekeepingConsumerDownTask
+  def self.check
+    Timekeeping::ConsumerDownCheck.new(
+      client: Timekeeping::PublicApi::Client.new(base_url: ENV.fetch("MIRU_URL", "http://127.0.0.1:3000")),
+      password: ENV.fetch("MIRU_SEED_PASSWORD") { abort "MIRU_SEED_PASSWORD is the seeded users' password; the check signs in with it" },
+      run: ENV.fetch("RUN") { abort "RUN names the writes of one run; give all three steps the same one" },
+      logger: TimekeepingFirstCutoverTask.logger,
+      options: Timekeeping::ConsumerDownCheck::Options.new(wait: Integer(ENV.fetch("CHECK_WAIT", Timekeeping::PublicApi::DEFAULT_WAIT)))
+    )
+  end
+
+  def self.run(step)
+    check.public_send(step)
+  rescue Timekeeping::ConsumerDownCheck::Failed, Timekeeping::InternalApi::Error => error
+    abort "Timekeeping consumer-down proof failed (#{step}): #{error.message}"
+  end
+end
+
+namespace :timekeeping do
+  namespace :consumer_down do
+    desc "With the projection consumer up: a new entry is projected (docs/architecture/timekeeping-soa.md 12.4, 9.3; RUN)"
+    task projected: :environment do
+      TimekeepingConsumerDownTask.run(:projected)
+    end
+
+    desc "With the projection consumer down: entries are listed and invoiced at once, the projection stays as it was (docs/architecture/timekeeping-soa.md 12.4, 9.3; RUN)"
+    task down: :environment do
+      TimekeepingConsumerDownTask.run(:down)
+    end
+
+    desc "With the projection consumer back: the relay's resend brings the projection to Timekeeping's versions (docs/architecture/timekeeping-soa.md 12.4, 9.3; RUN)"
+    task restored: :environment do
+      TimekeepingConsumerDownTask.run(:restored)
+    end
   end
 end

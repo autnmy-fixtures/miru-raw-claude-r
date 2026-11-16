@@ -146,6 +146,7 @@ bin/timekeeping-demo save-failures           # the save-failure rows of §9.3 (�
 bin/timekeeping-demo reservation-failures    # the reservation-protocol rows of §9.3: wrong company, earlier operation unresolved, lost commit answer
 bin/timekeeping-demo hard-delete             # §9.3's hard delete of a non-draft: a failed one changes nothing, a successful one keeps the edit lock until a successor
 bin/timekeeping-demo stale-generation        # §9.3's stale generation: calls carrying another generation refused and changing nothing, retries to the current owner
+bin/timekeeping-demo consumer-down           # §9.3's projection consumer down: entries listed and invoiced at once, the relay's deliveries refused, then its resend caught up
 bin/timekeeping-demo compose stop timekeeping-relay   # pauses the relay (§12.4); `compose start` resumes it
 bin/timekeeping-demo down        # stops everything; both databases and the handoff journals are kept
 ```
@@ -397,8 +398,47 @@ bin/timekeeping-demo down        # stops everything; both databases and the hand
   one is missing. The step's output is kept under `tmp/timekeeping-demo/stale-generation/`. A run that finishes
   deletes its draft and discards X and Y. `CHECK_WAIT` sets how long, in seconds, a check waits on a worker (default
   60). The check is covered by `spec/services/timekeeping/stale_generation_check_spec.rb` against `FakeTimekeeping`,
-  which refuses another generation before it reads a receipt, as Timekeeping's admission does. Still not on the demo
-  from §9.3: projection consumer down.
+  which refuses another generation before it reads a receipt, as Timekeeping's admission does. The consumer-down
+  proof below covers the last row of §9.3.
+- **Projection consumer down (§12.4 failure injection, §9.3).** `bin/timekeeping-demo consumer-down` runs while
+  Timekeeping owns the entries with admission open. The row is "Projection consumer down | Same as relay paused |
+  Relay retries; upsert by version". The consumer is the existing application's
+  `POST /internal/v1/projection/entry_snapshots`, served by `miru-web`. Stopping `miru-web` would also stop the
+  public API that the "same as relay paused" behaviour is checked through. So the command takes the consumer down
+  as `timekeeping-relay` sees it, and nothing else changes. Inside that one container it adds a line to
+  `/etc/hosts` that points `miru-web` at 127.0.0.1, where nothing listens. Each delivery is then refused at connect
+  (`Errno::ECONNREFUSED`), the same error a consumer whose process is not running gives. `miru-web` and every other
+  process keep running, and the relay keeps running too. A probe from the relay's container, against its own
+  `EXISTING_APP_URL`, must reach the consumer before the run, be refused while it is down, and reach it again
+  afterwards. The three steps run `bin/rails timekeeping:consumer_down:projected`, `:down` and `:restored`
+  (`Timekeeping::ConsumerDownCheck`) inside `miru-web`, under one run name. On both seeded businesses:
+  - **Projected** (consumer up). The employee creates entry X, and the projection holds it as Timekeeping does.
+  - **Down.** The employee edits X and creates entry Y. The entry list shows both as written at once. The
+    projection still holds X as it was before the edit, and holds no Y. The invoice candidates offer both at once.
+    The admin saves a draft with a direct line for each, and the candidates then leave both out. Timekeeping now
+    holds X at a later version. Five seconds later the projection is still unchanged, and the time-entries report,
+    which reads the projection, still shows X as it was before the edit and no Y. That is "same as relay paused":
+    the projection lags, with `locked` and the aggregates stale, while invoicing works at once. A projection that
+    moves during this step fails the run.
+
+    The command then requires at least two of the relay's deliveries to be refused in `timekeeping-relay`'s log
+    (`relay: relay <id>: Errno::ECONNREFUSED: …`). Those are its retries, a batch every second, each rolled back
+    unmarked. It also requires Timekeeping's `timekeeping:signals` to count outbox positions still undelivered.
+    Then it removes the line. No container is restarted: every process keeps the container and image it had.
+  - **Restored.** The same relay's next run delivers the backlog. The projection then holds X and Y exactly as
+    Timekeeping does (version, note, duration, `locked`, `bill_status`), at the version that includes the edit and
+    the draft's reservation, even though the outbox also held older snapshots of both. That is the upsert by
+    version. The report shows both as written, and the candidates still leave both out. The admin deletes the draft,
+    which releases both (F2), the employee discards X and Y, and the projection holds both discarded. Afterwards
+    Timekeeping's signals count nothing undelivered.
+
+  The consumer is brought back however the down step ends. A run that finishes leaves, per business, two discarded
+  entries and one discarded draft, with nothing reserved. `CHECK_WAIT` sets how long, in seconds, a check waits on
+  a worker (default 60). The check is covered by `spec/requests/timekeeping/consumer_down_check_spec.rb`, where the
+  relay's deliveries land nowhere while the consumer is down. The consumer's tolerance of duplicated and reordered
+  batches is pinned by its own spec, `spec/requests/timekeeping/entry_snapshots_spec.rb`. Under the prepared application the relay and the consumer run in one
+  `miru-jobs` process (`Timekeeping::LocalRelay`), so there is no consumer to take down on its own, and this proof
+  runs only while Timekeeping owns the entries.
 - **Signals (§11.3).** Each of the existing application's two workers reads the other's alerts, so a
   stopped worker is still noticed: `invoice_operations` reads the local relay's lag (above 60 s for
   5 minutes), and `timekeeping_relay` reads the invoice operation ledger (an intent pending past 60 s, a
