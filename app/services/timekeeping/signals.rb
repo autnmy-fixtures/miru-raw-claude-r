@@ -39,10 +39,11 @@
 # seen while that copy is open is one outside a handoff. It is reported as it
 # happens (.stale_generation_refused), not polled.
 #
-# Every alert is reported through Rails.error, which Sentry receives with the
-# `service` tag (config/initializers/sentry.rb), and logged at error level,
-# which is what the local demo, where Sentry is not enabled, shows. The
-# polled signals are reported again on every run while they hold.
+# Every alert is reported through Rails.error and logged at error level. It
+# reaches the log, not Sentry: config/initializers/sentry.rb leaves
+# config.rails.register_error_subscriber unset, so Sentry does not receive
+# Rails.error here (services/timekeeping/README.md). The polled signals are
+# reported again on every run while they hold.
 #
 # A single-writer guard violation, a write to timesheet_entries by anything
 # but the projection consumer once entries have left the legacy owner, is

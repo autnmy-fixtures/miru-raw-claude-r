@@ -18,4 +18,14 @@ RSpec.describe "Sentry service tag" do
 
     expect(configuration.before_send_transaction.call(event, {}).tags).to include(service: "miru")
   end
+
+  # Unlike Timekeeping's, this application's Sentry does not receive
+  # Rails.error, so the Timekeeping alerts reach its log and not Sentry
+  # (services/timekeeping/README.md). Subscribing would send every
+  # Rails.error.report here to Sentry in production.
+  it "leaves Rails.error unsubscribed, so the Timekeeping alerts reach the log and not Sentry" do
+    expect(configuration.rails.register_error_subscriber).to be(false)
+    expect(Rails.error.instance_variable_get(:@subscribers).map { |subscriber| subscriber.class.name })
+      .not_to include("Sentry::Rails::ErrorSubscriber")
+  end
 end
