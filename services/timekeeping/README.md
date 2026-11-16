@@ -140,6 +140,7 @@ bin/timekeeping-demo contract-check          # every contract between the two ru
 bin/timekeeping-demo independent-deploys     # the independent-deployment proof (§13 item 4), recorded
 bin/timekeeping-demo relay-paused            # the relay-paused proof (§13 item 5)
 bin/timekeeping-demo user-delete-refused     # the user-hard-delete proof (§12.4); after a cutover, then after a rollback
+bin/timekeeping-demo aggregate-line          # the aggregate-line proof (§12.4, F3), with timekeeping-web stopped for its failures
 bin/timekeeping-demo compose stop timekeeping-relay   # pauses the relay (§12.4); `compose start` resumes it
 bin/timekeeping-demo down        # stops everything; both databases and the handoff journals are kept
 ```
@@ -216,6 +217,29 @@ bin/timekeeping-demo down        # stops everything; both databases and the hand
   extraction is active, its agent and one discarded entry. Making a user queues its `HubspotIntegrationJob` on
   `default`, which the demo never starts (§11.1), so nothing is sent. `CHECK_WAIT` sets how long, in seconds,
   a check waits on a worker (default 60).
+- **Aggregate line removed from a draft (§12.4, F3).** `bin/timekeeping-demo aggregate-line` runs while
+  Timekeeping owns the entries, in three steps in `miru-web` (`Timekeeping::AggregateLineCheck`), all under one
+  run name (`RUN`). On both seeded businesses, `bin/rails timekeeping:aggregate_line:held`: the employee creates
+  entries X, Y and W, and the admin saves a draft with a direct line for X and a grouped line linking X and Y,
+  and a second draft with a direct line for W. A save of the first draft that removes the grouped line and adds
+  W is refused (F1, 422), and changes nothing. Then removing the grouped line keeps X reserved, because the
+  direct line still references it, and releases Y; removing the direct line releases X; and both lines go back
+  on, reserving X and Y again. The script then stops `timekeeping-web` and checks that it no longer runs.
+  `timekeeping:aggregate_line:outage` first checks that the invoice candidates answer 503, as they read
+  Timekeeping; if they answer, the step fails before it writes. Then a save removing the grouped line and a
+  bulk delete of the draft (its hard destroy, §1.4) each answer 503, the draft keeps both lines, and the
+  invoice operation ledger records both as failed. The script starts `timekeeping-web` again, waiting until it
+  is healthy, and runs `timekeeping:aggregate_line:restored`: X, Y and W are still reserved, the ledger
+  delivers both aborts, and a bulk delete then destroys the draft and releases X and Y together, while W stays
+  with the second draft. Last, the admin deletes the second draft and the employee discards the three entries.
+  Reservations are read where the invoice editor reads them, the candidates, which offer an entry exactly when
+  nothing reserves it; the draft's lines are read from the existing application's invoice tables.
+  `timekeeping-web` is started again however the outage step ends. A run that finishes leaves, per business,
+  three discarded entries, one discarded draft and nothing reserved. The proof runs under the Timekeeping
+  owner only: its failures come from stopping Timekeeping, and the prepared application has no separate
+  process to stop. Under that owner, F3 is covered in process by `spec/requests/timekeeping/invoice_reservation_writes_spec.rb`
+  ("under the monolith owner") and `spec/services/timekeeping/local_reservations_spec.rb`. `CHECK_WAIT` sets how long, in seconds, a check
+  waits on a worker (default 60).
 - **Signals (§11.3).** Each of the existing application's two workers reads the other's alerts, so a
   stopped worker is still noticed: `invoice_operations` reads the local relay's lag (above 60 s for
   5 minutes), and `timekeeping_relay` reads the invoice operation ledger (an intent pending past 60 s, a
