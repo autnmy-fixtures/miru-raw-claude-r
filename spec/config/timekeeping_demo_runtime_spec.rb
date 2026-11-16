@@ -731,6 +731,17 @@ RSpec.describe "Timekeeping local demo runtime" do
 
         def kinds = steps.map { |step| step.split.first }
 
+        # The paused write and the handoff's first run go to the background,
+        # so where their calls land among the script's own is not fixed: these
+        # are the calls the script makes in turn, which keep their order.
+        def foreground
+          in_turn = steps.reject { |step| step.start_with?("paused ") }
+          first_run = in_turn.index { |step| step.start_with?("timekeeping:") }
+          in_turn.tap { |calls| calls.delete_at(first_run) if first_run }
+        end
+
+        def foreground_kinds = foreground.map { |step| step.split.first }
+
         it "pauses a billing write, starts the handoff it waits on, stops timekeeping-web, releases the write, runs the refused " \
            "step, starts timekeeping-web again, resumes the handoff and runs the resumed step, under one run" do
           out, err, status = run("billing-handoff")
@@ -738,12 +749,9 @@ RSpec.describe "Timekeeping local demo runtime" do
 
           run_name = steps.first.split.last
           expect(run_name).to match(/\A\d{8}T\d{6}Z-\h{4}\z/)
-          # The paused write and the handoff's first run go to the background,
-          # so where their calls land among the others is not fixed.
-          in_order = steps.dup
-          expect(in_order.delete("paused #{run_name}")).to be_present
-          in_order.delete_at(in_order.index("timekeeping:rollback"))
-          expect(in_order).to eq([
+          expect(steps).to include("paused #{run_name}")
+          expect(steps.count("timekeeping:rollback")).to eq(2)
+          expect(foreground).to eq([
             "handoff #{run_name}", "marker admitted", "marker waiting", "stop web", "release", "refused #{run_name}",
             "start web", "timekeeping:rollback", "resumed #{run_name}"
           ])
@@ -790,7 +798,9 @@ RSpec.describe "Timekeeping local demo runtime" do
 
             expect(status).not_to be_success
             expect(err).to include("the paused billing write was never admitted")
-            expect(kinds.uniq).to eq(%w[handoff paused marker])
+            expect(kinds).to include("paused")
+            expect(foreground_kinds.uniq).to eq(%w[handoff marker])
+            expect(kinds.grep(/\Atimekeeping:/)).to be_empty
           end
         end
 
@@ -814,7 +824,7 @@ RSpec.describe "Timekeeping local demo runtime" do
 
             expect(status).not_to be_success
             expect(err).to include("timekeeping:rollback finished while timekeeping-web was stopped")
-            expect(kinds.last(3)).to eq(%w[stop release start])
+            expect(foreground_kinds.last(3)).to eq(%w[stop release start])
           end
         end
 
@@ -825,7 +835,8 @@ RSpec.describe "Timekeeping local demo runtime" do
             _out, _err, status = run("billing-handoff")
 
             expect(status).not_to be_success
-            expect(kinds.last(3)).to eq(%w[release refused start])
+            expect(foreground_kinds.last(3)).to eq(%w[release refused start])
+            expect(kinds.grep(/\Atimekeeping:/).size).to eq(1)
           end
         end
       end
