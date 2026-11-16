@@ -23,6 +23,11 @@
 #                                    then the existing app, each alone, with the
 #                                    contract check after each; recorded under
 #                                    tmp/timekeeping-demo/deploys
+#   bin/timekeeping-demo relay-paused
+#                                    the relay-paused proof (§13 item 5): stop
+#                                    Timekeeping's relay, list and invoice a new
+#                                    entry at once, start the relay again, and
+#                                    see the projection catch up
 #   bin/timekeeping-demo down        stop everything; the databases are kept
 #   bin/timekeeping-demo compose …   any other docker compose command
 #
@@ -245,6 +250,36 @@ cmd_independent_deploys() {
   return "${status}"
 }
 
+# Starts Timekeeping's relay again, and shows it runs.
+resume_relay() {
+  echo "== resuming Timekeeping's relay"
+  compose start timekeeping-relay
+  processes timekeeping-relay
+}
+
+# The relay-paused proof of §13 item 5 (§12.4), while Timekeeping owns the
+# entries: with timekeeping-relay stopped, a new entry is listed and invoiced
+# at once and is not projected (bin/rails timekeeping:relay_paused:paused);
+# with it started again, the projection catches up
+# (timekeeping:relay_paused:resumed). Both halves run in the existing
+# application under one run name. The relay is started again however the
+# first half ends.
+cmd_relay_paused() {
+  local run
+  require_env_file
+  processes "${EXISTING_SERVICES[@]}" "${TIMEKEEPING_SERVICES[@]}" > /dev/null
+  run="$(date -u +%Y%m%dT%H%M%SZ)-$(secret 2)"
+  echo "== pausing Timekeeping's relay: run ${run}"
+  trap resume_relay EXIT
+  compose stop timekeeping-relay
+  [ -z "$(process_state timekeeping-relay)" ] || die "timekeeping-relay still runs after it was stopped"
+  compose exec -T --env "RUN=${run}" miru-web bin/rails timekeeping:relay_paused:paused
+  trap - EXIT
+  resume_relay
+  compose exec -T --env "RUN=${run}" miru-web bin/rails timekeeping:relay_paused:resumed
+  echo "== relay paused: a new entry was listed and invoiced before the relay delivered it, and the projection caught up once it resumed"
+}
+
 cmd_handoff() {
   case "${1:-}" in
     first_cutover|first_cutover:abort|rollback|rollback:abort|recutover|recutover:abort) ;;
@@ -266,6 +301,7 @@ case "${1:-}" in
   journey) cmd_journey ;;
   contract-check) cmd_contract_check ;;
   independent-deploys) cmd_independent_deploys ;;
+  relay-paused) cmd_relay_paused ;;
   down) compose down ;;
   compose) shift; compose "$@" ;;
   ""|help|-h|--help) usage ;;

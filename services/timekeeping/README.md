@@ -137,6 +137,7 @@ bin/timekeeping-demo rebuild timekeeping     # rebuilds and restarts Timekeeping
 bin/timekeeping-demo rebuild existing        # the other way round
 bin/timekeeping-demo contract-check          # every contract between the two running applications
 bin/timekeeping-demo independent-deploys     # the independent-deployment proof (§13 item 4), recorded
+bin/timekeeping-demo relay-paused            # the relay-paused proof (§13 item 5)
 bin/timekeeping-demo compose stop timekeeping-relay   # pauses the relay (§12.4); `compose start` resumes it
 bin/timekeeping-demo down        # stops everything; both databases and the handoff journals are kept
 ```
@@ -179,6 +180,20 @@ bin/timekeeping-demo down        # stops everything; both databases and the hand
   by `timekeeping-relay`). Each client checks every answer against its contract. Each run leaves one
   discarded entry and one discarded draft per business, with nothing reserved. `CHECK_WAIT` sets how
   long, in seconds, a check waits on a worker (default 60).
+- **Relay paused (§13 item 5, §12.4).** `bin/timekeeping-demo relay-paused` runs while Timekeeping owns
+  the entries. It stops `timekeeping-relay` and checks that it no longer runs. Then
+  `bin/rails timekeeping:relay_paused:paused` (`Timekeeping::RelayPausedCheck`) runs in `miru-web`,
+  signing in as the journey does. On both seeded businesses an employee creates an entry, and the
+  employee's entry list shows it at once. The projection (`timesheet_entries`) must not hold the entry
+  yet. The invoice candidates offer it at once, and an admin saves a draft with a line for it, which
+  reserves it. The time-entries report must still leave it out. Then the script starts the relay again
+  and runs `timekeeping:relay_paused:resumed`: the report must show the entry as written, while the draft
+  still holds it. Then the admin deletes the draft and the employee discards the entry. If the
+  projection already holds the entry while the relay should be stopped, the run fails, because it would
+  prove nothing. Both halves name their writes after one run (`RUN`, set by the script). The relay is
+  started again however the first half ends. A run that finishes leaves one discarded entry and one
+  discarded draft per business, with nothing reserved. `CHECK_WAIT` sets how long, in seconds, a check
+  waits on a worker (default 60).
 - **Signals (§11.3).** Each of the existing application's two workers reads the other's alerts, so a
   stopped worker is still noticed: `invoice_operations` reads the local relay's lag (above 60 s for
   5 minutes), and `timekeeping_relay` reads the invoice operation ledger (an intent pending past 60 s, a

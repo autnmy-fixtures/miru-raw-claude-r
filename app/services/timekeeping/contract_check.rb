@@ -159,10 +159,4 @@ class Timekeeping::ContractCheck
       expect_ok!(response, "save the draft #{number}")
       response.json.fetch("id")
     end
-
-    # A delete answers 200 with a notice, or 204 with nothing.
-    def delete(tenant, role, path, what)
-      response = as(tenant, role).call(:delete, path)
-      expect_ok!(response, what) unless response.status == 204
-    end
 end
