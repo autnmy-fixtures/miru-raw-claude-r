@@ -142,8 +142,11 @@ bin/timekeeping-demo down        # stops everything; both databases and the hand
   stopped worker is still noticed: `invoice_operations` reads the local relay's lag (above 60 s for
   5 minutes), and `timekeeping_relay` reads the invoice operation ledger (an intent pending past 60 s, a
   commit or abort undelivered past 60 s). A stale-generation refusal while this application's ownership
-  copy is open is reported as it happens. Every alert goes to `Rails.error`, which Sentry receives with
-  the `service` tag `miru`, and to the log at error level, which is where the demo shows it, because
+  copy is open is reported as it happens, and so is a single-writer guard violation
+  (`Timekeeping::SingleWriterWatch`): once entries have left the legacy owner, any statement from a
+  process of the existing application (web, workers, rake, console) that writes `timesheet_entries`
+  outside the projection consumer, named with the code that sent it. Every alert goes to `Rails.error`,
+  which Sentry receives with the `service` tag `miru`, and to the log at error level, which is where the demo shows it, because
   Sentry is not enabled in development. `bin/timekeeping-demo compose exec miru-web bin/rails
   timekeeping:signals` prints each signal and exits 1 on an alert. Timekeeping reads its own
   (`app/services/signals.rb`): its relay's lag, read every 15 s on `timekeeping-relay`, the one worker it

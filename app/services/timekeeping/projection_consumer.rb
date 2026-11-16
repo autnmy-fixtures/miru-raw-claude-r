@@ -7,7 +7,9 @@
 # not newer, so a duplicated or reordered delivery changes nothing. Values are
 # copied as they arrive: duration stays the float it was (§8), and no model
 # callback, validation or audit runs, because the row is a copy of what
-# Timekeeping already decided.
+# Timekeeping already decided. Its writes run inside
+# Timekeeping::SingleWriterWatch.projection, so the runtime single-writer
+# guard (§11.3) knows them from any other write.
 #
 # The batch takes snapshots already validated against the entry snapshot
 # contract. It is refused whole, and nothing is applied, when any snapshot's
@@ -53,6 +55,10 @@ class Timekeeping::ProjectionConsumer < ApplicationService
     # One statement: insert new rows, overwrite a stored row only from a higher
     # version. RETURNING lists exactly the rows it wrote.
     def upsert(snapshots)
+      Timekeeping::SingleWriterWatch.projection { upsert_rows(snapshots) }
+    end
+
+    def upsert_rows(snapshots)
       TimesheetEntry.upsert_all(
         snapshots.map(&:row),
         unique_by: :id,
