@@ -65,6 +65,16 @@
 #                                    committed, an aborted and a forced-pending
 #                                    operation, while Timekeeping owns the
 #                                    entries
+#   bin/timekeeping-demo reservation-failures
+#                                    the reservation-protocol part of the
+#                                    failure injection (§12.4, §9.3): stop
+#                                    miru-jobs, see a wrong-company save and
+#                                    two saves behind an unresolved operation
+#                                    refused, and every commit and abort
+#                                    answer lost; start it again, and see
+#                                    every outcome delivered, the resent
+#                                    commit change nothing and the retry go
+#                                    through
 #   bin/timekeeping-demo down        stop everything; the databases are kept
 #   bin/timekeeping-demo compose …   any other docker compose command
 #
@@ -408,6 +418,32 @@ cmd_save_failures() {
   echo "== save failures: a lost prepare answer, a crash after prepare and a rolled-back save each ended failed and aborted, and no replay of a resolved operation changed anything"
 }
 
+# The reservation-protocol part of §12.4's failure injection (§9.3), while
+# Timekeeping owns the entries: with miru-jobs, which runs the invoice
+# operation worker, stopped, a wrong-company save is refused, two saves
+# behind an unresolved operation are refused as retryable, and every commit
+# and abort answer of one in-process sweep is lost
+# (bin/rails timekeeping:reservation_failures:paused); with it started again,
+# every outcome is delivered, the resent commit changes nothing, and the
+# client's retry goes through (timekeeping:reservation_failures:resumed).
+# Both run in miru-web under one run name. miru-jobs is started again however
+# the first step ends.
+cmd_reservation_failures() {
+  local run
+  require_env_file
+  processes "${EXISTING_SERVICES[@]}" "${TIMEKEEPING_SERVICES[@]}" > /dev/null
+  run="$(date -u +%Y%m%dT%H%M%SZ)-$(secret 2)"
+  echo "== pausing the invoice operation worker (miru-jobs): run ${run}"
+  trap "resume_service miru-jobs" EXIT
+  compose stop miru-jobs
+  [ -z "$(process_state miru-jobs)" ] || die "miru-jobs still runs after it was stopped"
+  compose exec -T --env "RUN=${run}" miru-web bin/rails timekeeping:reservation_failures:paused
+  trap - EXIT
+  resume_service miru-jobs
+  compose exec -T --env "RUN=${run}" miru-web bin/rails timekeeping:reservation_failures:resumed
+  echo "== reservation failures: a wrong-company save and the saves behind an unresolved operation were refused, the lost commit was sent again and changed nothing, and the retry went through once miru-jobs resumed"
+}
+
 # Where the billing-handoff proof's steps leave their markers, in miru-web
 # (the miru_handoff_journals volume; Timekeeping::BillingHandoffCheck).
 BILLING_HANDOFF_DIR=tmp/timekeeping/billing-handoff
@@ -512,6 +548,7 @@ case "${1:-}" in
   aggregate-line) cmd_aggregate_line ;;
   billing-handoff) cmd_billing_handoff ;;
   save-failures) cmd_save_failures ;;
+  reservation-failures) cmd_reservation_failures ;;
   down) compose down ;;
   compose) shift; compose "$@" ;;
   ""|help|-h|--help) usage ;;

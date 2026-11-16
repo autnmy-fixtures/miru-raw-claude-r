@@ -330,7 +330,9 @@ RSpec.describe "Timekeeping local demo runtime" do
     # :refused exit. A handoff task stops on its first run, as with
     # timekeeping-web stopped, and finishes when run again, unless
     # FAKE_HANDOFF_FINISHES is set, when it finishes at once.
-    # FAKE_SAVE_FAILURES_STATUS is how timekeeping:save_failures exits.
+    # FAKE_SAVE_FAILURES_STATUS is how timekeeping:save_failures exits, and
+    # FAKE_RESERVATION_PAUSED_STATUS how timekeeping:reservation_failures:paused
+    # exits.
     context "with running applications" do
       let(:record_dir) { dir.join("deploys") }
       let(:fakes) { {} }
@@ -390,6 +392,11 @@ RSpec.describe "Timekeeping local demo runtime" do
                   *timekeeping:save_failures*)
                     echo "save failures: every case held"
                     exit "${FAKE_SAVE_FAILURES_STATUS:-0}" ;;
+                  *timekeeping:reservation_failures:paused*)
+                    echo "reservation failures: refused and lost, miru-jobs stopped: $([ -e "${state}/stopped-miru-jobs" ] && echo yes || echo no)"
+                    exit "${FAKE_RESERVATION_PAUSED_STATUS:-0}" ;;
+                  *timekeeping:reservation_failures:resumed*)
+                    echo "reservation failures: delivered and retried, miru-jobs stopped: $([ -e "${state}/stopped-miru-jobs" ] && echo yes || echo no)" ;;
                   *timekeeping:aggregate_line:held*)
                     echo "aggregate line: held, timekeeping-web stopped: $([ -e "${state}/stopped-timekeeping-web" ] && echo yes || echo no)"
                     exit "${FAKE_HELD_STATUS:-0}" ;;
@@ -747,6 +754,65 @@ RSpec.describe "Timekeeping local demo runtime" do
             expect(err).to include("timekeeping-web is not running")
             expect(docker_calls.grep(/timekeeping:save_failures/)).to be_empty
           end
+        end
+      end
+
+      describe "the reservation-protocol part of the failure injection (§12.4, §9.3)" do
+        def steps
+          docker_calls.filter_map do |call|
+            case call
+            when / (stop|start) (miru-jobs|timekeeping-relay|timekeeping-web)\z/ then "#{Regexp.last_match(1)} #{Regexp.last_match(2)}"
+            when /exec -T --env RUN=(\S+) miru-web bin\/rails timekeeping:reservation_failures:(\w+)\z/ then "#{Regexp.last_match(2)} #{Regexp.last_match(1)}"
+            end
+          end
+        end
+
+        it "stops miru-jobs, runs the paused step, starts miru-jobs, then runs the resumed step under the same run" do
+          out, err, status = run("reservation-failures")
+          expect(status).to be_success, err
+
+          run_name = steps.second.split.last
+          expect(run_name).to match(/\A\d{8}T\d{6}Z-\h{4}\z/)
+          expect(steps).to eq(["stop miru-jobs", "paused #{run_name}", "start miru-jobs", "resumed #{run_name}"])
+          expect(out).to include(
+            "reservation failures: refused and lost, miru-jobs stopped: yes",
+            "miru-jobs container=miru-jobs-container-1",
+            "reservation failures: delivered and retried, miru-jobs stopped: no",
+            "the retry went through once miru-jobs resumed"
+          )
+          expect(docker_calls.join("\n")).not_to match(/ (stop|start|up|build) .*(timekeeping-|miru-web)/)
+        end
+
+        context "when the paused step fails" do
+          let(:fakes) { { "FAKE_RESERVATION_PAUSED_STATUS" => "1" } }
+
+          it "starts miru-jobs again and does not run the resumed step" do
+            _out, _err, status = run("reservation-failures")
+
+            expect(status).not_to be_success
+            expect(steps.map(&:split).map(&:first)).to eq(%w[stop paused start])
+          end
+        end
+
+        context "when miru-jobs keeps running after it is stopped" do
+          let(:fakes) { { "FAKE_STOP_IGNORED" => "miru-jobs" } }
+
+          it "fails before either step, since nothing would be left undelivered" do
+            _out, err, status = run("reservation-failures")
+
+            expect(status).not_to be_success
+            expect(err).to include("miru-jobs still runs after it was stopped")
+            expect(steps).to eq(["stop miru-jobs", "start miru-jobs"])
+          end
+        end
+
+        it "fails before stopping anything when a process is not running" do
+          run("compose", "stop", "timekeeping-relay")
+          _out, err, status = run("reservation-failures")
+
+          expect(status).not_to be_success
+          expect(err).to include("timekeeping-relay is not running")
+          expect(steps).to eq(["stop timekeeping-relay"])
         end
       end
 
