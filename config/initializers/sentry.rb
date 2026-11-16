@@ -12,6 +12,11 @@ Sentry.init do |config|
   config.environment = Rails.env
   config.enabled_environments = %w[production staging]
 
+  # config.rails.register_error_subscriber is left unset on purpose, unlike in
+  # Timekeeping: setting it would send every Rails.error.report in this
+  # application to Sentry in production. So the Timekeeping alerts
+  # (Timekeeping::Signals) reach the log here, not Sentry.
+
   # Every event carries the application it came from, as Timekeeping's carry
   # theirs (docs/architecture/timekeeping-soa.md §11.3: "Both applications
   # report to Sentry with a `service` tag").

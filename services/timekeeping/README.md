@@ -164,9 +164,10 @@ bin/timekeeping-demo down        # stops everything; both databases and the hand
   copy is open is reported as it happens, and so is a single-writer guard violation
   (`Timekeeping::SingleWriterWatch`): once entries have left the legacy owner, any statement from a
   process of the existing application (web, workers, rake, console) that writes `timesheet_entries`
-  outside the projection consumer, named with the code that sent it. Every alert goes to `Rails.error`,
-  which Sentry receives with the `service` tag `miru`, and to the log at error level, which is where the demo shows it, because
-  Sentry is not enabled in development. `bin/timekeeping-demo compose exec miru-web bin/rails
+  outside the projection consumer, named with the code that sent it. Every alert goes to `Rails.error`
+  and to the log at error level, which is where the demo shows it.
+  These alerts reach the existing application's log and not Sentry, because its `config/initializers/sentry.rb` leaves `config.rails.register_error_subscriber` unset on purpose: setting it would send every `Rails.error.report` in that application to Sentry in production, not only these alerts.
+  `bin/timekeeping-demo compose exec miru-web bin/rails
   timekeeping:signals` prints each signal and exits 1 on an alert. Timekeeping reads its own
   (`app/services/signals.rb`): its relay's lag, read every 15 s on `timekeeping-relay`, the one worker it
   has; a stale-generation refusal while its copy is open; and a reconciliation difference its handoff API
