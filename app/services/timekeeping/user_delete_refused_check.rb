@@ -208,14 +208,15 @@ class Timekeeping::UserDeleteRefusedCheck
     # The refusal runs first in the destroy (§10.1): no audit row, and no
     # dependent effect.
     def ensure_unchanged!(tenant, user, agent, entry)
-      fail! "#{tenant[:name]}: user #{user.id} was deleted" unless User.exists?(user.id)
-      fail! "#{tenant[:name]}: agent #{agent.id} of user #{user.id} was destroyed" unless Agent.where(id: agent.id, user_id: user.id).exists?
-      if Audited::Audit.exists?(action: "super_admin_delete", auditable_type: "User", auditable_id: user.id)
-        fail! "#{tenant[:name]}: the refused delete of user #{user.id} left a super_admin_delete audit row"
+      user_id = user.id
+      fail! "#{tenant[:name]}: user #{user_id} was deleted" unless User.exists?(user_id)
+      fail! "#{tenant[:name]}: agent #{agent.id} of user #{user_id} was destroyed" unless Agent.where(id: agent.id, user_id:).exists?
+      if Audited::Audit.exists?(action: "super_admin_delete", auditable_type: "User", auditable_id: user_id)
+        fail! "#{tenant[:name]}: the refused delete of user #{user_id} left a super_admin_delete audit row"
       end
       return if same?(entry, subject_list(tenant, user)[entry.id])
 
-      fail! "#{tenant[:name]}: entry #{entry.id} of user #{user.id} is not in their entry list as written after the refused delete"
+      fail! "#{tenant[:name]}: entry #{entry.id} of user #{user_id} is not in their entry list as written after the refused delete"
     end
 
     # The projection is this application's timesheet_entries: the relay's
