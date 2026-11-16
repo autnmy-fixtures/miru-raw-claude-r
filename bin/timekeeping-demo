@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# Drives the Timekeeping local demo runtime (docker-compose.timekeeping-demo.yml;
+# docs/architecture/timekeeping-soa.md §11.1, §11.2). See
+# services/timekeeping/README.md, "The local demo runtime".
+#
+#   bin/timekeeping-demo init        write the demo's credentials, once
+#   bin/timekeeping-demo up          build both images; start both applications
+#                                    and only their dedicated workers
+#   bin/timekeeping-demo rebuild timekeeping|existing
+#                                    rebuild and restart one application; the
+#                                    other stays at the artifact it runs
+#   bin/timekeeping-demo versions    the revision and image each process runs
+#   bin/timekeeping-demo handoff first_cutover|rollback|recutover[:abort]
+#                                    run a handoff runner in the existing app
+#   bin/timekeeping-demo down        stop everything; the databases are kept
+#   bin/timekeeping-demo compose …   any other docker compose command
+#
+# Credentials are read from TIMEKEEPING_DEMO_ENV_FILE
+# (tmp/timekeeping-demo/demo.env by default, ignored by git, mode 0600). They
+# never sit in a checked-in file (§11.2).
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+COMPOSE_FILE="${ROOT}/docker-compose.timekeeping-demo.yml"
+ENV_FILE="${TIMEKEEPING_DEMO_ENV_FILE:-${ROOT}/tmp/timekeeping-demo/demo.env}"
+
+EXISTING_SERVICES=(miru-web miru-jobs)
+TIMEKEEPING_SERVICES=(timekeeping-web timekeeping-relay)
+
+usage() {
+  # The comment block at the top of this file, up to its first code line.
+  awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"
+}
+
+die() {
+  echo "timekeeping-demo: $*" >&2
+  exit 1
+}
+
+secret() {
+  od -An -N"$1" -tx1 /dev/urandom | tr -d ' \n'
+}
+
+# The revision an image is built from: the commit, marked dirty when the
+# working tree differs from it, so a recorded version says what was built.
+revision() {
+  local sha
+  sha="$(git -C "${ROOT}" rev-parse HEAD 2>/dev/null)" || { echo unknown; return; }
+  if ! git -C "${ROOT}" diff --quiet HEAD -- 2>/dev/null; then
+    sha="${sha}-dirty"
+  fi
+  echo "${sha}"
+}
+
+require_env_file() {
+  [ -f "${ENV_FILE}" ] || die "no credentials at ${ENV_FILE}; run bin/timekeeping-demo init first"
+}
+
+compose() {
+  require_env_file
+  docker compose --file "${COMPOSE_FILE}" --env-file "${ENV_FILE}" "$@"
+}
+
+cmd_init() {
+  if [ -e "${ENV_FILE}" ]; then
+    echo "Credentials already at ${ENV_FILE}; left as they are."
+    return
+  fi
+  mkdir -p "$(dirname "${ENV_FILE}")"
+  (
+    umask 077
+    {
+      echo "# The Timekeeping local demo's credentials (bin/timekeeping-demo init)."
+      echo "# Each application has its own database credential; only the token key is shared."
+      echo "MIRU_DB_PASSWORD=$(secret 24)"
+      echo "MIRU_SECRET_KEY_BASE=$(secret 64)"
+      echo "# The seeded users' password: sign in to the existing application with it."
+      echo "MIRU_SEED_PASSWORD=$(secret 16)"
+      echo "TIMEKEEPING_DB_PASSWORD=$(secret 24)"
+      echo "TIMEKEEPING_SECRET_KEY_BASE=$(secret 64)"
+      echo "TIMEKEEPING_TOKEN_KEY=$(secret 32)"
+    } > "${ENV_FILE}"
+  )
+  echo "Wrote the demo's credentials to ${ENV_FILE}."
+}
+
+build() {
+  local rev
+  rev="$(revision)"
+  MIRU_REVISION="${rev}" TIMEKEEPING_REVISION="${rev}" compose build "$@"
+}
+
+cmd_up() {
+  build miru-web timekeeping-web
+  compose up --detach --wait "${EXISTING_SERVICES[@]}" "${TIMEKEEPING_SERVICES[@]}"
+  cmd_versions
+}
+
+# Rebuilds one application's image and restarts its processes on it, leaving
+# the other application's containers, and the artifact they run, untouched
+# (§11.2, §13 item 4). The web process comes back healthy before its worker.
+cmd_rebuild() {
+  local web worker
+  case "${1:-}" in
+    timekeeping) web=timekeeping-web; worker=timekeeping-relay ;;
+    existing) web=miru-web; worker=miru-jobs ;;
+    *) die "rebuild takes timekeeping or existing" ;;
+  esac
+  build "${web}"
+  compose up --detach --wait --no-deps --force-recreate "${web}"
+  compose up --detach --wait --no-deps --force-recreate "${worker}"
+  cmd_versions
+}
+
+cmd_versions() {
+  local service container image rev
+  for service in "${EXISTING_SERVICES[@]}" "${TIMEKEEPING_SERVICES[@]}"; do
+    container="$(compose ps --quiet "${service}")"
+    if [ -z "${container}" ]; then
+      echo "${service} not running"
+      continue
+    fi
+    image="$(docker inspect --format '{{.Image}}' "${container}")"
+    rev="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${image}")"
+    echo "${service} revision=${rev} image=${image}"
+  done
+}
+
+cmd_handoff() {
+  case "${1:-}" in
+    first_cutover|first_cutover:abort|rollback|rollback:abort|recutover|recutover:abort) ;;
+    *) die "handoff takes first_cutover, rollback or recutover, each with an optional :abort" ;;
+  esac
+  compose exec miru-web bin/rails "timekeeping:$1"
+}
+
+case "${1:-}" in
+  init) cmd_init ;;
+  up) cmd_up ;;
+  rebuild) shift; cmd_rebuild "$@" ;;
+  versions) cmd_versions ;;
+  handoff) shift; cmd_handoff "$@" ;;
+  down) compose down ;;
+  compose) shift; compose "$@" ;;
+  ""|help|-h|--help) usage ;;
+  *) usage >&2; exit 1 ;;
+esac
