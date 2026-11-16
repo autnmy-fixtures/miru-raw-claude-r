@@ -110,6 +110,9 @@ does not hold together or that would drop what Timekeeping holds: an entry missi
 version held, or an audit row or receipt not carried exactly as held. Loading it again leaves the same
 tables. The handoff tool carries it there over the handoff API (`load_recutover_checkpoint`,
 `POST /internal/v1/handoff/recutover/checkpoint`), which answers how many rows of each part it loaded.
+On this side that call is `Timekeeping::HandoffClient#load_recutover_checkpoint`, which sends every
+part as taken and answers a `RecutoverReceipt`; after a lost response the tool can send it again.
+`TimekeepingContracts::FakeHandoff` serves it for the tool's tests.
 
 Timekeeping's provider is `ReservationProtocol` (`services/timekeeping/app/services/reservation_protocol.rb`),
 behind the reservation API's three endpoints. It keeps the same protocol on tables with the same shape,
