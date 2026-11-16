@@ -78,8 +78,22 @@ bundle exec rspec
 With the repository's test container: `miru-test 'cd services/timekeeping && bin/rails db:prepare && bundle exec rspec'`.
 This suite is where the provider side of the contract tests runs (§12.3): `spec/support/contracts.rb`
 checks answers against the same schemas the existing application's consumer and fakes read. It has its
-own bundle, so the existing application's CI job (`bin/parallel_test`) does not run it; a CI job of its
-own, which would also build this service's image, is not wired up yet.
+own bundle, so the existing application's CI job (`bin/parallel_test`) does not run it.
+
+Its own CI is `bin/ci`, which runs the same on a developer machine as in a CI job:
+
+```sh
+services/timekeeping/bin/ci tests   # this suite, on its own timekeeping_test database
+TIMEKEEPING_CI_DATABASE_URL=postgres://…/timekeeping_production services/timekeeping/bin/ci image
+```
+
+`image` builds this service's image from the repository root with the commit as `REVISION` (or
+`REVISION` as given), checks the revision label, and boots it on that empty database with throwaway
+credentials: the web process must migrate it and answer `GET /up`, and the relay's worker must start.
+Both containers are removed when it ends. `spec/config/timekeeping_ci_spec.rb`, in the existing
+application's suite, runs `image` against stand-ins for `docker` and `curl`. A GitHub workflow that runs
+both steps whenever this service or `packages/timekeeping_reservations` changes is not in the
+repository yet: this repository's automation is not allowed to write workflow files.
 
 To build and run the image, from the repository root:
 

@@ -16,4 +16,5 @@ services/timekeeping/.env*
 # The image runs the service, not its tests.
 services/timekeeping/spec/
 services/timekeeping/.rspec
+services/timekeeping/bin/ci
 packages/timekeeping_reservations/spec/
