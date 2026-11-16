@@ -301,6 +301,14 @@ RSpec.describe "Timekeeping local demo runtime" do
       expect(docker_calls.last).to end_with("exec miru-web bin/rails timekeeping:journey")
     end
 
+    it "runs the alternating-writers proof in the existing application" do
+      run("init")
+
+      _out, err, status = run("alternating-writers")
+      expect(status).to be_success, err
+      expect(docker_calls.last).to end_with("exec miru-web bin/rails timekeeping:alternating_writers")
+    end
+
     # The independent-deployment proof (§13 item 4) and its contract check,
     # against a stand-in for docker that keeps one container per service, and
     # gives a service a new container, and so a new image, each time it is
