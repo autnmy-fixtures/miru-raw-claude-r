@@ -377,10 +377,10 @@ class Timekeeping::StaleGenerationCheck
     end
 
     # Current.user and the request id are what the gateway's claims read.
-    def as_caller(tenant, request_id)
+    def as_caller(tenant, request_id, &)
       saved = Rails.event.context.dup
       Rails.event.set_context(request_id:)
-      Current.set(user: User.find(tenant[:employee_id]), company: tenant[:company]) { yield }
+      Current.set(user: User.find(tenant[:employee_id]), company: tenant[:company], &)
     ensure
       Rails.event.clear_context
       Rails.event.set_context(saved) if saved.present?

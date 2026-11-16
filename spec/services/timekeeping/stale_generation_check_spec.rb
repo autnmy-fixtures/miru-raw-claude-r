@@ -79,7 +79,7 @@ RSpec.describe Timekeeping::StaleGenerationCheck, type: :request do
       held = entries_of(tenant)
       aggregate_failures do
         # One X and one Y were ever created: no refused create wrote one.
-        expect(held.map { |entry| entry["note"] }).to contain_exactly(
+        expect(held.pluck("note")).to contain_exactly(
           "Stale generation #{run_name} X edited", "Stale generation #{run_name} Y"
         )
         expect(held).to all(include("discarded_at" => be_present))
