@@ -188,17 +188,87 @@ RSpec.describe "Timekeeping CI script" do
   end
 
   describe "tests" do
-    it "runs Timekeeping's own suite from its own directory, after preparing its own test database" do
+    it "runs Timekeeping's own suite from its own directory, after preparing its own test database, then the package's specs" do
       body = File.read(script)[/^cmd_tests\(\) \{\n(.*?)^\}/m, 1]
 
-      expect(body.lines.map(&:strip)).to eq(
-        ['cd "${SERVICE_DIR}"', "RAILS_ENV=test bin/rails db:prepare", "RAILS_ENV=test bundle exec rspec"]
+      expect(body.lines.map(&:strip).reject { |line| line.start_with?("#") }).to eq(
+        [
+          'cd "${SERVICE_DIR}"',
+          "RAILS_ENV=test bin/rails db:prepare",
+          "RAILS_ENV=test bundle exec rspec",
+          'bundle exec rspec --options /dev/null "${ROOT}/packages/timekeeping_reservations/spec"'
+        ]
       )
+      expect(Rails.root.glob("packages/timekeeping_reservations/spec/*_spec.rb")).not_to be_empty
       expect(Rails.root.join("services/timekeeping/config/database.yml").read).to include("database: timekeeping_test")
     end
 
     it "is the only runner of Timekeeping's suite: the existing application's runner leaves services/ out" do
       expect(Rails.root.join("bin/parallel_test").read).not_to include("services/")
+    end
+  end
+
+  # .github/workflows/timekeeping.yml: a thin wrapper that provides Ruby and
+  # Postgres and runs each step of bin/ci as its own job.
+  describe "the GitHub workflow" do
+    let(:workflow) { YAML.safe_load_file(Rails.root.join(".github/workflows/timekeeping.yml")) }
+    let(:jobs) { workflow.fetch("jobs") }
+    let(:watched) do
+      ["services/timekeeping/**", "packages/timekeeping_reservations/**", ".github/workflows/timekeeping.yml"]
+    end
+
+    def postgres(job)
+      jobs.fetch(job).dig("services", "postgres", "env")
+    end
+
+    it "runs on every push and pull request that changes this service, the shared package or itself" do
+      # YAML 1.1 reads the key `on` as true.
+      triggers = workflow.fetch(true)
+
+      expect(triggers.dig("push", "paths")).to match_array(watched)
+      expect(triggers.dig("pull_request", "paths")).to match_array(watched)
+      expect(triggers.dig("push", "branches")).to include("main")
+      expect(triggers.dig("pull_request", "branches")).to include("main")
+      expect(triggers).to have_key("workflow_dispatch")
+    end
+
+    it "runs each step of bin/ci as its own job, and nothing else" do
+      runs = jobs.transform_values { |job| job.fetch("steps").filter_map { |step| step["run"] } }
+
+      expect(runs).to eq(
+        "tests" => ["services/timekeeping/bin/ci tests"],
+        "image" => ["services/timekeeping/bin/ci image"]
+      )
+    end
+
+    it "gives the tests job the test database bin/rails reads" do
+      env = jobs.dig("tests", "env")
+
+      expect(postgres("tests")).to include(
+        "POSTGRES_DB" => "timekeeping_test", "POSTGRES_USER" => env["DB_USER"], "POSTGRES_PASSWORD" => env["DB_PASS"]
+      )
+      expect(env["DB_HOST"]).to eq("localhost")
+      setup_ruby = jobs.dig("tests", "steps").find { |step| step["uses"].to_s.start_with?("ruby/setup-ruby@") }
+      expect(setup_ruby.fetch("with")).to include(
+        "working-directory" => "services/timekeeping",
+        "ruby-version" => Rails.root.join("services/timekeeping/.ruby-version").read.strip.delete_prefix("ruby-")
+      )
+    end
+
+    it "boots the image on the image job's own empty database" do
+      url = URI.parse(jobs.dig("image", "env", "TIMEKEEPING_CI_DATABASE_URL"))
+      db = postgres("image")
+
+      expect([url.host, url.port, url.path.delete_prefix("/")]).to eq(["127.0.0.1", 5432, db["POSTGRES_DB"]])
+      expect([url.user, url.password]).to eq([db["POSTGRES_USER"], db["POSTGRES_PASSWORD"]])
+      expect(jobs.dig("image", "services", "postgres", "ports")).to eq(["5432:5432"])
+    end
+
+    it "pins every action to a commit, as the existing workflows do" do
+      uses = jobs.values.flat_map { |job| job.fetch("steps").filter_map { |step| step["uses"] } }
+
+      expect(uses).to all(match(/@\h{40}\z/))
+      expect(jobs.values.pluck("permissions")).to all(eq("contents" => "read"))
     end
   end
 

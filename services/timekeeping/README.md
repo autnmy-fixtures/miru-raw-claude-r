@@ -83,7 +83,7 @@ own bundle, so the existing application's CI job (`bin/parallel_test`) does not 
 Its own CI is `bin/ci`, which runs the same on a developer machine as in a CI job:
 
 ```sh
-services/timekeeping/bin/ci tests   # this suite, on its own timekeeping_test database
+services/timekeeping/bin/ci tests   # this suite on its own timekeeping_test database, then the package's specs
 TIMEKEEPING_CI_DATABASE_URL=postgres://…/timekeeping_production services/timekeeping/bin/ci image
 ```
 
@@ -91,9 +91,14 @@ TIMEKEEPING_CI_DATABASE_URL=postgres://…/timekeeping_production services/timek
 `REVISION` as given), checks the revision label, and boots it on that empty database with throwaway
 credentials: the web process must migrate it and answer `GET /up`, and the relay's worker must start.
 Both containers are removed when it ends. `spec/config/timekeeping_ci_spec.rb`, in the existing
-application's suite, runs `image` against stand-ins for `docker` and `curl`. A GitHub workflow that runs
-both steps whenever this service or `packages/timekeeping_reservations` changes is not in the
-repository yet: this repository's automation is not allowed to write workflow files.
+application's suite, runs `image` against stand-ins for `docker` and `curl`. `tests` also runs
+`packages/timekeeping_reservations/spec`, the decision table row by row (§12.3), which neither bundle's
+suite loads.
+
+`.github/workflows/timekeeping.yml` runs both steps as two jobs, `Timekeeping specs` and `Timekeeping
+image`, on every push and pull request that changes this service, `packages/timekeeping_reservations`
+or the workflow itself. Each job has its own throwaway Postgres service; the workflow only provides
+Ruby and Postgres, and every step is in `bin/ci`. `spec/config/timekeeping_ci_spec.rb` checks that wiring.
 
 To build and run the image, from the repository root:
 
