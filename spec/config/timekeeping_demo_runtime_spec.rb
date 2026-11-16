@@ -322,7 +322,14 @@ RSpec.describe "Timekeeping local demo runtime" do
     # after a line of boot noise, and FAKE_REFUSED_STATUS how
     # timekeeping:user_delete_refused:paused exits. `up` starts a stopped
     # service again; FAKE_HELD_STATUS and FAKE_OUTAGE_STATUS are how
-    # timekeeping:aggregate_line:held and :outage exit.
+    # timekeeping:aggregate_line:held and :outage exit. FAKE_HANDOFF is the
+    # task timekeeping:billing_handoff:handoff names, after a line of boot
+    # noise; a marker of the billing-handoff run is there unless
+    # FAKE_MISSING_MARKER names it; FAKE_BILLING_PAUSED_STATUS and
+    # FAKE_BILLING_REFUSED_STATUS are how timekeeping:billing_handoff:paused and
+    # :refused exit. A handoff task stops on its first run, as with
+    # timekeeping-web stopped, and finishes when run again, unless
+    # FAKE_HANDOFF_FINISHES is set, when it finishes at once.
     context "with running applications" do
       let(:record_dir) { dir.join("deploys") }
       let(:fakes) { {} }
@@ -347,6 +354,24 @@ RSpec.describe "Timekeeping local demo runtime" do
                 fi ;;
               exec)
                 case "$*" in
+                  *"sh -c test -f '"*)
+                    marker="${!#}"; marker="${marker##*/}"; marker="${marker%?}"
+                    [ "${marker}" != "${FAKE_MISSING_MARKER:-}" ]; exit $? ;;
+                  *" touch tmp/timekeeping/billing-handoff/"*) touch "${state}/released" ;;
+                  *timekeeping:billing_handoff:handoff*) echo "booting"; echo "${FAKE_HANDOFF-timekeeping:rollback}" ;;
+                  *timekeeping:billing_handoff:paused*)
+                    echo "billing handoff: paused"
+                    exit "${FAKE_BILLING_PAUSED_STATUS:-0}" ;;
+                  *timekeeping:billing_handoff:refused*)
+                    echo "billing handoff: refused, timekeeping-web stopped: $([ -e "${state}/stopped-timekeeping-web" ] && echo yes || echo no)"
+                    exit "${FAKE_BILLING_REFUSED_STATUS:-0}" ;;
+                  *timekeeping:billing_handoff:resumed*) echo "billing handoff: accepted again" ;;
+                  *"-T miru-web bin/rails timekeeping:rollback"|*"-T miru-web bin/rails timekeeping:first_cutover"|*"-T miru-web bin/rails timekeeping:recutover")
+                    if [ -z "${FAKE_HANDOFF_FINISHES:-}" ] && [ ! -e "${state}/handoff-stopped" ]; then
+                      touch "${state}/handoff-stopped"
+                      echo "Timekeeping handoff stopped: Unavailable"; exit 1
+                    fi
+                    echo "Timekeeping handoff: done" ;;
                   *"timekeeping-web sh -c"*) echo "${FAKE_TIMEKEEPING_CONTRACTS:-0a1b  entry_api.json}" ;;
                   *"miru-web sh -c"*) echo "0a1b  entry_api.json" ;;
                   *timekeeping:contract_check*) echo "contract check: every contract held"; exit "${FAKE_CHECK_STATUS:-0}" ;;
@@ -683,6 +708,135 @@ RSpec.describe "Timekeeping local demo runtime" do
             expect(status).not_to be_success
             expect(err).to include("timekeeping-web still runs after it was stopped")
             expect(steps.map(&:split).map(&:first)).to eq(%w[held stop start])
+          end
+        end
+      end
+
+      describe "the billing-writes-during-a-handoff proof (§12.4)" do
+        let(:marker_dir) { "tmp/timekeeping/billing-handoff" }
+
+        def steps
+          docker_calls.filter_map do |call|
+            case call
+            when /exec -T --env RUN=(\S+) miru-web bin\/rails timekeeping:billing_handoff:(\w+)\z/
+              "#{Regexp.last_match(2)} #{Regexp.last_match(1)}"
+            when /exec -T miru-web sh -c test -f '#{marker_dir}\/\S+\/(\w+)'\z/ then "marker #{Regexp.last_match(1)}"
+            when /exec -T miru-web touch #{marker_dir}\/\S+\/release\z/ then "release"
+            when /exec -T miru-web bin\/rails (timekeeping:\w+)\z/ then Regexp.last_match(1)
+            when / stop timekeeping-web\z/ then "stop web"
+            when / up --detach --wait --no-deps --no-recreate timekeeping-web\z/ then "start web"
+            end
+          end
+        end
+
+        def kinds = steps.map { |step| step.split.first }
+
+        # The paused write and the handoff's first run go to the background,
+        # so where their calls land among the script's own is not fixed: these
+        # are the calls the script makes in turn, which keep their order.
+        def foreground
+          in_turn = steps.reject { |step| step.start_with?("paused ") }
+          first_run = in_turn.index { |step| step.start_with?("timekeeping:") }
+          in_turn.tap { |calls| calls.delete_at(first_run) if first_run }
+        end
+
+        def foreground_kinds = foreground.map { |step| step.split.first }
+
+        it "pauses a billing write, starts the handoff it waits on, stops timekeeping-web, releases the write, runs the refused " \
+           "step, starts timekeeping-web again, resumes the handoff and runs the resumed step, under one run" do
+          out, err, status = run("billing-handoff")
+          expect(status).to be_success, err
+
+          run_name = steps.first.split.last
+          expect(run_name).to match(/\A\d{8}T\d{6}Z-\h{4}\z/)
+          expect(steps).to include("paused #{run_name}")
+          expect(steps.count("timekeeping:rollback")).to eq(2)
+          expect(foreground).to eq([
+            "handoff #{run_name}", "marker admitted", "marker waiting", "stop web", "release", "refused #{run_name}",
+            "start web", "timekeeping:rollback", "resumed #{run_name}"
+          ])
+          expect(out).to include(
+            "handing over with timekeeping:rollback",
+            "Timekeeping handoff stopped: Unavailable",
+            "billing handoff: refused, timekeeping-web stopped: yes",
+            "Timekeeping handoff: done",
+            "billing handoff: accepted again",
+            "billing writes were refused with 503 ownership-moving while it ran"
+          )
+          expect(dir.join("billing-handoff/#{run_name}.log").read).to include("Timekeeping handoff stopped: Unavailable")
+          expect(docker_calls.join("\n")).not_to match(/ (stop|start|up|build) .*(miru-|timekeeping-relay)/)
+        end
+
+        context "when the existing application names the re-cutover" do
+          let(:fakes) { { "FAKE_HANDOFF" => "timekeeping:recutover" } }
+
+          it "runs that handoff, and resumes it" do
+            _out, err, status = run("billing-handoff")
+
+            expect(status).to be_success, err
+            expect(kinds.grep(/\Atimekeeping:/)).to eq(%w[timekeeping:recutover timekeeping:recutover])
+          end
+        end
+
+        context "when the existing application names no handoff" do
+          let(:fakes) { { "FAKE_HANDOFF" => "" } }
+
+          it "pauses no billing write" do
+            _out, err, status = run("billing-handoff")
+
+            expect(status).not_to be_success
+            expect(err).to include("the existing application named no handoff to run: nothing")
+            expect(kinds).to eq(%w[handoff])
+          end
+        end
+
+        context "when the paused billing write ends without being admitted" do
+          let(:fakes) { { "FAKE_MISSING_MARKER" => "admitted", "FAKE_BILLING_PAUSED_STATUS" => "1" } }
+
+          it "starts no handoff and stops nothing" do
+            _out, err, status = run("billing-handoff")
+
+            expect(status).not_to be_success
+            expect(err).to include("the paused billing write was never admitted")
+            expect(kinds).to include("paused")
+            expect(foreground_kinds.uniq).to eq(%w[handoff marker])
+            expect(kinds.grep(/\Atimekeeping:/)).to be_empty
+          end
+        end
+
+        context "when the handoff is never seen waiting on the paused billing write" do
+          let(:fakes) { { "FAKE_MISSING_MARKER" => "waiting", "FAKE_BILLING_PAUSED_STATUS" => "1" } }
+
+          it "stops nothing and releases nothing" do
+            _out, err, status = run("billing-handoff")
+
+            expect(status).not_to be_success
+            expect(err).to include("the handoff's step 1 was never seen waiting on the paused billing write")
+            expect(kinds).not_to include("stop", "release", "refused")
+          end
+        end
+
+        context "when the handoff finishes while timekeeping-web is stopped" do
+          let(:fakes) { { "FAKE_HANDOFF_FINISHES" => "1" } }
+
+          it "fails before the refused step, and starts timekeeping-web again" do
+            _out, err, status = run("billing-handoff")
+
+            expect(status).not_to be_success
+            expect(err).to include("timekeeping:rollback finished while timekeeping-web was stopped")
+            expect(foreground_kinds.last(3)).to eq(%w[stop release start])
+          end
+        end
+
+        context "when the refused step fails" do
+          let(:fakes) { { "FAKE_BILLING_REFUSED_STATUS" => "1" } }
+
+          it "starts timekeeping-web again and does not resume the handoff" do
+            _out, _err, status = run("billing-handoff")
+
+            expect(status).not_to be_success
+            expect(foreground_kinds.last(3)).to eq(%w[release refused start])
+            expect(kinds.grep(/\Atimekeeping:/).size).to eq(1)
           end
         end
       end

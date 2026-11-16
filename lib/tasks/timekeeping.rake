@@ -138,6 +138,33 @@
 # waits on a worker (60 by default). bin/timekeeping-demo aggregate-line
 # stops and starts timekeeping-web around the outage step.
 #
+# The billing-writes-during-a-handoff proof (§12.4, §10.1,
+# Timekeeping::BillingHandoffCheck), under any owner with admission open, in
+# four steps around the handoff that owner hands over with; RUN names the
+# writes of one run, the same for all four:
+#
+#   bin/rails timekeeping:billing_handoff:handoff  print the handoff task to
+#                                                  run (first_cutover,
+#                                                  rollback or recutover)
+#   bin/rails timekeeping:billing_handoff:paused   a billing write paused
+#                                                  inside its transaction,
+#                                                  until the handoff's step 1
+#                                                  waits on it and the run's
+#                                                  release marker is written
+#   bin/rails timekeeping:billing_handoff:refused  with the handoff stopped
+#                                                  after its step 1: invoice,
+#                                                  line-item, invoice-tax and
+#                                                  payment writes are refused
+#                                                  with 503 ownership-moving
+#   bin/rails timekeeping:billing_handoff:resumed  once the handoff finished:
+#                                                  a payment is accepted again
+#
+# Each exits 1 at the first check that fails. They sign in as the journey
+# does (MIRU_URL, MIRU_SEED_PASSWORD), and CHECK_WAIT sets the seconds a step
+# waits on another process (60 by default). bin/timekeeping-demo
+# billing-handoff starts the handoff, stops and starts timekeeping-web, and
+# writes the release around them.
+#
 # What the existing application measures of its Timekeeping machinery
 # (§11.3, Timekeeping::Signals), read once, for an operator or a script:
 #
@@ -464,6 +491,49 @@ namespace :timekeeping do
     desc "With Timekeeping started again: the reservations held, and destroying the draft releases its whole set (docs/architecture/timekeeping-soa.md 12.4, F3; RUN)"
     task restored: :environment do
       TimekeepingAggregateLineTask.run(:restored)
+    end
+  end
+end
+
+module TimekeepingBillingHandoffTask
+  def self.check
+    Timekeeping::BillingHandoffCheck.new(
+      client: Timekeeping::PublicApi::Client.new(base_url: ENV.fetch("MIRU_URL", "http://127.0.0.1:3000")),
+      password: ENV.fetch("MIRU_SEED_PASSWORD") { abort "MIRU_SEED_PASSWORD is the seeded users' password; the check signs in with it" },
+      run: ENV.fetch("RUN") { abort "RUN names the writes of one run; give every step the same one" },
+      logger: TimekeepingFirstCutoverTask.logger,
+      options: Timekeeping::BillingHandoffCheck::Options.new(wait: Integer(ENV.fetch("CHECK_WAIT", Timekeeping::PublicApi::DEFAULT_WAIT)))
+    )
+  end
+
+  def self.run(step)
+    result = check.public_send(step)
+    puts result if step == :handoff
+  rescue Timekeeping::BillingHandoffCheck::Failed => error
+    abort "Timekeeping billing-handoff proof failed (#{step}): #{error.message}"
+  end
+end
+
+namespace :timekeeping do
+  namespace :billing_handoff do
+    desc "Print the handoff task the current owner hands over with, for the billing-handoff proof (docs/architecture/timekeeping-soa.md 12.4; RUN)"
+    task handoff: :environment do
+      TimekeepingBillingHandoffTask.run(:handoff)
+    end
+
+    desc "A billing write paused inside its transaction until the handoff's step 1 waits on it (docs/architecture/timekeeping-soa.md 12.4; RUN)"
+    task paused: :environment do
+      TimekeepingBillingHandoffTask.run(:paused)
+    end
+
+    desc "With the handoff stopped after its step 1: billing writes are refused with 503 ownership-moving (docs/architecture/timekeeping-soa.md 12.4; RUN)"
+    task refused: :environment do
+      TimekeepingBillingHandoffTask.run(:refused)
+    end
+
+    desc "Once the handoff finished: a payment is accepted again (docs/architecture/timekeeping-soa.md 12.4; RUN)"
+    task resumed: :environment do
+      TimekeepingBillingHandoffTask.run(:resumed)
     end
   end
 end
