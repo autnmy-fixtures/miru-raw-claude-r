@@ -38,7 +38,8 @@
 #
 # The rollback's reconcile (Timekeeping::RollbackReconcile) runs the same
 # checks through .differences, against the checkpoint taken from Timekeeping,
-# under its own guard.
+# under its own guard, and the re-cutover's (Timekeeping::RecutoverReconcile)
+# runs them through the rollback's.
 module Timekeeping::CheckpointReconcile
   OutOfStep = TimekeepingReservations::Handoff::OutOfStep
 
