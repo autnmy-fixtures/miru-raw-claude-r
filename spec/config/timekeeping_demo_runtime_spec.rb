@@ -346,7 +346,13 @@ RSpec.describe "Timekeeping local demo runtime" do
     # FAKE_PROJECTED_STATUS and FAKE_DOWN_STATUS are how
     # timekeeping:consumer_down:projected and :down exit, and
     # FAKE_RESTART_ON_DOWN gives timekeeping-relay a new container during
-    # :down.
+    # :down. While timekeeping-relay is stopped, the signals count
+    # FAKE_UNDELIVERED_STOPPED (4) positions undelivered, and
+    # FAKE_UNDELIVERED_RESENT (the same) once timekeeping:redeliver has run.
+    # timekeeping:redelivery:held's last line names FAKE_REDELIVERY_ENTRIES
+    # (11 12 21 22); FAKE_REDELIVERY_HELD_STATUS, FAKE_REDELIVER_STATUS and
+    # FAKE_REDELIVERY_REORDERED_STATUS are how :held, timekeeping:redeliver
+    # and :reordered exit.
     context "with running applications" do
       let(:record_dir) { dir.join("deploys") }
       let(:fakes) { {} }
@@ -390,7 +396,10 @@ RSpec.describe "Timekeeping local demo runtime" do
                     if [ -e "${state}/consumer-down" ]; then echo "unreachable Errno::ECONNREFUSED"; else echo "reached ${FAKE_CONSUMER_STATUS:-200}"; fi ;;
                   *"-T timekeeping-web bin/rails timekeeping:signals")
                     echo "ownership: generation 1, owner timekeeping, state open"
-                    if [ -e "${state}/consumer-down" ]; then undelivered="${FAKE_UNDELIVERED_DOWN:-3}"; else undelivered="${FAKE_UNDELIVERED_UP:-0}"; fi
+                    if [ -e "${state}/consumer-down" ]; then undelivered="${FAKE_UNDELIVERED_DOWN:-3}"
+                    elif [ -e "${state}/stopped-timekeeping-relay" ] && [ -e "${state}/resent" ]; then undelivered="${FAKE_UNDELIVERED_RESENT:-${FAKE_UNDELIVERED_STOPPED:-4}}"
+                    elif [ -e "${state}/stopped-timekeeping-relay" ]; then undelivered="${FAKE_UNDELIVERED_STOPPED:-4}"
+                    else undelivered="${FAKE_UNDELIVERED_UP:-0}"; fi
                     echo "relay lag: 2.5 s, ${undelivered} position(s) undelivered"
                     echo "no alerts" ;;
                   *timekeeping:consumer_down:projected*)
@@ -400,6 +409,21 @@ RSpec.describe "Timekeeping local demo runtime" do
                     echo "consumer down: stale, consumer down: $([ -e "${state}/consumer-down" ] && echo yes || echo no)"
                     [ -z "${FAKE_RESTART_ON_DOWN:-}" ] || echo 2 > "${state}/timekeeping-relay"
                     exit "${FAKE_DOWN_STATUS:-0}" ;;
+                  *timekeeping:redelivery:projected*)
+                    echo "redelivery: projected, relay stopped: $([ -e "${state}/stopped-timekeeping-relay" ] && echo yes || echo no)" ;;
+                  *timekeeping:redelivery:held*)
+                    echo "redelivery: held, relay stopped: $([ -e "${state}/stopped-timekeeping-relay" ] && echo yes || echo no)"
+                    echo "redelivery: entries: ${FAKE_REDELIVERY_ENTRIES-11 12 21 22}"
+                    exit "${FAKE_REDELIVERY_HELD_STATUS:-0}" ;;
+                  *" timekeeping-web bin/rails timekeeping:redeliver")
+                    touch "${state}/resent"
+                    echo "redelivery: resent, relay stopped: $([ -e "${state}/stopped-timekeeping-relay" ] && echo yes || echo no)"
+                    exit "${FAKE_REDELIVER_STATUS:-0}" ;;
+                  *timekeeping:redelivery:reordered*)
+                    echo "redelivery: reordered, relay stopped: $([ -e "${state}/stopped-timekeeping-relay" ] && echo yes || echo no)"
+                    exit "${FAKE_REDELIVERY_REORDERED_STATUS:-0}" ;;
+                  *timekeeping:redelivery:duplicated*)
+                    echo "redelivery: duplicated, relay stopped: $([ -e "${state}/stopped-timekeeping-relay" ] && echo yes || echo no)" ;;
                   *timekeeping:consumer_down:restored*)
                     echo "consumer down: caught up, consumer down: $([ -e "${state}/consumer-down" ] && echo yes || echo no)" ;;
                   *"sh -c test -f '"*)
@@ -1223,6 +1247,142 @@ RSpec.describe "Timekeeping local demo runtime" do
             expect(status).not_to be_success
             expect(foreground_kinds.last(3)).to eq(%w[release refused start])
             expect(kinds.grep(/\Atimekeeping:/).size).to eq(1)
+          end
+        end
+      end
+
+      describe "the duplicate-and-reordered-delivery proof (§13 item 6)" do
+        def steps
+          docker_calls.filter_map do |call|
+            case call
+            when /exec -T --env RUN=(\S+) miru-web bin\/rails timekeeping:redelivery:(\w+)\z/ then "#{Regexp.last_match(2)} #{Regexp.last_match(1)}"
+            when /exec -T --env ENTRIES=(.+) timekeeping-web bin\/rails timekeeping:redeliver\z/ then "redeliver #{Regexp.last_match(1)}"
+            when /exec -T timekeeping-web bin\/rails timekeeping:signals\z/ then "signals"
+            when / (stop|start) timekeeping-relay\z/ then "#{Regexp.last_match(1)} relay"
+            end
+          end
+        end
+
+        def run_name = steps.first[/\Aprojected (\S+)\z/, 1]
+
+        it "stops the relay around the held step and the resend, then starts it and waits for its delivery, under one run name" do
+          out, err, status = run("redelivery")
+          expect(status).to be_success, err
+
+          expect(run_name).to match(/\A\d{8}T\d{6}Z-\h{4}\z/)
+          expect(steps).to eq([
+            "projected #{run_name}", "stop relay", "held #{run_name}", "signals", "redeliver 11 12 21 22",
+            "reordered #{run_name}", "signals", "start relay", "signals", "duplicated #{run_name}"
+          ])
+          expect(out).to include(
+            "redelivery: projected, relay stopped: no", "redelivery: held, relay stopped: yes",
+            "redelivery: resent, relay stopped: yes", "redelivery: reordered, relay stopped: yes",
+            "redelivery: duplicated, relay stopped: no",
+            "the projection applied only each entry's newest snapshot when they arrived out of order"
+          )
+          expect(err).to include("relay lag: 2.5 s, 4 position(s) undelivered", "relay lag: 2.5 s, 0 position(s) undelivered")
+          expect(docker_calls.join("\n")).not_to match(/ (up|build|kill|restart) /)
+          output = dir.glob("redelivery/*.log").sole
+          expect(output.basename(".log").to_s).to eq(run_name)
+          expect(output.read).to include("redelivery: entries: 11 12 21 22", "redelivery: resent", "redelivery: duplicated")
+        end
+
+        context "when the held step fails" do
+          let(:fakes) { { "FAKE_REDELIVERY_HELD_STATUS" => "1" } }
+
+          it "starts the relay again and resends nothing" do
+            _out, _err, status = run("redelivery")
+
+            expect(status).not_to be_success
+            expect(steps.last(2)).to eq(["held #{run_name}", "start relay"])
+            expect(steps.grep(/\Aredeliver /)).to be_empty
+          end
+        end
+
+        context "when the held step names no entry" do
+          let(:fakes) { { "FAKE_REDELIVERY_ENTRIES" => "" } }
+
+          it "fails, starts the relay again, and resends nothing" do
+            _out, err, status = run("redelivery")
+
+            expect(status).not_to be_success
+            expect(err).to include("the held step named no entry")
+            expect(steps.last).to eq("start relay")
+            expect(steps.grep(/\Aredeliver /)).to be_empty
+          end
+        end
+
+        context "when the relay keeps running after it was stopped" do
+          let(:fakes) { { "FAKE_STOP_IGNORED" => "timekeeping-relay" } }
+
+          it "fails before the held step" do
+            _out, err, status = run("redelivery")
+
+            expect(status).not_to be_success
+            expect(err).to include("timekeeping-relay still runs after it was stopped")
+            expect(steps.grep(/\Aheld /)).to be_empty
+          end
+        end
+
+        context "when Timekeeping counts nothing undelivered while its relay is stopped" do
+          let(:fakes) { { "FAKE_UNDELIVERED_STOPPED" => "0" } }
+
+          it "fails, starts the relay again, and resends nothing" do
+            _out, err, status = run("redelivery")
+
+            expect(status).not_to be_success
+            expect(err).to include("Timekeeping counts no snapshot undelivered while its relay is stopped")
+            expect(steps.last).to eq("start relay")
+            expect(steps.grep(/\Aredeliver /)).to be_empty
+          end
+        end
+
+        context "when the resend fails" do
+          let(:fakes) { { "FAKE_REDELIVER_STATUS" => "1" } }
+
+          it "starts the relay again and runs no later step" do
+            _out, _err, status = run("redelivery")
+
+            expect(status).not_to be_success
+            expect(steps.last(2)).to eq(["redeliver 11 12 21 22", "start relay"])
+            expect(steps.grep(/\A(reordered|duplicated) /)).to be_empty
+          end
+        end
+
+        context "when the resend marked the outbox" do
+          let(:fakes) { { "FAKE_UNDELIVERED_RESENT" => "1" } }
+
+          it "fails after the reordered step, and starts the relay again" do
+            _out, err, status = run("redelivery")
+
+            expect(status).not_to be_success
+            expect(err).to include("Timekeeping counts 1 snapshots undelivered after the resend, fewer than the 4 before it")
+            expect(steps.last(2)).to eq(["signals", "start relay"])
+            expect(steps.grep(/\Aduplicated /)).to be_empty
+          end
+        end
+
+        context "when the relay does not deliver what it held once started" do
+          let(:fakes) { { "FAKE_UNDELIVERED_UP" => "2", "CHECK_WAIT" => "0" } }
+
+          it "fails without the duplicated step" do
+            out, err, status = run("redelivery")
+
+            expect(status).not_to be_success
+            expect(err).to include("Timekeeping still counts 2 snapshots undelivered 0 s after the relay started")
+            expect(steps.grep(/\Aduplicated /)).to be_empty
+            expect(out).not_to include("changed nothing")
+          end
+        end
+
+        context "when a process is not running" do
+          it "runs nothing" do
+            run("compose", "stop", "miru-jobs")
+            _out, err, status = run("redelivery")
+
+            expect(status).not_to be_success
+            expect(err).to include("miru-jobs is not running")
+            expect(steps).to be_empty
           end
         end
       end

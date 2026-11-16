@@ -105,6 +105,17 @@
 #                                    the same relay's resend brings the
 #                                    projection to Timekeeping's versions;
 #                                    while Timekeeping owns the entries
+#   bin/timekeeping-demo redelivery
+#                                    the duplicate-and-reordered-delivery
+#                                    proof (§13 item 6): with Timekeeping's
+#                                    relay stopped after entries changed,
+#                                    Timekeeping resends their snapshots
+#                                    newest first, then each older one, then
+#                                    all again, and the projection applies
+#                                    only the newest; with the relay started,
+#                                    its second delivery of every one changes
+#                                    nothing; while Timekeeping owns the
+#                                    entries
 #   bin/timekeeping-demo down        stop everything; the databases are kept
 #   bin/timekeeping-demo compose …   any other docker compose command
 #
@@ -692,6 +703,67 @@ cmd_consumer_down() {
   echo "== consumer down: entries were listed and invoiced at once while the relay's ${refused} deliveries were refused, and once the consumer was back the same relay delivered every snapshot and the projection holds Timekeeping's versions"
 }
 
+# Waits until Timekeeping's signals count no outbox position undelivered, for
+# at most CHECK_WAIT seconds (60 by default).
+wait_until_delivered() {
+  local undelivered deadline=$((SECONDS + ${CHECK_WAIT:-60}))
+  while :; do
+    undelivered="$(undelivered_positions)"
+    [ "${undelivered}" != 0 ] || return 0
+    [ "${SECONDS}" -lt "${deadline}" ] || die "Timekeeping still counts ${undelivered:-an unknown number of} snapshots undelivered ${CHECK_WAIT:-60} s after the relay started"
+    sleep 1
+  done
+}
+
+# The duplicate-and-reordered-delivery part of §13 item 6, while Timekeeping
+# owns the entries: with the relay running, entry X is projected
+# (bin/rails timekeeping:redelivery:projected). Then timekeeping-relay is
+# stopped: X is edited twice, Y written and edited, both reserved by a draft,
+# and the projection stays behind (timekeeping:redelivery:held, whose last
+# line names the entries). In timekeeping-web, Timekeeping resends those
+# entries' outbox snapshots through its relay's own call, newest first, then
+# each older one alone, then all of them again, and checks each receipt: the
+# newest applied, every other ignored (bin/rails timekeeping:redeliver,
+# OutboxRedelivery). The projection then holds both as Timekeeping does,
+# with the relay still stopped (timekeeping:redelivery:reordered), and the
+# outbox still counts them undelivered. Then the relay is started, delivers
+# every one of them a second time, and the projection is unchanged
+# (timekeeping:redelivery:duplicated). The miru-web steps run under one run
+# name. The relay is started again however the steps between end. The
+# output is kept under tmp/timekeeping-demo/redelivery.
+cmd_redelivery() {
+  local run output ids held left
+  require_env_file
+  processes "${EXISTING_SERVICES[@]}" "${TIMEKEEPING_SERVICES[@]}" > /dev/null
+  run="$(date -u +%Y%m%dT%H%M%SZ)-$(secret 2)"
+  output="$(dirname "${ENV_FILE}")/redelivery/${run}.log"
+  mkdir -p "$(dirname "${output}")"
+  echo "== redelivery: run ${run}"
+  compose exec -T --env "RUN=${run}" miru-web bin/rails timekeeping:redelivery:projected | tee "${output}"
+
+  echo "== stopping Timekeeping's relay"
+  trap resume_relay EXIT
+  compose stop timekeeping-relay
+  [ -z "$(process_state timekeeping-relay)" ] || die "timekeeping-relay still runs after it was stopped"
+  compose exec -T --env "RUN=${run}" miru-web bin/rails timekeeping:redelivery:held | tee -a "${output}"
+  ids="$(sed -n 's/^redelivery: entries: //p' "${output}" | tail -n 1)"
+  [ -n "${ids}" ] || die "the held step named no entry"
+  held="$(undelivered_positions)"
+  [ "${held:-0}" -gt 0 ] || die "Timekeeping counts no snapshot undelivered while its relay is stopped"
+
+  echo "== Timekeeping resends the snapshots of entries ${ids}: newest first, then each older one, then all again"
+  compose exec -T --env "ENTRIES=${ids}" timekeeping-web bin/rails timekeeping:redeliver | tee -a "${output}"
+  compose exec -T --env "RUN=${run}" miru-web bin/rails timekeeping:redelivery:reordered | tee -a "${output}"
+  left="$(undelivered_positions)"
+  [ "${left:-0}" -ge "${held}" ] || die "Timekeeping counts ${left:-no} snapshots undelivered after the resend, fewer than the ${held} before it, so the resend marked the outbox"
+
+  trap - EXIT
+  resume_relay
+  wait_until_delivered
+  compose exec -T --env "RUN=${run}" miru-web bin/rails timekeeping:redelivery:duplicated | tee -a "${output}"
+  echo "== redelivery: the projection applied only each entry's newest snapshot when they arrived out of order, and the relay's second delivery of all ${left} changed nothing"
+}
+
 cmd_handoff() {
   case "${1:-}" in
     first_cutover|first_cutover:abort|rollback|rollback:abort|recutover|recutover:abort) ;;
@@ -727,6 +799,7 @@ case "${1:-}" in
   hard-delete) cmd_hard_delete ;;
   stale-generation) cmd_stale_generation ;;
   consumer-down) cmd_consumer_down ;;
+  redelivery) cmd_redelivery ;;
   down) compose down ;;
   compose) shift; compose "$@" ;;
   ""|help|-h|--help) usage ;;
